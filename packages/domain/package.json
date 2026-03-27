@@ -1,0 +1,21 @@
+{
+  "name": "@g3-chat/domain",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check": "vp check",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "effect": "^3.18.4",
+    "tinybase": "^7.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite-plus": "catalog:"
+  }
+}

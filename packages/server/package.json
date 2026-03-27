@@ -1,0 +1,25 @@
+{
+  "name": "@g3-chat/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check": "vp check",
+    "test": "vp test"
+  },
+  "dependencies": {
+    "@g3-chat/domain": "workspace:*",
+    "better-auth": "^1.3.14",
+    "drizzle-orm": "^0.44.5",
+    "effect": "^3.18.4",
+    "tinybase": "^7.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260317.1",
+    "typescript": "^5.9.3",
+    "vite-plus": "catalog:"
+  }
+}
