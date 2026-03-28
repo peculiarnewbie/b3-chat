@@ -9,15 +9,7 @@ import {
   onMount,
 } from "solid-js";
 import { createStore } from "solid-js/store";
-import {
-  createMessage,
-  createThread,
-  createWorkspace,
-  nowIso,
-  summarizeThreadTitle,
-  TABLES,
-  VALUES,
-} from "@g3-chat/domain";
+import { LOCAL_VALUES, TABLES } from "@g3-chat/domain";
 import Markdown from "../components/Markdown";
 import { authClient } from "../lib/auth-client";
 import { syncClient } from "../lib/sync-client";
@@ -148,7 +140,7 @@ export default function Home() {
       .sort((a, b) => b.sortKey - a.sortKey),
   );
   const activeWorkspaceId = createMemo(
-    () => values()?.[VALUES.activeWorkspaceId] as string | undefined,
+    () => values()?.[LOCAL_VALUES.activeWorkspaceId] as string | undefined,
   );
   const activeWorkspace = createMemo(
     () => workspaces().find((workspace) => workspace.id === activeWorkspaceId()) ?? workspaces()[0],
@@ -159,7 +151,7 @@ export default function Home() {
       .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt)),
   );
   const activeThreadId = createMemo(
-    () => (values()?.[VALUES.activeThreadId] as string | undefined) ?? threads()[0]?.id,
+    () => (values()?.[LOCAL_VALUES.activeThreadId] as string | undefined) ?? threads()[0]?.id,
   );
   const activeThread = createMemo(
     () => threads().find((thread) => thread.id === activeThreadId()) ?? threads()[0],
@@ -187,41 +179,19 @@ export default function Home() {
   };
 
   const createNewWorkspace = async () => {
-    const workspace = createWorkspace({
-      name: `Workspace ${workspaces().length + 1}`,
-      defaultModelId: composer.modelId || models()?.models?.[0]?.id || "auto",
-    });
-    const thread = createThread({ workspaceId: workspace.id });
-    await syncClient.mutate({ type: "upsert-workspace", row: workspace });
-    await syncClient.mutate({ type: "upsert-thread", row: thread });
-    await syncClient.mutate({
-      type: "set-value",
-      key: VALUES.activeWorkspaceId,
-      value: workspace.id,
-    });
-    await syncClient.mutate({ type: "set-value", key: VALUES.activeThreadId, value: thread.id });
+    syncClient.createWorkspace(
+      `Workspace ${workspaces().length + 1}`,
+      composer.modelId || models()?.models?.[0]?.id || "auto",
+    );
   };
 
   const createNewThread = async () => {
     if (!activeWorkspace()) return;
-    const thread = createThread({ workspaceId: activeWorkspace()!.id });
-    await syncClient.mutate({ type: "upsert-thread", row: thread });
-    await syncClient.mutate({ type: "set-value", key: VALUES.activeThreadId, value: thread.id });
+    syncClient.createThread(activeWorkspace()!.id);
   };
 
   const deleteThread = async (threadId: string) => {
-    await syncClient.mutate({ type: "archive-thread", id: threadId, archivedAt: nowIso() });
-    // If we just deleted the active thread, switch to the first remaining thread
-    if (activeThreadId() === threadId) {
-      const remaining = threads().filter((t) => t.id !== threadId);
-      if (remaining[0]) {
-        await syncClient.mutate({
-          type: "set-value",
-          key: VALUES.activeThreadId,
-          value: remaining[0].id,
-        });
-      }
-    }
+    syncClient.archiveThread(threadId);
   };
 
   const sendMessage = async () => {
@@ -229,45 +199,17 @@ export default function Home() {
     setComposer("sending", true);
     try {
       const text = composer.text.trim();
-      const userMessage = createMessage({
-        threadId: activeThread()!.id,
-        role: "user",
+      syncClient.sendMessage({
+        thread: activeThread()!,
+        text,
         modelId:
           composer.modelId ||
           activeWorkspace()?.defaultModelId ||
           models()?.models?.[0]?.id ||
           "auto",
-        text,
-        searchEnabled: composer.search,
+        search: composer.search,
       });
-      const updatedThread = {
-        ...activeThread(),
-        title:
-          activeThread()!.title === "New Chat" ? summarizeThreadTitle(text) : activeThread()!.title,
-        updatedAt: nowIso(),
-        lastMessageAt: nowIso(),
-      };
-      await syncClient.mutate({ type: "upsert-thread", row: updatedThread });
-      await syncClient.mutate({ type: "upsert-message", row: userMessage });
       setComposer("text", "");
-
-      const response = await fetch(`/api/chat/threads/${activeThread()!.id}/stream`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          userMessageId: userMessage.id,
-          text,
-          modelId:
-            composer.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id,
-          search: composer.search,
-        }),
-      });
-      if (!response.ok || !response.body) throw new Error(await response.text());
-      const reader = response.body.getReader();
-      while (true) {
-        const { done } = await reader.read();
-        if (done) break;
-      }
     } finally {
       setComposer("sending", false);
     }
@@ -326,11 +268,7 @@ export default function Home() {
                 <button
                   classList={{ "nav-item": true, active: workspace.id === activeWorkspace()?.id }}
                   onClick={() => {
-                    void syncClient.mutate({
-                      type: "set-value",
-                      key: VALUES.activeWorkspaceId,
-                      value: workspace.id,
-                    });
+                    syncClient.setActiveWorkspaceId(workspace.id);
                     setSidebarOpen(false);
                   }}
                 >
@@ -345,11 +283,7 @@ export default function Home() {
                 <div
                   classList={{ "nav-item": true, active: thread.id === activeThread()?.id }}
                   onClick={() => {
-                    void syncClient.mutate({
-                      type: "set-value",
-                      key: VALUES.activeThreadId,
-                      value: thread.id,
-                    });
+                    syncClient.setActiveThreadId(thread.id);
                     setSidebarOpen(false);
                   }}
                 >

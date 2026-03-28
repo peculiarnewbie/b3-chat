@@ -10,16 +10,20 @@ export const TABLES = {
   searchResults: "search_results",
 } as const;
 
-export const VALUES = {
+export const LOCAL_VALUES = {
   activeWorkspaceId: "ui.activeWorkspaceId",
   activeThreadId: "ui.activeThreadId",
   sidebarQuery: "ui.sidebarQuery",
-  schemaVersion: "meta.schemaVersion",
-  lastCatalogRefreshAt: "meta.lastCatalogRefreshAt",
+  connectionStatus: "ui.connectionStatus",
 } as const;
 
 const NullableString = Schema.NullOr(Schema.String);
 const NullableNumber = Schema.NullOr(Schema.Number);
+
+const OptimisticRowFields = {
+  optimistic: Schema.Boolean,
+  opId: NullableString,
+} as const;
 
 export const WorkspaceRow = Schema.Struct({
   id: Schema.String,
@@ -32,6 +36,7 @@ export const WorkspaceRow = Schema.Struct({
   updatedAt: Schema.String,
   archivedAt: NullableString,
   sortKey: Schema.Number,
+  ...OptimisticRowFields,
 });
 
 export const ThreadRow = Schema.Struct({
@@ -43,13 +48,23 @@ export const ThreadRow = Schema.Struct({
   updatedAt: Schema.String,
   lastMessageAt: Schema.String,
   archivedAt: NullableString,
+  ...OptimisticRowFields,
 });
+
+export const MessageStatus = Schema.Literal(
+  "queued",
+  "pending",
+  "streaming",
+  "completed",
+  "failed",
+  "cancelled",
+);
 
 export const MessageRow = Schema.Struct({
   id: Schema.String,
   threadId: Schema.String,
   role: Schema.String,
-  status: Schema.String,
+  status: MessageStatus,
   modelId: Schema.String,
   text: Schema.String,
   createdAt: Schema.String,
@@ -57,6 +72,7 @@ export const MessageRow = Schema.Struct({
   errorCode: NullableString,
   errorMessage: NullableString,
   searchEnabled: Schema.Boolean,
+  ...OptimisticRowFields,
 });
 
 export const MessagePartRow = Schema.Struct({
@@ -67,6 +83,8 @@ export const MessagePartRow = Schema.Struct({
   text: Schema.String,
   json: NullableString,
 });
+
+export const AttachmentStatus = Schema.Literal("queued", "uploading", "ready", "failed");
 
 export const AttachmentRow = Schema.Struct({
   id: Schema.String,
@@ -79,8 +97,10 @@ export const AttachmentRow = Schema.Struct({
   sha256: NullableString,
   width: NullableNumber,
   height: NullableNumber,
-  status: Schema.String,
+  status: AttachmentStatus,
   createdAt: Schema.String,
+  updatedAt: Schema.String,
+  ...OptimisticRowFields,
 });
 
 export const SearchResultRow = Schema.Struct({
@@ -103,12 +123,11 @@ export const tablesSchema = createEffectSchematizer().toTablesSchema({
   [TABLES.searchResults]: SearchResultRow,
 });
 
-export const valuesSchema = createEffectSchematizer().toValuesSchema({
-  [VALUES.activeWorkspaceId]: Schema.String,
-  [VALUES.activeThreadId]: Schema.String,
-  [VALUES.sidebarQuery]: Schema.String,
-  [VALUES.schemaVersion]: Schema.Number,
-  [VALUES.lastCatalogRefreshAt]: Schema.String,
+export const localValuesSchema = createEffectSchematizer().toValuesSchema({
+  [LOCAL_VALUES.activeWorkspaceId]: Schema.String,
+  [LOCAL_VALUES.activeThreadId]: Schema.String,
+  [LOCAL_VALUES.sidebarQuery]: Schema.String,
+  [LOCAL_VALUES.connectionStatus]: Schema.String,
 });
 
 export const decodeWorkspaceRow = Schema.decodeUnknownSync(WorkspaceRow);
@@ -118,18 +137,211 @@ export const decodeMessagePartRow = Schema.decodeUnknownSync(MessagePartRow);
 export const decodeAttachmentRow = Schema.decodeUnknownSync(AttachmentRow);
 export const decodeSearchResultRow = Schema.decodeUnknownSync(SearchResultRow);
 
-export type SyncMutation =
-  | { type: "bootstrap"; defaultModelId: string }
-  | { type: "set-value"; key: string; value: string | number | boolean | null }
-  | { type: "upsert-workspace"; row: unknown }
-  | { type: "upsert-thread"; row: unknown }
-  | { type: "upsert-message"; row: unknown }
-  | { type: "upsert-message-part"; row: unknown }
-  | { type: "upsert-attachment"; row: unknown }
-  | { type: "replace-search-results"; messageId: string; rows: unknown[] }
-  | { type: "archive-thread"; id: string; archivedAt: string | null }
-  | { type: "archive-workspace"; id: string; archivedAt: string | null }
-  | { type: "delete-attachment"; id: string };
+export type Workspace = Schema.Schema.Type<typeof WorkspaceRow>;
+export type Thread = Schema.Schema.Type<typeof ThreadRow>;
+export type Message = Schema.Schema.Type<typeof MessageRow>;
+export type MessagePart = Schema.Schema.Type<typeof MessagePartRow>;
+export type Attachment = Schema.Schema.Type<typeof AttachmentRow>;
+export type SearchResult = Schema.Schema.Type<typeof SearchResultRow>;
+
+export type SyncTables = Partial<Record<(typeof TABLES)[keyof typeof TABLES], Record<string, any>>>;
+
+export type SyncSnapshot = {
+  tables: SyncTables;
+};
+
+export type BootstrapSessionPayload = {
+  defaultModelId: string;
+};
+
+export type CreateWorkspacePayload = {
+  workspace: Workspace;
+  initialThread: Thread;
+};
+
+export type UpdateWorkspacePayload = {
+  workspace: Workspace;
+};
+
+export type ArchiveWorkspacePayload = {
+  id: string;
+  archivedAt: string;
+};
+
+export type CreateThreadPayload = {
+  thread: Thread;
+};
+
+export type UpdateThreadPayload = {
+  thread: Thread;
+};
+
+export type ArchiveThreadPayload = {
+  id: string;
+  archivedAt: string;
+};
+
+export type CreateUserMessagePayload = {
+  threadId: string;
+  userMessage: Message;
+  assistantMessage: Message;
+  thread: Thread;
+  promptText: string;
+  modelId: string;
+  search: boolean;
+};
+
+export type StartAssistantTurnPayload = {
+  threadId: string;
+  assistantMessage: Message;
+  modelId: string;
+  search: boolean;
+};
+
+export type CancelAssistantTurnPayload = {
+  messageId: string;
+};
+
+export type RegisterAttachmentPayload = {
+  attachment: Attachment;
+};
+
+export type CompleteAttachmentPayload = {
+  attachment: Attachment;
+};
+
+export type DeleteAttachmentPayload = {
+  id: string;
+};
+
+export type SetSearchModePayload = {
+  workspaceId: string;
+  defaultSearchMode: boolean;
+};
+
+export type SyncCommandPayloadMap = {
+  bootstrap_session: BootstrapSessionPayload;
+  create_workspace: CreateWorkspacePayload;
+  update_workspace: UpdateWorkspacePayload;
+  archive_workspace: ArchiveWorkspacePayload;
+  create_thread: CreateThreadPayload;
+  update_thread: UpdateThreadPayload;
+  archive_thread: ArchiveThreadPayload;
+  create_user_message: CreateUserMessagePayload;
+  start_assistant_turn: StartAssistantTurnPayload;
+  cancel_assistant_turn: CancelAssistantTurnPayload;
+  register_attachment: RegisterAttachmentPayload;
+  complete_attachment: CompleteAttachmentPayload;
+  delete_attachment: DeleteAttachmentPayload;
+  set_search_mode: SetSearchModePayload;
+};
+
+export type SyncCommandType = keyof SyncCommandPayloadMap;
+
+export type SyncClientHello = {
+  type: "hello";
+  clientId: string;
+  lastServerSeq: number;
+  unackedOpIds: string[];
+};
+
+export type SyncClientCommand<T extends SyncCommandType = SyncCommandType> = {
+  type: "command";
+  opId: string;
+  clientTs: string;
+  commandType: T;
+  payload: SyncCommandPayloadMap[T];
+};
+
+export type SyncClientResume = {
+  type: "resume";
+  lastServerSeq: number;
+};
+
+export type SyncClientPing = {
+  type: "ping";
+};
+
+export type SyncClientEnvelope =
+  | SyncClientHello
+  | SyncClientCommand
+  | SyncClientResume
+  | SyncClientPing;
+
+export type SyncEventPayloadMap = {
+  workspace_upserted: { row: Workspace };
+  workspace_archived: { id: string; archivedAt: string; updatedAt: string };
+  thread_upserted: { row: Thread };
+  thread_archived: { id: string; archivedAt: string; updatedAt: string };
+  message_upserted: { row: Message };
+  message_failed: { messageId: string; errorCode: string; errorMessage: string; updatedAt: string };
+  message_completed: { messageId: string; text: string; updatedAt: string };
+  message_delta: { messageId: string; delta: string; updatedAt: string };
+  message_part_appended: { row: MessagePart };
+  attachment_upserted: { row: Attachment };
+  attachment_deleted: { id: string };
+  search_results_replaced: { messageId: string; rows: SearchResult[] };
+  server_state_rebased: { snapshot: SyncSnapshot };
+};
+
+export type SyncEventType = keyof SyncEventPayloadMap;
+
+export type SyncServerHelloAck = {
+  type: "hello_ack";
+  serverTime: string;
+  lastServerSeq: number;
+};
+
+export type SyncServerAck = {
+  type: "ack";
+  opId: string;
+  serverSeq: number;
+  acceptedAt: string;
+  commandType: SyncCommandType;
+};
+
+export type SyncServerReject = {
+  type: "reject";
+  opId: string;
+  reason: string;
+  code: string;
+  retriable: boolean;
+};
+
+export type SyncServerEvent<T extends SyncEventType = SyncEventType> = {
+  type: "event";
+  serverSeq: number;
+  eventId: string;
+  eventType: T;
+  payload: SyncEventPayloadMap[T];
+  causedByOpId?: string | null;
+};
+
+export type SyncServerReset = {
+  type: "sync_reset";
+  reason: string;
+  snapshot: SyncSnapshot;
+};
+
+export type SyncServerPong = {
+  type: "pong";
+  at: string;
+};
+
+export type SyncServerEnvelope =
+  | SyncServerHelloAck
+  | SyncServerAck
+  | SyncServerReject
+  | SyncServerEvent
+  | SyncServerReset
+  | SyncServerPong;
+
+export type PendingSyncOp<T extends SyncCommandType = SyncCommandType> = {
+  opId: string;
+  clientTs: string;
+  commandType: T;
+  payload: SyncCommandPayloadMap[T];
+};
 
 export const nowIso = () => new Date().toISOString();
 
@@ -150,6 +362,8 @@ export function createWorkspace(input: {
   defaultModelId: string;
   systemPrompt?: string;
   defaultSearchMode?: boolean;
+  optimistic?: boolean;
+  opId?: string | null;
 }) {
   const now = nowIso();
   return decodeWorkspaceRow({
@@ -163,10 +377,17 @@ export function createWorkspace(input: {
     updatedAt: now,
     archivedAt: null,
     sortKey: Date.now(),
+    optimistic: input.optimistic ?? false,
+    opId: input.opId ?? null,
   });
 }
 
-export function createThread(input: { workspaceId: string; title?: string }) {
+export function createThread(input: {
+  workspaceId: string;
+  title?: string;
+  optimistic?: boolean;
+  opId?: string | null;
+}) {
   const now = nowIso();
   return decodeThreadRow({
     id: createId("thd"),
@@ -177,6 +398,8 @@ export function createThread(input: { workspaceId: string; title?: string }) {
     updatedAt: now,
     lastMessageAt: now,
     archivedAt: null,
+    optimistic: input.optimistic ?? false,
+    opId: input.opId ?? null,
   });
 }
 
@@ -185,8 +408,10 @@ export function createMessage(input: {
   role: "user" | "assistant" | "system";
   modelId: string;
   text?: string;
-  status?: "pending" | "streaming" | "completed" | "failed";
+  status?: "queued" | "pending" | "streaming" | "completed" | "failed" | "cancelled";
   searchEnabled?: boolean;
+  optimistic?: boolean;
+  opId?: string | null;
 }) {
   const now = nowIso();
   return decodeMessageRow({
@@ -201,6 +426,8 @@ export function createMessage(input: {
     errorCode: null,
     errorMessage: null,
     searchEnabled: input.searchEnabled ?? false,
+    optimistic: input.optimistic ?? false,
+    opId: input.opId ?? null,
   });
 }
 
@@ -229,7 +456,11 @@ export function createAttachment(input: {
   mimeType: string;
   sizeBytes: number;
   sha256?: string | null;
+  status?: "queued" | "uploading" | "ready" | "failed";
+  optimistic?: boolean;
+  opId?: string | null;
 }) {
+  const now = nowIso();
   return decodeAttachmentRow({
     id: createId("att"),
     threadId: input.threadId,
@@ -241,8 +472,11 @@ export function createAttachment(input: {
     sha256: input.sha256 ?? null,
     width: null,
     height: null,
-    status: "pending",
-    createdAt: nowIso(),
+    status: input.status ?? "queued",
+    createdAt: now,
+    updatedAt: now,
+    optimistic: input.optimistic ?? false,
+    opId: input.opId ?? null,
   });
 }
 

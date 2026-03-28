@@ -24,7 +24,7 @@
     "marked": "catalog:",
     "marked-highlight": "catalog:",
     "solid-js": "^1.9.10",
-    "tinybase": "^7.1.0"
+    "tinybase": "^8.0.2"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.15.2",

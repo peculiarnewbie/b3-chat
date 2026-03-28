@@ -2,8 +2,6 @@ import type { AppEnv } from "@g3-chat/server";
 import { handleAuth } from "./api/auth";
 import { handleSession } from "./api/session";
 import { handleModels } from "./api/models";
-import { handleChatStream } from "./api/chat-stream";
-import { handleStateMutate } from "./api/state-mutate";
 import { handleSync } from "./api/sync";
 import { handleUploadPresign } from "./api/uploads-presign";
 import { handleUploadBlobGet, handleUploadBlobPut } from "./api/uploads-blob";
@@ -39,12 +37,6 @@ export default {
         if (pathname === "/api/session" && method === "GET") return await handleSession(request);
 
         if (pathname === "/api/models" && method === "GET") return await handleModels(request);
-
-        if (/^\/api\/chat\/threads\/[^/]+\/stream$/.test(pathname) && method === "POST")
-          return await handleChatStream(request);
-
-        if (pathname === "/api/state/mutate" && method === "POST")
-          return await handleStateMutate(request);
 
         if (pathname.startsWith("/api/sync/")) return await handleSync(request);
 

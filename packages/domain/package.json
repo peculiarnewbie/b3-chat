@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "effect": "^3.18.4",
-    "tinybase": "^7.1.0"
+    "tinybase": "^8.0.2"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

@@ -14,7 +14,7 @@ describe("domain helpers", () => {
     expect(slugify("  My Personal Workspace!! ")).toBe("my-personal-workspace");
   });
 
-  it("creates attachments in a pending state", () => {
+  it("creates attachments in a queued state", () => {
     const attachment = createAttachment({
       threadId: "thd_123",
       objectKey: "thd_123/file.txt",
@@ -23,7 +23,7 @@ describe("domain helpers", () => {
       sizeBytes: 128,
     });
 
-    expect(attachment.status).toBe("pending");
+    expect(attachment.status).toBe("queued");
     expect(attachment.threadId).toBe("thd_123");
   });
 

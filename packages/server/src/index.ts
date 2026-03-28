@@ -3,15 +3,14 @@ import { dash } from "@better-auth/infra";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { drizzle } from "drizzle-orm/d1";
 import { sql } from "drizzle-orm";
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import {
-  createId,
-  createThread,
-  createWorkspace,
-  nowIso,
   TABLES,
-  VALUES,
-  type SyncMutation,
+  createId,
+  nowIso,
+  type SyncCommandPayloadMap,
+  type SyncCommandType,
+  type SyncSnapshot,
 } from "@g3-chat/domain";
 
 export type AppEnv = {
@@ -37,8 +36,6 @@ declare global {
   var __env__: AppEnv | undefined;
 }
 
-// Drizzle schema for better-auth tables (adapter needs these to resolve models).
-// Date columns use { mode: "timestamp" } so Drizzle converts Date objects ↔ integer.
 const user = sqliteTable("user", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
@@ -90,13 +87,8 @@ const verification = sqliteTable("verification", {
 });
 
 const authSchema = { user, session, account, verification };
-
 const DAY_MS = 24 * 60 * 60 * 1000;
 const encoder = new TextEncoder();
-
-type SyncSnapshot = {
-  tables?: Record<string, Record<string, any>>;
-};
 
 type ExaSearchResult = {
   title?: string;
@@ -109,6 +101,13 @@ type ExaSearchResult = {
 
 type ExaSearchResponse = {
   results?: ExaSearchResult[];
+};
+
+type InternalCommandResponse = {
+  ok: boolean;
+  snapshot?: SyncSnapshot;
+  reason?: string;
+  code?: string;
 };
 
 export function normalizeEmail(email: string) {
@@ -144,7 +143,7 @@ export async function ensureAuthSchema(env: AppEnv) {
 
 export function createAuth(env: AppEnv) {
   const db = drizzle(env.AUTH_DB);
-  const auth = betterAuth({
+  return betterAuth({
     secret: env.BETTER_AUTH_SECRET,
     baseURL: env.BETTER_AUTH_URL,
     database: drizzleAdapter(db, {
@@ -191,7 +190,6 @@ export function createAuth(env: AppEnv) {
       cookiePrefix: "g3",
     },
   });
-  return auth;
 }
 
 export async function getSession(request: Request, env: AppEnv) {
@@ -215,30 +213,26 @@ export async function getSyncStub(env: AppEnv) {
   return env.SYNC_ENGINE.get(env.SYNC_ENGINE.idFromName(allowedEmail(env)));
 }
 
-export async function getSyncSnapshot(env: AppEnv) {
+export async function sendInternalSyncCommand<T extends SyncCommandType>(
+  env: AppEnv,
+  commandType: T,
+  payload: SyncCommandPayloadMap[T],
+  opId = createId("srvop"),
+) {
   const stub = await getSyncStub(env);
-  const response = await stub.fetch("https://sync.internal/snapshot");
-  return (await response.json()) as SyncSnapshot;
-}
-
-export async function syncMutate(env: AppEnv, mutation: SyncMutation) {
-  const stub = await getSyncStub(env);
-  const response = await stub.fetch("https://sync.internal/mutate", {
+  const response = await stub.fetch("https://sync.internal/internal/command", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(mutation),
+    body: JSON.stringify({
+      opId,
+      commandType,
+      payload,
+    }),
   });
   if (!response.ok) {
     throw new Error(await response.text());
   }
-  return response.json();
-}
-
-export async function bootstrapSyncStore(env: AppEnv) {
-  return syncMutate(env, {
-    type: "bootstrap",
-    defaultModelId: getDefaultModelId(env),
-  });
+  return (await response.json()) as InternalCommandResponse;
 }
 
 export async function fetchModelsCatalog(env: AppEnv, cache: Cache) {
@@ -310,8 +304,8 @@ export async function exaSearch(env: AppEnv, query: string) {
   });
   if (!response.ok) throw new Error(`Exa search failed: ${response.status}`);
   const json = (await response.json()) as ExaSearchResponse;
-  return (json.results ?? []).map((result: any, index: number) => ({
-    id: createId(`src${index}`),
+  return (json.results ?? []).map((result: any) => ({
+    id: createId("src"),
     title: result.title ?? result.url,
     url: result.url,
     snippet: result.highlights?.[0] ?? result.text?.slice(0, 500) ?? "",
@@ -382,7 +376,7 @@ export function isImageAttachment(mimeType: string) {
   return mimeType.startsWith("image/");
 }
 
-export async function collectChatHistory(snapshot: any, threadId: string) {
+export async function collectChatHistory(snapshot: SyncSnapshot, threadId: string) {
   const tables = snapshot.tables ?? {};
   const messages = Object.values<any>(tables[TABLES.messages] ?? {})
     .filter((message) => message.threadId === threadId)
@@ -444,28 +438,6 @@ export async function verifyUploadToken(env: AppEnv, token: string) {
   const valid = await crypto.subtle.verify("HMAC", keyMaterial, signatureBytes, payloadBytes);
   if (!valid) return null;
   return JSON.parse(new TextDecoder().decode(payloadBytes)) as Record<string, unknown>;
-}
-
-export async function ensureSeedData(env: AppEnv) {
-  const snapshot = await getSyncSnapshot(env);
-  const workspaces = Object.values<any>(snapshot.tables?.[TABLES.workspaces] ?? {});
-  if (workspaces.length > 0) return snapshot;
-
-  const workspace = createWorkspace({
-    name: "Default Workspace",
-    defaultModelId: getDefaultModelId(env),
-    defaultSearchMode: false,
-    systemPrompt: "",
-  });
-  const thread = createThread({
-    workspaceId: workspace.id,
-    title: "New Chat",
-  });
-  await syncMutate(env, { type: "upsert-workspace", row: workspace });
-  await syncMutate(env, { type: "upsert-thread", row: thread });
-  await syncMutate(env, { type: "set-value", key: VALUES.activeWorkspaceId, value: workspace.id });
-  await syncMutate(env, { type: "set-value", key: VALUES.activeThreadId, value: thread.id });
-  return getSyncSnapshot(env);
 }
 
 export async function heartbeat(env: AppEnv) {
