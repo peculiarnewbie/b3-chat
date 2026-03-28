@@ -3,6 +3,8 @@ import { handleAuth } from "./api/auth";
 import { handleSession } from "./api/session";
 import { handleModels } from "./api/models";
 import { handleSync } from "./api/sync";
+import { handleProviderSettings } from "./api/settings-providers";
+import { handleRuntimeConfig } from "./api/runtime-config";
 import { handleUploadPresign } from "./api/uploads-presign";
 import { handleUploadBlobGet, handleUploadBlobPut } from "./api/uploads-blob";
 import { handleUploadComplete } from "./api/uploads-complete";
@@ -36,7 +38,13 @@ export default {
 
         if (pathname === "/api/session" && method === "GET") return await handleSession(request);
 
+        if (pathname === "/api/runtime-config" && method === "GET")
+          return await handleRuntimeConfig(request);
+
         if (pathname === "/api/models" && method === "GET") return await handleModels(request);
+
+        if (pathname === "/api/settings/providers" && (method === "GET" || method === "PUT"))
+          return await handleProviderSettings(request);
 
         if (pathname.startsWith("/api/sync/")) return await handleSync(request);
 

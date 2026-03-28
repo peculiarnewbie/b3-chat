@@ -16,7 +16,17 @@ import { syncClient } from "../lib/sync-client";
 
 type SessionPayload = {
   user?: {
+    id?: string;
     email?: string;
+  };
+  runtimeConfig?: {
+    hasOpencodeKey: boolean;
+    hasExaKey: boolean;
+    defaultModelId: string | null;
+    availableFeatures: {
+      chat: boolean;
+      search: boolean;
+    };
   };
 };
 
@@ -25,6 +35,17 @@ type ModelsPayload = {
     id: string;
     name: string;
   }>;
+  runtimeConfig?: SessionPayload["runtimeConfig"];
+};
+
+type ProviderSettingsPayload = {
+  hasOpencodeKey: boolean;
+  hasExaKey: boolean;
+  updatedAt: string | null;
+  lastValidatedOpencodeAt?: string | null;
+  lastValidatedExaAt?: string | null;
+  lastOpencodeError?: string | null;
+  lastExaError?: string | null;
 };
 
 type Theme = "clean" | "night" | "warm";
@@ -63,6 +84,20 @@ function getInitialTheme(): Theme {
   return "clean";
 }
 
+function getInitialModelId(): string {
+  if (typeof localStorage !== "undefined") {
+    return localStorage.getItem("g3-modelId") ?? "";
+  }
+  return "";
+}
+
+function getInitialSearch(): boolean {
+  if (typeof localStorage !== "undefined") {
+    return localStorage.getItem("g3-search") === "true";
+  }
+  return false;
+}
+
 const fetchSession = async () => {
   const response = await fetch("/api/session");
   if (response.status === 401) return null;
@@ -77,6 +112,13 @@ const fetchModels = async () => {
   const response = await fetch("/api/models");
   if (!response.ok) throw new Error("Failed to load models");
   return (await response.json()) as ModelsPayload;
+};
+
+const fetchProviderSettings = async () => {
+  const response = await fetch("/api/settings/providers");
+  if (response.status === 401) return null;
+  if (!response.ok) throw new Error("Failed to load provider settings");
+  return (await response.json()) as ProviderSettingsPayload;
 };
 
 function useStoreVersion() {
@@ -94,24 +136,48 @@ function useStoreVersion() {
 export default function Home() {
   const [session] = createResource(fetchSession);
   const [models] = createResource(fetchModels);
+  const [providerSettings, { mutate: setProviderSettings, refetch: refetchProviderSettings }] =
+    createResource(() => session()?.user?.id ?? null, fetchProviderSettings);
   const version = useStoreVersion();
   const [theme, setTheme] = createSignal<Theme>(getInitialTheme());
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [composer, setComposer] = createStore({
     text: "",
-    modelId: "",
-    search: false,
+    modelId: getInitialModelId(),
+    search: getInitialSearch(),
     sending: false,
   });
+  const [providerForm, setProviderForm] = createStore({
+    opencodeApiKey: "",
+    exaApiKey: "",
+    saving: false,
+    error: "",
+  });
+  const [editingThreadId, setEditingThreadId] = createSignal<string | null>(null);
+  const [editingWorkspaceId, setEditingWorkspaceId] = createSignal<string | null>(null);
+  const [editText, setEditText] = createSignal("");
+  const [showScrollBtn, setShowScrollBtn] = createSignal(false);
 
   // biome-ignore lint: assigned via ref attribute
   // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref
   let timelineRef: HTMLElement | undefined;
+  let userScrolledUp = false;
 
   // Apply theme to document
   createEffect(() => {
     document.documentElement.setAttribute("data-theme", theme());
     localStorage.setItem("g3-theme", theme());
+  });
+
+  // Persist model selection
+  createEffect(() => {
+    if (composer.modelId) localStorage.setItem("g3-modelId", composer.modelId);
+  });
+
+  // Persist search toggle
+  createEffect(() => {
+    localStorage.setItem("g3-search", String(composer.search));
   });
 
   const tables = createMemo(() => {
@@ -124,15 +190,50 @@ export default function Home() {
     return syncClient.values;
   });
 
+  const runtimeConfig = createMemo(
+    () => providerSettings() ?? session()?.runtimeConfig ?? models()?.runtimeConfig ?? null,
+  );
+  const chatConfigured = createMemo(() => Boolean(runtimeConfig()?.hasOpencodeKey));
+  const searchConfigured = createMemo(() => Boolean(runtimeConfig()?.hasExaKey));
+
   createEffect(() => {
     const modelList = models()?.models ?? [];
-    if (!composer.modelId && modelList[0]) setComposer("modelId", modelList[0].id);
+    const savedId = getInitialModelId();
+    if (savedId && modelList.some((m) => m.id === savedId)) {
+      if (!composer.modelId) setComposer("modelId", savedId);
+    } else if (!composer.modelId && modelList[0]) {
+      setComposer("modelId", modelList[0].id);
+    }
   });
 
-  // Auto-scroll on new messages
+  const isNearBottom = () => {
+    if (!timelineRef) return true;
+    const threshold = 80;
+    return timelineRef.scrollHeight - timelineRef.scrollTop - timelineRef.clientHeight < threshold;
+  };
+
+  const scrollToBottom = () => {
+    if (timelineRef) {
+      timelineRef.scrollTo({ top: timelineRef.scrollHeight, behavior: "smooth" });
+      userScrolledUp = false;
+      setShowScrollBtn(false);
+    }
+  };
+
+  const handleTimelineScroll = () => {
+    if (isNearBottom()) {
+      userScrolledUp = false;
+      setShowScrollBtn(false);
+    } else {
+      userScrolledUp = true;
+      setShowScrollBtn(true);
+    }
+  };
+
+  // Auto-scroll on new messages — only if user hasn't scrolled up
   createEffect(() => {
     const _msgs = messages();
-    if (timelineRef) {
+    if (timelineRef && !userScrolledUp) {
       requestAnimationFrame(() => {
         timelineRef!.scrollTop = timelineRef!.scrollHeight;
       });
@@ -192,6 +293,55 @@ export default function Home() {
     });
   };
 
+  const saveProviderSettings = async () => {
+    setProviderForm("saving", true);
+    setProviderForm("error", "");
+    try {
+      const response = await fetch("/api/settings/providers", {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          opencodeApiKey: providerForm.opencodeApiKey || undefined,
+          exaApiKey: providerForm.exaApiKey || undefined,
+        }),
+      });
+      if (!response.ok) throw new Error("Failed to save settings");
+      const next = (await response.json()) as ProviderSettingsPayload;
+      setProviderSettings(next);
+      setProviderForm("opencodeApiKey", "");
+      setProviderForm("exaApiKey", "");
+    } catch (error) {
+      setProviderForm("error", error instanceof Error ? error.message : "Failed to save settings");
+    } finally {
+      setProviderForm("saving", false);
+    }
+  };
+
+  const clearProviderKey = async (provider: "opencodeApiKey" | "exaApiKey") => {
+    setProviderForm("saving", true);
+    setProviderForm("error", "");
+    try {
+      const response = await fetch("/api/settings/providers", {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          [provider]: null,
+        }),
+      });
+      if (!response.ok) throw new Error("Failed to clear key");
+      const next = (await response.json()) as ProviderSettingsPayload;
+      setProviderSettings(next);
+    } catch (error) {
+      setProviderForm("error", error instanceof Error ? error.message : "Failed to clear key");
+    } finally {
+      setProviderForm("saving", false);
+    }
+  };
+
   const createNewWorkspace = async () => {
     syncClient.createWorkspace(
       `Workspace ${workspaces().length + 1}`,
@@ -209,7 +359,7 @@ export default function Home() {
   };
 
   const sendMessage = async () => {
-    if (!activeThread() || !composer.text.trim() || composer.sending) return;
+    if (!activeThread() || !composer.text.trim() || composer.sending || !chatConfigured()) return;
     setComposer("sending", true);
     try {
       const text = composer.text.trim();
@@ -272,6 +422,9 @@ export default function Home() {
               <button class="btn" onClick={createNewWorkspace}>
                 + Space
               </button>
+              <button class="btn" onClick={() => setSettingsOpen(true)}>
+                Keys
+              </button>
             </div>
           </div>
 
@@ -279,15 +432,60 @@ export default function Home() {
             <p class="section-label">Workspaces</p>
             <For each={workspaces()}>
               {(workspace) => (
-                <button
-                  classList={{ "nav-item": true, active: workspace.id === activeWorkspace()?.id }}
-                  onClick={() => {
-                    syncClient.setActiveWorkspaceId(workspace.id);
-                    setSidebarOpen(false);
-                  }}
+                <Show
+                  when={editingWorkspaceId() === workspace.id}
+                  fallback={
+                    <button
+                      classList={{
+                        "nav-item": true,
+                        active: workspace.id === activeWorkspace()?.id,
+                      }}
+                      onClick={() => {
+                        syncClient.setActiveWorkspaceId(workspace.id);
+                        // Focus the newest thread in this workspace
+                        const wsThreads = Object.values<any>(tables()?.[TABLES.threads] ?? {})
+                          .filter((t: any) => t.workspaceId === workspace.id && !t.archivedAt)
+                          .sort((a: any, b: any) => b.lastMessageAt.localeCompare(a.lastMessageAt));
+                        if (wsThreads[0]) syncClient.setActiveThreadId(wsThreads[0].id);
+                        setSidebarOpen(false);
+                      }}
+                      onDblClick={(e) => {
+                        e.preventDefault();
+                        setEditText(workspace.name);
+                        setEditingWorkspaceId(workspace.id);
+                      }}
+                    >
+                      <strong>{workspace.name}</strong>
+                    </button>
+                  }
                 >
-                  <strong>{workspace.name}</strong>
-                </button>
+                  <div class="nav-item active">
+                    <input
+                      class="inline-edit"
+                      value={editText()}
+                      onInput={(e) => setEditText(e.currentTarget.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          const trimmed = editText().trim();
+                          if (trimmed && trimmed !== workspace.name) {
+                            syncClient.renameWorkspace(workspace.id, trimmed);
+                          }
+                          setEditingWorkspaceId(null);
+                        } else if (e.key === "Escape") {
+                          setEditingWorkspaceId(null);
+                        }
+                      }}
+                      onBlur={() => {
+                        const trimmed = editText().trim();
+                        if (trimmed && trimmed !== workspace.name) {
+                          syncClient.renameWorkspace(workspace.id, trimmed);
+                        }
+                        setEditingWorkspaceId(null);
+                      }}
+                      ref={(el) => setTimeout(() => el.focus(), 0)}
+                    />
+                  </div>
+                </Show>
               )}
             </For>
 
@@ -301,19 +499,58 @@ export default function Home() {
                     setSidebarOpen(false);
                   }}
                 >
-                  <div class="nav-item-header">
-                    <strong>{thread.title}</strong>
-                    <button
-                      class="delete-btn"
-                      title="Delete thread"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void deleteThread(thread.id);
+                  <Show
+                    when={editingThreadId() === thread.id}
+                    fallback={
+                      <div
+                        class="nav-item-header"
+                        onDblClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setEditText(thread.title);
+                          setEditingThreadId(thread.id);
+                        }}
+                      >
+                        <strong>{thread.title}</strong>
+                        <button
+                          class="delete-btn"
+                          title="Delete thread"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void deleteThread(thread.id);
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    }
+                  >
+                    <input
+                      class="inline-edit"
+                      value={editText()}
+                      onInput={(e) => setEditText(e.currentTarget.value)}
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          const trimmed = editText().trim();
+                          if (trimmed && trimmed !== thread.title) {
+                            syncClient.renameThread(thread.id, trimmed);
+                          }
+                          setEditingThreadId(null);
+                        } else if (e.key === "Escape") {
+                          setEditingThreadId(null);
+                        }
                       }}
-                    >
-                      ×
-                    </button>
-                  </div>
+                      onBlur={() => {
+                        const trimmed = editText().trim();
+                        if (trimmed && trimmed !== thread.title) {
+                          syncClient.renameThread(thread.id, trimmed);
+                        }
+                        setEditingThreadId(null);
+                      }}
+                      ref={(el) => setTimeout(() => el.focus(), 0)}
+                    />
+                  </Show>
                   <span>
                     <Show when={streamingThreadIds().has(thread.id)}>
                       <span class="thread-spinner" />
@@ -346,6 +583,12 @@ export default function Home() {
             </button>
             <span class="workspace-label">{activeWorkspace()?.name}</span>
             <h2>{activeThread()?.title ?? "New Chat"}</h2>
+            <Show when={!chatConfigured()}>
+              <span class="status-pill warning">OpenCode key required</span>
+            </Show>
+            <Show when={chatConfigured() && !searchConfigured()}>
+              <span class="status-pill muted">Search disabled</span>
+            </Show>
             <Show when={activeWorkspace()?.systemPrompt}>
               <span class="system-prompt" title={activeWorkspace()?.systemPrompt}>
                 {activeWorkspace()?.systemPrompt}
@@ -353,7 +596,31 @@ export default function Home() {
             </Show>
           </header>
 
-          <section class="timeline" ref={timelineRef}>
+          <Show when={!chatConfigured()}>
+            <section class="setup-banner">
+              <div>
+                <strong>Chat is blocked until your OpenCode API key is configured.</strong>
+                <p>Keys are stored encrypted inside your personal Durable Object.</p>
+              </div>
+              <button class="btn btn-primary" onClick={() => setSettingsOpen(true)}>
+                Configure keys
+              </button>
+            </section>
+          </Show>
+
+          <Show when={chatConfigured() && !searchConfigured()}>
+            <section class="setup-banner subtle">
+              <div>
+                <strong>Web search is unavailable.</strong>
+                <p>Add an Exa API key to re-enable search enrichment.</p>
+              </div>
+              <button class="btn" onClick={() => setSettingsOpen(true)}>
+                Add Exa key
+              </button>
+            </section>
+          </Show>
+
+          <section class="timeline" ref={timelineRef} onScroll={handleTimelineScroll}>
             <For each={messages()}>
               {(message) => (
                 <article
@@ -415,12 +682,19 @@ export default function Home() {
             </For>
           </section>
 
+          <Show when={showScrollBtn()}>
+            <button class="scroll-to-bottom" onClick={scrollToBottom} title="Scroll to bottom">
+              ↓
+            </button>
+          </Show>
+
           <footer class="composer">
             <textarea
               value={composer.text}
               onInput={(event) => setComposer("text", event.currentTarget.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Message..."
+              placeholder={chatConfigured() ? "Message..." : "Configure your OpenCode key to chat"}
+              disabled={!chatConfigured()}
             />
             <div class="composer-bar">
               <select
@@ -436,6 +710,7 @@ export default function Home() {
                   type="checkbox"
                   checked={composer.search}
                   onChange={(event) => setComposer("search", event.currentTarget.checked)}
+                  disabled={!searchConfigured()}
                 />
                 Search
               </label>
@@ -447,6 +722,93 @@ export default function Home() {
           </footer>
         </main>
       </div>
+
+      <Show when={settingsOpen()}>
+        <div class="modal-backdrop" onClick={() => setSettingsOpen(false)}>
+          <section class="settings-modal" onClick={(event) => event.stopPropagation()}>
+            <div class="settings-header">
+              <div>
+                <p class="eyebrow">Provider keys</p>
+                <h3>Personal runtime settings</h3>
+              </div>
+              <button class="btn" onClick={() => setSettingsOpen(false)}>
+                Close
+              </button>
+            </div>
+
+            <div class="settings-grid">
+              <label class="settings-field">
+                <span>OpenCode API key</span>
+                <input
+                  type="password"
+                  value={providerForm.opencodeApiKey}
+                  onInput={(event) => setProviderForm("opencodeApiKey", event.currentTarget.value)}
+                  placeholder="sk-..."
+                />
+                <small>
+                  Status: {providerSettings()?.hasOpencodeKey ? "configured" : "missing"}
+                </small>
+              </label>
+
+              <label class="settings-field">
+                <span>Exa API key</span>
+                <input
+                  type="password"
+                  value={providerForm.exaApiKey}
+                  onInput={(event) => setProviderForm("exaApiKey", event.currentTarget.value)}
+                  placeholder="exa_..."
+                />
+                <small>Status: {providerSettings()?.hasExaKey ? "configured" : "missing"}</small>
+              </label>
+            </div>
+
+            <Show when={providerSettings()?.lastOpencodeError || providerSettings()?.lastExaError}>
+              <p class="settings-error">
+                OpenCode: {providerSettings()?.lastOpencodeError ?? "ok"} | Exa:{" "}
+                {providerSettings()?.lastExaError ?? "ok"}
+              </p>
+            </Show>
+            <Show when={providerForm.error}>
+              <p class="settings-error">{providerForm.error}</p>
+            </Show>
+
+            <p class="settings-copy">
+              Saved keys are encrypted at rest and isolated to this user account.
+            </p>
+
+            <div class="settings-actions">
+              <button
+                class="btn btn-primary"
+                disabled={providerForm.saving}
+                onClick={saveProviderSettings}
+              >
+                {providerForm.saving ? "Saving…" : "Save keys"}
+              </button>
+              <button
+                class="btn"
+                disabled={providerForm.saving || !providerSettings()?.hasOpencodeKey}
+                onClick={() => void clearProviderKey("opencodeApiKey")}
+              >
+                Clear OpenCode
+              </button>
+              <button
+                class="btn"
+                disabled={providerForm.saving || !providerSettings()?.hasExaKey}
+                onClick={() => void clearProviderKey("exaApiKey")}
+              >
+                Clear Exa
+              </button>
+              <button
+                class="btn"
+                disabled={providerForm.saving}
+                onClick={() => void refetchProviderSettings()}
+              >
+                Refresh
+              </button>
+            </div>
+          </section>
+        </div>
+      </Show>
     </Show>
   );
 }

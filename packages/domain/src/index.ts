@@ -127,6 +127,13 @@ export const tablesSchema = createEffectSchematizer().toTablesSchema({
   [TABLES.searchResults]: SearchResultRow,
 });
 
+// The Effect schematizer cannot convert Schema.Literal unions to TinyBase cell
+// types, so fields typed as Literal unions are silently dropped from the generated
+// schema. TinyBase then strips those values on setRow/setTables. We patch them in
+// as plain strings so they survive round-trips through the store.
+(tablesSchema as any).messages.status = { type: "string" };
+(tablesSchema as any).attachments.status = { type: "string" };
+
 export const localValuesSchema = createEffectSchematizer().toValuesSchema({
   [LOCAL_VALUES.activeWorkspaceId]: Schema.String,
   [LOCAL_VALUES.activeThreadId]: Schema.String,
@@ -152,6 +159,31 @@ export type SyncTables = Partial<Record<(typeof TABLES)[keyof typeof TABLES], Re
 
 export type SyncSnapshot = {
   tables: SyncTables;
+};
+
+export type UserProviderSettingsInput = {
+  opencodeApiKey?: string | null;
+  exaApiKey?: string | null;
+};
+
+export type UserProviderSettingsState = {
+  hasOpencodeKey: boolean;
+  hasExaKey: boolean;
+  updatedAt: string | null;
+  lastValidatedOpencodeAt?: string | null;
+  lastValidatedExaAt?: string | null;
+  lastOpencodeError?: string | null;
+  lastExaError?: string | null;
+};
+
+export type UserRuntimeConfig = {
+  hasOpencodeKey: boolean;
+  hasExaKey: boolean;
+  defaultModelId: string | null;
+  availableFeatures: {
+    chat: boolean;
+    search: boolean;
+  };
 };
 
 export type BootstrapSessionPayload = {
