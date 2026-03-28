@@ -58,6 +58,14 @@ function isWebSocketRequest(request: Request) {
   return request.headers.get("upgrade")?.toLowerCase() === "websocket";
 }
 
+function syncLog(message: string, details?: Record<string, unknown>) {
+  if (details) {
+    console.log(`[sync-do] ${message}`, JSON.stringify(details));
+    return;
+  }
+  console.log(`[sync-do] ${message}`);
+}
+
 export class SyncEngineDurableObject {
   private initialized = false;
   private readonly ctx: DurableObjectState;
@@ -71,6 +79,7 @@ export class SyncEngineDurableObject {
   async fetch(request: Request) {
     await this.ensureInitialized();
     const url = new URL(request.url);
+    syncLog("fetch", { path: url.pathname, method: request.method });
 
     if (url.pathname === "/ws") {
       if (!isWebSocketRequest(request)) {
@@ -88,6 +97,10 @@ export class SyncEngineDurableObject {
         commandType: SyncCommandType;
         payload: SyncCommandPayloadMap[SyncCommandType];
       };
+      syncLog("internal_command", {
+        opId: body.opId,
+        commandType: body.commandType,
+      });
       const result = await this.processCommand(body.opId, body.commandType, body.payload, true);
       return Response.json({
         ok: true,
@@ -108,6 +121,7 @@ export class SyncEngineDurableObject {
       typeof message === "string" ? message : new TextDecoder().decode(message),
     );
     try {
+      syncLog("ws_message", { type: envelope.type });
       await this.handleSocketEnvelope(ws, envelope);
     } catch (error) {
       console.error("[sync] websocket message error", error);
@@ -126,6 +140,7 @@ export class SyncEngineDurableObject {
   private async ensureInitialized() {
     if (this.initialized) return;
     this.initialized = true;
+    syncLog("initialize");
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -224,8 +239,13 @@ export class SyncEngineDurableObject {
   }
 
   private async handleHello(ws: WebSocket, hello: SyncClientHello) {
+    syncLog("hello", {
+      clientId: hello.clientId,
+      lastServerSeq: hello.lastServerSeq,
+      unackedOpIds: hello.unackedOpIds.length,
+    });
     await this.ensureBootstrapped();
-    const lastServerSeq = await this.getLastServerSeq();
+    const lastServerSeq = this.getLastServerSeq();
     ws.send(
       json({
         type: "hello_ack",
@@ -275,8 +295,10 @@ export class SyncEngineDurableObject {
     payload: SyncCommandPayloadMap[T],
     broadcast: boolean,
   ): Promise<SyncCommandResult> {
+    syncLog("process_command_start", { opId, commandType, broadcast });
     const existing = this.getCommandAck(opId);
     if (existing) {
+      syncLog("process_command_duplicate", { opId, commandType });
       return {
         ack: existing,
         events: [],
@@ -284,11 +306,9 @@ export class SyncEngineDurableObject {
     }
 
     const createdAt = nowIso();
-    const pendingEvents: SyncServerEvent[] = [];
     let followUp: DeferredFollowUp | undefined;
-
-    this.exec("BEGIN");
-    try {
+    const transactionResult = this.ctx.storage.transactionSync(() => {
+      const pendingEvents: SyncServerEvent[] = [];
       switch (commandType) {
         case "bootstrap_session": {
           const command = payload as SyncCommandPayloadMap["bootstrap_session"];
@@ -466,7 +486,7 @@ export class SyncEngineDurableObject {
         }
       }
 
-      const ackedSeq = pendingEvents.at(-1)?.serverSeq ?? (await this.getLastServerSeq());
+      const ackedSeq = pendingEvents.at(-1)?.serverSeq ?? this.getLastServerSeq();
       const ack: SyncServerAck = {
         type: "ack",
         opId,
@@ -484,19 +504,29 @@ export class SyncEngineDurableObject {
         createdAt,
         ackedSeq,
       );
-      this.exec("COMMIT");
+      return { ack, pendingEvents };
+    });
+    syncLog("process_command_committed", {
+      opId,
+      commandType,
+      eventCount: transactionResult.pendingEvents.length,
+      ackedSeq: transactionResult.ack.serverSeq,
+      hasFollowUp: Boolean(followUp),
+    });
 
-      if (broadcast) {
-        this.broadcast(ack);
-        for (const event of pendingEvents) this.broadcast(event);
-      }
-      const followUpPromise = followUp?.();
-      if (followUpPromise) this.ctx.waitUntil(followUpPromise);
-      return { ack, events: pendingEvents, followUp: followUpPromise };
-    } catch (error) {
-      this.exec("ROLLBACK");
-      throw error;
+    if (broadcast) {
+      this.broadcast(transactionResult.ack);
+      for (const event of transactionResult.pendingEvents) this.broadcast(event);
     }
+    const followUpPromise = followUp?.().catch((error) => {
+      console.error("[sync-do] follow_up_error", error);
+    });
+    if (followUpPromise) this.ctx.waitUntil(followUpPromise);
+    return {
+      ack: transactionResult.ack,
+      events: transactionResult.pendingEvents,
+      followUp: followUpPromise,
+    };
   }
 
   private async runAssistantTurn(
@@ -506,6 +536,12 @@ export class SyncEngineDurableObject {
       assistantMessage: Message;
     },
   ) {
+    syncLog("assistant_turn_start", {
+      threadId: payload.threadId,
+      assistantMessageId: payload.assistantMessage.id,
+      modelId: payload.modelId,
+      search: payload.search,
+    });
     const snapshot = await this.getSnapshot();
     const thread = this.getThread(payload.threadId);
     if (!thread) return;
@@ -534,6 +570,11 @@ export class SyncEngineDurableObject {
         }
       }
     }
+    syncLog("assistant_turn_context_ready", {
+      assistantMessageId: payload.assistantMessage.id,
+      searchResults: searchRows.length,
+      hasSearchContext: Boolean(searchContext),
+    });
 
     if (searchRows.length > 0) {
       const searchEvent = await this.appendServerEvent(null, "search_results_replaced", {
@@ -566,6 +607,11 @@ export class SyncEngineDurableObject {
         }),
       },
     );
+    syncLog("assistant_turn_upstream", {
+      assistantMessageId: payload.assistantMessage.id,
+      ok: upstream.ok,
+      status: upstream.status,
+    });
 
     if (!upstream.ok || !upstream.body) {
       const failed = await this.appendServerEvent(null, "message_failed", {
@@ -584,9 +630,12 @@ export class SyncEngineDurableObject {
     let accumulated = "";
     let pendingDelta = "";
     let seq = 0;
+    let chunkCount = 0;
+    let deltaCount = 0;
 
     const flushDelta = async () => {
       if (!pendingDelta) return;
+      deltaCount += 1;
       accumulated += pendingDelta;
       const part = createMessagePart({
         messageId: payload.assistantMessage.id,
@@ -602,6 +651,12 @@ export class SyncEngineDurableObject {
       });
       this.broadcast(partEvent);
       this.broadcast(deltaEvent);
+      syncLog("assistant_turn_delta", {
+        assistantMessageId: payload.assistantMessage.id,
+        seq: part.seq,
+        chars: pendingDelta.length,
+        totalChars: accumulated.length,
+      });
       pendingDelta = "";
     };
 
@@ -609,6 +664,7 @@ export class SyncEngineDurableObject {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        chunkCount += 1;
         buffer += decoder.decode(value, { stream: true });
         while (buffer.includes("\n\n")) {
           const idx = buffer.indexOf("\n\n");
@@ -637,6 +693,12 @@ export class SyncEngineDurableObject {
         updatedAt: nowIso(),
       });
       this.broadcast(completed);
+      syncLog("assistant_turn_completed", {
+        assistantMessageId: payload.assistantMessage.id,
+        chunkCount,
+        deltaCount,
+        totalChars: accumulated.length,
+      });
     } catch (error) {
       const failed = await this.appendServerEvent(null, "message_failed", {
         messageId: payload.assistantMessage.id,
@@ -645,6 +707,12 @@ export class SyncEngineDurableObject {
         updatedAt: nowIso(),
       });
       this.broadcast(failed);
+      console.error("[sync-do] assistant_turn_failed", {
+        assistantMessageId: payload.assistantMessage.id,
+        chunkCount,
+        deltaCount,
+        error,
+      });
     }
   }
 
@@ -772,15 +840,7 @@ export class SyncEngineDurableObject {
     eventType: T,
     payload: SyncEventPayloadMap[T],
   ) {
-    this.exec("BEGIN");
-    try {
-      const event = this.insertEvent(opId, eventType, payload);
-      this.exec("COMMIT");
-      return event;
-    } catch (error) {
-      this.exec("ROLLBACK");
-      throw error;
-    }
+    return this.ctx.storage.transactionSync(() => this.insertEvent(opId, eventType, payload));
   }
 
   private applyEventToMaterializedState<T extends SyncEventType>(
@@ -1041,7 +1101,7 @@ export class SyncEngineDurableObject {
     return row ? parseJson<Message>(row.row_json) : null;
   }
 
-  private async getLastServerSeq() {
+  private getLastServerSeq() {
     const row = this.queryOne<{ seq: number }>("SELECT coalesce(max(seq), 0) as seq FROM events");
     return Number(row?.seq ?? 0);
   }
@@ -1071,7 +1131,13 @@ export class SyncEngineDurableObject {
 
   private broadcast(envelope: SyncServerEnvelope) {
     const message = json(envelope);
-    for (const socket of this.ctx.getWebSockets()) {
+    const sockets = this.ctx.getWebSockets();
+    syncLog("broadcast", {
+      type: envelope.type,
+      sockets: sockets.length,
+      eventType: envelope.type === "event" ? envelope.eventType : undefined,
+    });
+    for (const socket of sockets) {
       socket.send(message);
     }
   }
@@ -1081,7 +1147,8 @@ export class SyncEngineDurableObject {
   }
 
   private queryOne<T extends Record<string, unknown>>(query: string, ...params: any[]) {
-    return this.exec(query, ...params).one() as T | null;
+    const rows = this.exec(query, ...params).toArray() as T[];
+    return rows[0] ?? null;
   }
 
   private queryAll<T extends Record<string, unknown>>(query: string, ...params: any[]) {

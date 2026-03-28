@@ -29,6 +29,14 @@ const PENDING_OPS_KEY = "g3.pendingOps";
 const LAST_SERVER_SEQ_KEY = "g3.lastServerSeq";
 const CLIENT_ID_KEY = "g3.clientId";
 
+function syncLog(message: string, details?: Record<string, unknown>) {
+  if (details) {
+    console.log(`[sync-client] ${message}`, details);
+    return;
+  }
+  console.log(`[sync-client] ${message}`);
+}
+
 function readJson<T>(key: string, fallback: T): T {
   if (typeof localStorage === "undefined") return fallback;
   const raw = localStorage.getItem(key);
@@ -109,11 +117,13 @@ class SyncClient {
     if (typeof window === "undefined") return;
     this.store.setValue(LOCAL_VALUES.connectionStatus, "connecting");
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+    syncLog("connect", { clientId: this.clientId, lastServerSeq: this.lastServerSeq });
     const socket = new WebSocket(`${protocol}//${location.host}/api/sync/ws`);
     this.socket = socket;
 
     socket.addEventListener("open", () => {
       this.reconnectAttempt = 0;
+      syncLog("open", { pendingOps: this.pendingOps.size });
       this.send({
         type: "hello",
         clientId: this.clientId,
@@ -125,15 +135,21 @@ class SyncClient {
 
     socket.addEventListener("message", ({ data }) => {
       const envelope = JSON.parse(String(data)) as SyncServerEnvelope;
+      syncLog("message", {
+        type: envelope.type,
+        eventType: envelope.type === "event" ? envelope.eventType : undefined,
+      });
       void this.handleServerEnvelope(envelope);
     });
 
     socket.addEventListener("close", () => {
+      syncLog("close");
       this.store.setValue(LOCAL_VALUES.connectionStatus, "offline");
       this.scheduleReconnect();
     });
 
     socket.addEventListener("error", () => {
+      syncLog("error");
       this.store.setValue(LOCAL_VALUES.connectionStatus, "degraded");
     });
   }
@@ -169,6 +185,11 @@ class SyncClient {
         this.applyEvent(envelope.eventType, envelope.payload as any);
         return;
       case "sync_reset":
+        syncLog("sync_reset", { reason: envelope.reason });
+        if (envelope.reason !== "initial_sync") {
+          this.pendingOps.clear();
+          this.persistPendingOps();
+        }
         this.store.transaction(() => {
           this.store.setTables(envelope.snapshot.tables as any);
         });
@@ -181,6 +202,10 @@ class SyncClient {
 
   private send(message: object) {
     if (this.socket?.readyState === WebSocket.OPEN) {
+      syncLog("send", {
+        type: (message as { type?: string }).type,
+        commandType: (message as { commandType?: string }).commandType,
+      });
       this.socket.send(JSON.stringify(message));
     }
   }
@@ -220,6 +245,7 @@ class SyncClient {
       commandType,
       payload,
     };
+    syncLog("enqueue", { opId: op.opId, commandType });
     this.applyOptimistic(op);
     this.pendingOps.set(op.opId, op);
     this.persistPendingOps();
