@@ -72,6 +72,10 @@ export const MessageRow = Schema.Struct({
   errorCode: NullableString,
   errorMessage: NullableString,
   searchEnabled: Schema.Boolean,
+  durationMs: NullableNumber,
+  ttftMs: NullableNumber,
+  promptTokens: NullableNumber,
+  completionTokens: NullableNumber,
   ...OptimisticRowFields,
 });
 
@@ -275,7 +279,15 @@ export type SyncEventPayloadMap = {
   thread_archived: { id: string; archivedAt: string; updatedAt: string };
   message_upserted: { row: Message };
   message_failed: { messageId: string; errorCode: string; errorMessage: string; updatedAt: string };
-  message_completed: { messageId: string; text: string; updatedAt: string };
+  message_completed: {
+    messageId: string;
+    text: string;
+    updatedAt: string;
+    durationMs: number | null;
+    ttftMs: number | null;
+    promptTokens: number | null;
+    completionTokens: number | null;
+  };
   message_delta: { messageId: string; delta: string; updatedAt: string };
   message_part_appended: { row: MessagePart };
   attachment_upserted: { row: Attachment };
@@ -426,6 +438,10 @@ export function createMessage(input: {
     errorCode: null,
     errorMessage: null,
     searchEnabled: input.searchEnabled ?? false,
+    durationMs: null,
+    ttftMs: null,
+    promptTokens: null,
+    completionTokens: null,
     optimistic: input.optimistic ?? false,
     opId: input.opId ?? null,
   });

@@ -603,6 +603,7 @@ export class SyncEngineDurableObject {
         body: JSON.stringify({
           model: payload.modelId || workspace.defaultModelId || getDefaultModelId(this.env),
           stream: true,
+          stream_options: { include_usage: true },
           messages,
         }),
       },
@@ -632,6 +633,10 @@ export class SyncEngineDurableObject {
     let seq = 0;
     let chunkCount = 0;
     let deltaCount = 0;
+    const streamStartedAt = Date.now();
+    let firstTokenAt: number | null = null;
+    let promptTokens: number | null = null;
+    let completionTokens: number | null = null;
 
     const flushDelta = async () => {
       if (!pendingDelta) return;
@@ -678,8 +683,13 @@ export class SyncEngineDurableObject {
           const payloadJson = dataLines.join("\n");
           if (payloadJson === "[DONE]") continue;
           const parsed = JSON.parse(payloadJson);
+          if (parsed.usage) {
+            promptTokens = parsed.usage.prompt_tokens ?? null;
+            completionTokens = parsed.usage.completion_tokens ?? null;
+          }
           const delta = parsed.choices?.[0]?.delta?.content ?? "";
           if (!delta) continue;
+          if (firstTokenAt === null) firstTokenAt = Date.now();
           pendingDelta += delta;
           if (pendingDelta.length >= 96 || /\n/.test(pendingDelta)) {
             await flushDelta();
@@ -687,10 +697,16 @@ export class SyncEngineDurableObject {
         }
       }
       await flushDelta();
+      const durationMs = Date.now() - streamStartedAt;
+      const ttftMs = firstTokenAt !== null ? firstTokenAt - streamStartedAt : null;
       const completed = await this.appendServerEvent(null, "message_completed", {
         messageId: payload.assistantMessage.id,
         text: accumulated,
         updatedAt: nowIso(),
+        durationMs,
+        ttftMs,
+        promptTokens,
+        completionTokens,
       });
       this.broadcast(completed);
       syncLog("assistant_turn_completed", {
@@ -935,6 +951,10 @@ export class SyncEngineDurableObject {
             text: event.text,
             status: "completed",
             updatedAt: event.updatedAt,
+            durationMs: event.durationMs ?? null,
+            ttftMs: event.ttftMs ?? null,
+            promptTokens: event.promptTokens ?? null,
+            completionTokens: event.completionTokens ?? null,
             optimistic: false,
           },
         });

@@ -44,6 +44,11 @@ function formatRelativeTime(iso: string): string {
   return date.toLocaleDateString();
 }
 
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 const THEMES: { id: Theme; label: string }[] = [
   { id: "clean", label: "Clean" },
   { id: "night", label: "Night" },
@@ -161,6 +166,15 @@ export default function Home() {
       .filter((message) => message.threadId === activeThread()?.id)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
   );
+  const streamingThreadIds = createMemo(() => {
+    const ids = new Set<string>();
+    for (const msg of Object.values<any>(tables()?.[TABLES.messages] ?? {})) {
+      if (msg.status === "streaming" || msg.status === "pending" || msg.status === "queued") {
+        ids.add(msg.threadId);
+      }
+    }
+    return ids;
+  });
   const searchResults = createMemo(() => {
     const byMessage = new Map<string, any[]>();
     for (const row of Object.values<any>(tables()?.[TABLES.searchResults] ?? {})) {
@@ -300,7 +314,12 @@ export default function Home() {
                       ×
                     </button>
                   </div>
-                  <span>{formatRelativeTime(thread.lastMessageAt)}</span>
+                  <span>
+                    <Show when={streamingThreadIds().has(thread.id)}>
+                      <span class="thread-spinner" />
+                    </Show>
+                    {formatRelativeTime(thread.lastMessageAt)}
+                  </span>
                 </div>
               )}
             </For>
@@ -366,6 +385,29 @@ export default function Home() {
                           </a>
                         )}
                       </For>
+                    </div>
+                  </Show>
+                  <Show
+                    when={
+                      message.role === "assistant" &&
+                      message.status === "completed" &&
+                      message.durationMs
+                    }
+                  >
+                    <div class="msg-stats">
+                      <Show when={message.ttftMs != null}>
+                        <span>TTFT {message.ttftMs}ms</span>
+                      </Show>
+                      <span>{formatDuration(message.durationMs)}</span>
+                      <Show when={message.completionTokens != null}>
+                        <span>{message.completionTokens} tokens</span>
+                      </Show>
+                      <Show when={message.completionTokens != null && message.durationMs}>
+                        <span>
+                          {((message.completionTokens / message.durationMs) * 1000).toFixed(1)}{" "}
+                          tok/s
+                        </span>
+                      </Show>
                     </div>
                   </Show>
                 </article>

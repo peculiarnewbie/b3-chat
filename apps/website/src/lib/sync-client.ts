@@ -425,6 +425,10 @@ class SyncClient {
               text: event.text,
               status: "completed",
               updatedAt: event.updatedAt,
+              durationMs: event.durationMs ?? null,
+              ttftMs: event.ttftMs ?? null,
+              promptTokens: event.promptTokens ?? null,
+              completionTokens: event.completionTokens ?? null,
               optimistic: false,
             });
           }
