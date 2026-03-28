@@ -6,6 +6,10 @@ export async function handleSession(request: Request): Promise<Response> {
   if (!session) {
     return new Response("Unauthorized", { status: 401 });
   }
-  await ensureSeedData(env);
+  try {
+    await ensureSeedData(env);
+  } catch (error) {
+    console.error("[handleSession] failed to seed sync store:", error);
+  }
   return Response.json(session);
 }

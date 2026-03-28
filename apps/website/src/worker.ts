@@ -25,10 +25,16 @@ export default {
     const { pathname } = url;
     const method = request.method;
 
+    // Debug: log every request that reaches the worker
+    console.log(`[worker] ${method} ${pathname}`);
+
     try {
       // API routing
       if (pathname.startsWith("/api/")) {
-        if (pathname.startsWith("/api/auth/")) return await handleAuth(request);
+        if (pathname.startsWith("/api/auth/")) {
+          console.log(`[worker] routing to handleAuth: ${method} ${pathname}`);
+          return await handleAuth(request);
+        }
 
         if (pathname === "/api/session" && method === "GET") return await handleSession(request);
 
@@ -56,8 +62,12 @@ export default {
         return new Response("Not found", { status: 404 });
       }
 
-      // SPA fallback — serve static assets via Workers Assets
-      return env.ASSETS.fetch(request);
+      // Serve static assets, with SPA fallback to index.html
+      const assetResponse = await env.ASSETS.fetch(request);
+      if (assetResponse.status === 404) {
+        return env.ASSETS.fetch(new Request(new URL("/index.html", url.origin)));
+      }
+      return assetResponse;
     } catch (error) {
       if (error instanceof Response) return error;
       console.error("Unhandled error:", error);

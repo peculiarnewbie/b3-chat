@@ -11,6 +11,7 @@ import {
   collectChatHistory,
   exaSearch,
   exaMcpSearchContext,
+  getDefaultModelId,
   getRuntimeEnv,
   getSignedAttachmentUrl,
   getSyncSnapshot,
@@ -102,7 +103,7 @@ export async function handleChatStream(request: Request): Promise<Response> {
   const assistantMessage = createMessage({
     threadId,
     role: "assistant",
-    modelId: body.modelId || workspace.defaultModelId || env.DEFAULT_MODEL_ID,
+    modelId: body.modelId || workspace.defaultModelId || getDefaultModelId(env),
     status: "streaming",
     searchEnabled: body.search,
   });
@@ -151,7 +152,7 @@ export async function handleChatStream(request: Request): Promise<Response> {
       authorization: `Bearer ${env.OPENCODE_GO_API_KEY}`,
     },
     body: JSON.stringify({
-      model: body.modelId || workspace.defaultModelId || env.DEFAULT_MODEL_ID,
+      model: body.modelId || workspace.defaultModelId || getDefaultModelId(env),
       stream: true,
       messages,
     }),

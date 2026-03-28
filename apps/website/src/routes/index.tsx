@@ -34,9 +34,44 @@ type ModelsPayload = {
   }>;
 };
 
+type Theme = "clean" | "night" | "warm";
+
+function formatRelativeTime(iso: string): string {
+  const date = new Date(iso);
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffMin = Math.floor(diffMs / 60_000);
+  const diffHr = Math.floor(diffMs / 3_600_000);
+  const diffDay = Math.floor(diffMs / 86_400_000);
+
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  if (diffHr < 24) return `${diffHr}h ago`;
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return date.toLocaleDateString();
+}
+
+const THEMES: { id: Theme; label: string }[] = [
+  { id: "clean", label: "Clean" },
+  { id: "night", label: "Night" },
+  { id: "warm", label: "Warm" },
+];
+
+function getInitialTheme(): Theme {
+  if (typeof localStorage !== "undefined") {
+    const saved = localStorage.getItem("g3-theme") as Theme | null;
+    if (saved && THEMES.some((t) => t.id === saved)) return saved;
+  }
+  return "clean";
+}
+
 const fetchSession = async () => {
   const response = await fetch("/api/session");
   if (response.status === 401) return null;
+  if (!response.ok) {
+    const message = await response.text().catch(() => response.statusText);
+    throw new Error(message || "Failed to load session");
+  }
   return (await response.json()) as SessionPayload;
 };
 
@@ -62,11 +97,23 @@ export default function Home() {
   const [session] = createResource(fetchSession);
   const [models] = createResource(fetchModels);
   const version = useStoreVersion();
+  const [theme, setTheme] = createSignal<Theme>(getInitialTheme());
+  const [sidebarOpen, setSidebarOpen] = createSignal(false);
   const [composer, setComposer] = createStore({
     text: "",
     modelId: "",
     search: false,
     sending: false,
+  });
+
+  // biome-ignore lint: assigned via ref attribute
+  // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref
+  let timelineRef: HTMLElement | undefined;
+
+  // Apply theme to document
+  createEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme());
+    localStorage.setItem("g3-theme", theme());
   });
 
   const tables = createMemo(() => {
@@ -82,6 +129,16 @@ export default function Home() {
   createEffect(() => {
     const modelList = models()?.models ?? [];
     if (!composer.modelId && modelList[0]) setComposer("modelId", modelList[0].id);
+  });
+
+  // Auto-scroll on new messages
+  createEffect(() => {
+    const _msgs = messages();
+    if (timelineRef) {
+      requestAnimationFrame(() => {
+        timelineRef!.scrollTop = timelineRef!.scrollHeight;
+      });
+    }
   });
 
   const workspaces = createMemo(() =>
@@ -151,6 +208,21 @@ export default function Home() {
     await syncClient.mutate({ type: "set-value", key: VALUES.activeThreadId, value: thread.id });
   };
 
+  const deleteThread = async (threadId: string) => {
+    await syncClient.mutate({ type: "archive-thread", id: threadId, archivedAt: nowIso() });
+    // If we just deleted the active thread, switch to the first remaining thread
+    if (activeThreadId() === threadId) {
+      const remaining = threads().filter((t) => t.id !== threadId);
+      if (remaining[0]) {
+        await syncClient.mutate({
+          type: "set-value",
+          key: VALUES.activeThreadId,
+          value: remaining[0].id,
+        });
+      }
+    }
+  };
+
   const sendMessage = async () => {
     if (!activeThread() || !composer.text.trim() || composer.sending) return;
     setComposer("sending", true);
@@ -200,6 +272,13 @@ export default function Home() {
     }
   };
 
+  const handleKeyDown = (e: KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void sendMessage();
+    }
+  };
+
   return (
     <Show
       when={session()}
@@ -208,10 +287,8 @@ export default function Home() {
           <section class="auth-card">
             <p class="eyebrow">Personal deployment</p>
             <h1>g3 chat</h1>
-            <p>
-              Google OAuth is required. Access is granted only if the email matches this deployment.
-            </p>
-            <button class="primary-button" onClick={signIn}>
+            <p>Sign in with Google to continue.</p>
+            <button class="btn btn-primary" onClick={signIn}>
               Continue with Google
             </button>
           </section>
@@ -219,56 +296,89 @@ export default function Home() {
       }
     >
       <div class="shell">
-        <aside class="sidebar">
-          <div class="brand">
-            <span class="brand-mark">g3</span>
-            <div>
-              <h1>g3.chat</h1>
-              <p>{session()?.user?.email}</p>
+        <Show when={sidebarOpen()}>
+          <div class="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
+        </Show>
+        <aside classList={{ sidebar: true, open: sidebarOpen() }}>
+          <div class="sidebar-top">
+            <div class="brand">
+              <span class="brand-mark">g3</span>
+              <div style="min-width:0">
+                <h1>g3.chat</h1>
+                <p class="brand-email">{session()?.user?.email}</p>
+              </div>
+            </div>
+            <div class="sidebar-actions">
+              <button class="btn btn-primary" onClick={createNewThread}>
+                + Chat
+              </button>
+              <button class="btn" onClick={createNewWorkspace}>
+                + Space
+              </button>
             </div>
           </div>
-          <button class="primary-button" onClick={createNewThread}>
-            New Chat
-          </button>
-          <button class="ghost-button" onClick={createNewWorkspace}>
-            New Workspace
-          </button>
-          <div class="sidebar-section">
+
+          <div class="sidebar-scroll">
             <p class="section-label">Workspaces</p>
             <For each={workspaces()}>
               {(workspace) => (
                 <button
                   classList={{ "nav-item": true, active: workspace.id === activeWorkspace()?.id }}
-                  onClick={() =>
-                    syncClient.mutate({
+                  onClick={() => {
+                    void syncClient.mutate({
                       type: "set-value",
                       key: VALUES.activeWorkspaceId,
                       value: workspace.id,
-                    })
-                  }
+                    });
+                    setSidebarOpen(false);
+                  }}
                 >
                   <strong>{workspace.name}</strong>
-                  <span>{workspace.defaultSearchMode ? "Search on" : "Search off"}</span>
                 </button>
               )}
             </For>
-          </div>
-          <div class="sidebar-section">
+
             <p class="section-label">Threads</p>
             <For each={threads()}>
               {(thread) => (
-                <button
+                <div
                   classList={{ "nav-item": true, active: thread.id === activeThread()?.id }}
-                  onClick={() =>
-                    syncClient.mutate({
+                  onClick={() => {
+                    void syncClient.mutate({
                       type: "set-value",
                       key: VALUES.activeThreadId,
                       value: thread.id,
-                    })
-                  }
+                    });
+                    setSidebarOpen(false);
+                  }}
                 >
-                  <strong>{thread.title}</strong>
-                  <span>{new Date(thread.updatedAt).toLocaleString()}</span>
+                  <div class="nav-item-header">
+                    <strong>{thread.title}</strong>
+                    <button
+                      class="delete-btn"
+                      title="Delete thread"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void deleteThread(thread.id);
+                      }}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <span>{formatRelativeTime(thread.lastMessageAt)}</span>
+                </div>
+              )}
+            </For>
+          </div>
+
+          <div class="sidebar-footer">
+            <For each={THEMES}>
+              {(t) => (
+                <button
+                  classList={{ "theme-btn": true, active: theme() === t.id }}
+                  onClick={() => setTheme(t.id)}
+                >
+                  {t.label}
                 </button>
               )}
             </For>
@@ -276,34 +386,39 @@ export default function Home() {
         </aside>
 
         <main class="main-pane">
-          <header class="workspace-header">
-            <div>
-              <p class="eyebrow">Workspace</p>
-              <h2>{activeWorkspace()?.name}</h2>
-              <p>
-                {activeWorkspace()?.systemPrompt || "No system prompt set for this workspace yet."}
-              </p>
-            </div>
+          <header class="thread-header">
+            <button class="menu-btn" onClick={() => setSidebarOpen(true)}>
+              ☰
+            </button>
+            <span class="workspace-label">{activeWorkspace()?.name}</span>
+            <h2>{activeThread()?.title ?? "New Chat"}</h2>
+            <Show when={activeWorkspace()?.systemPrompt}>
+              <span class="system-prompt" title={activeWorkspace()?.systemPrompt}>
+                {activeWorkspace()?.systemPrompt}
+              </span>
+            </Show>
           </header>
 
-          <section class="timeline">
+          <section class="timeline" ref={timelineRef}>
             <For each={messages()}>
               {(message) => (
                 <article
                   classList={{
-                    bubble: true,
+                    msg: true,
                     assistant: message.role === "assistant",
                     user: message.role === "user",
                   }}
                 >
-                  <header>
-                    <strong>{message.role === "assistant" ? "Assistant" : "You"}</strong>
-                    <span>{message.status}</span>
-                  </header>
+                  <div class="msg-meta">
+                    <span class="msg-role">{message.role === "assistant" ? "AI" : "You"}</span>
+                    <Show when={message.status && message.status !== "done"}>
+                      <span class="msg-status">{message.status}</span>
+                    </Show>
+                  </div>
                   <p>{message.text || "…"}</p>
                   <Show when={searchResults().get(message.id)?.length}>
-                    <div class="search-block">
-                      <p>Searched the web</p>
+                    <div class="search-results">
+                      <span class="sr-label">Web results</span>
                       <For each={searchResults().get(message.id)}>
                         {(result) => (
                           <a href={result.url} target="_blank" rel="noreferrer">
@@ -322,7 +437,8 @@ export default function Home() {
             <textarea
               value={composer.text}
               onInput={(event) => setComposer("text", event.currentTarget.value)}
-              placeholder="Type your message here..."
+              onKeyDown={handleKeyDown}
+              placeholder="Message..."
             />
             <div class="composer-bar">
               <select
@@ -341,7 +457,8 @@ export default function Home() {
                 />
                 Search
               </label>
-              <button class="primary-button" disabled={composer.sending} onClick={sendMessage}>
+              <span class="kbd-hint">Enter to send</span>
+              <button class="btn btn-primary" disabled={composer.sending} onClick={sendMessage}>
                 {composer.sending ? "Sending…" : "Send"}
               </button>
             </div>

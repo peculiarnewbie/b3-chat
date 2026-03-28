@@ -1,7 +1,9 @@
 import { betterAuth } from "better-auth";
+import { dash } from "@better-auth/infra";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { drizzle } from "drizzle-orm/d1";
 import { sql } from "drizzle-orm";
+import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
 import {
   createId,
   createThread,
@@ -16,6 +18,7 @@ export type AppEnv = {
   ALLOWED_EMAIL: string;
   BETTER_AUTH_SECRET: string;
   BETTER_AUTH_URL: string;
+  BETTER_AUTH_API_KEY: string;
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   OPENCODE_GO_BASE_URL: string;
@@ -33,6 +36,60 @@ declare global {
   // eslint-disable-next-line no-var
   var __env__: AppEnv | undefined;
 }
+
+// Drizzle schema for better-auth tables (adapter needs these to resolve models).
+// Date columns use { mode: "timestamp" } so Drizzle converts Date objects ↔ integer.
+const user = sqliteTable("user", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  email: text("email").notNull().unique(),
+  emailVerified: integer("emailVerified").notNull().default(0),
+  image: text("image"),
+  createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull(),
+});
+
+const session = sqliteTable("session", {
+  id: text("id").primaryKey(),
+  expiresAt: integer("expiresAt", { mode: "timestamp" }).notNull(),
+  token: text("token").notNull().unique(),
+  createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull(),
+  ipAddress: text("ipAddress"),
+  userAgent: text("userAgent"),
+  userId: text("userId")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+});
+
+const account = sqliteTable("account", {
+  id: text("id").primaryKey(),
+  accountId: text("accountId").notNull(),
+  providerId: text("providerId").notNull(),
+  userId: text("userId")
+    .notNull()
+    .references(() => user.id, { onDelete: "cascade" }),
+  accessToken: text("accessToken"),
+  refreshToken: text("refreshToken"),
+  idToken: text("idToken"),
+  accessTokenExpiresAt: integer("accessTokenExpiresAt", { mode: "timestamp" }),
+  refreshTokenExpiresAt: integer("refreshTokenExpiresAt", { mode: "timestamp" }),
+  scope: text("scope"),
+  password: text("password"),
+  createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull(),
+});
+
+const verification = sqliteTable("verification", {
+  id: text("id").primaryKey(),
+  identifier: text("identifier").notNull(),
+  value: text("value").notNull(),
+  expiresAt: integer("expiresAt", { mode: "timestamp" }).notNull(),
+  createdAt: integer("createdAt", { mode: "timestamp" }),
+  updatedAt: integer("updatedAt", { mode: "timestamp" }),
+});
+
+const authSchema = { user, session, account, verification };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const encoder = new TextEncoder();
@@ -62,6 +119,10 @@ export function allowedEmail(env: AppEnv) {
   return normalizeEmail(env.ALLOWED_EMAIL);
 }
 
+export function getDefaultModelId(env: Pick<AppEnv, "DEFAULT_MODEL_ID">) {
+  return env.DEFAULT_MODEL_ID?.trim() || "auto";
+}
+
 export function getRuntimeEnv() {
   const env = globalThis.__env__;
   if (!env) throw new Error("Cloudflare env bindings are not available");
@@ -69,53 +130,16 @@ export function getRuntimeEnv() {
 }
 
 export async function ensureAuthSchema(env: AppEnv) {
+  const db = drizzle(env.AUTH_DB);
   const statements = [
-    `create table if not exists user (
-      id text primary key,
-      name text not null,
-      email text not null unique,
-      emailVerified integer not null default 0,
-      image text,
-      createdAt integer not null,
-      updatedAt integer not null
-    )`,
-    `create table if not exists session (
-      id text primary key,
-      expiresAt integer not null,
-      token text not null unique,
-      createdAt integer not null,
-      updatedAt integer not null,
-      ipAddress text,
-      userAgent text,
-      userId text not null references user(id) on delete cascade
-    )`,
-    `create table if not exists account (
-      id text primary key,
-      accountId text not null,
-      providerId text not null,
-      userId text not null references user(id) on delete cascade,
-      accessToken text,
-      refreshToken text,
-      idToken text,
-      accessTokenExpiresAt integer,
-      refreshTokenExpiresAt integer,
-      scope text,
-      password text,
-      createdAt integer not null,
-      updatedAt integer not null
-    )`,
-    `create unique index if not exists account_provider_account_idx on account(providerId, accountId)`,
-    `create table if not exists verification (
-      id text primary key,
-      identifier text not null,
-      value text not null,
-      expiresAt integer not null,
-      createdAt integer,
-      updatedAt integer
-    )`,
-    `create index if not exists verification_identifier_idx on verification(identifier)`,
+    sql`create table if not exists user (id text primary key, name text not null, email text not null unique, emailVerified integer not null default 0, image text, createdAt integer not null, updatedAt integer not null)`,
+    sql`create table if not exists session (id text primary key, expiresAt integer not null, token text not null unique, createdAt integer not null, updatedAt integer not null, ipAddress text, userAgent text, userId text not null references user(id) on delete cascade)`,
+    sql`create table if not exists account (id text primary key, accountId text not null, providerId text not null, userId text not null references user(id) on delete cascade, accessToken text, refreshToken text, idToken text, accessTokenExpiresAt integer, refreshTokenExpiresAt integer, scope text, password text, createdAt integer not null, updatedAt integer not null)`,
+    sql`create unique index if not exists account_provider_account_idx on account(providerId, accountId)`,
+    sql`create table if not exists verification (id text primary key, identifier text not null, value text not null, expiresAt integer not null, createdAt integer, updatedAt integer)`,
+    sql`create index if not exists verification_identifier_idx on verification(identifier)`,
   ];
-  for (const statement of statements) await env.AUTH_DB.exec(statement);
+  for (const statement of statements) await db.run(statement);
 }
 
 export function createAuth(env: AppEnv) {
@@ -125,6 +149,7 @@ export function createAuth(env: AppEnv) {
     baseURL: env.BETTER_AUTH_URL,
     database: drizzleAdapter(db, {
       provider: "sqlite",
+      schema: authSchema,
     }),
     emailAndPassword: {
       enabled: false,
@@ -154,6 +179,11 @@ export function createAuth(env: AppEnv) {
         },
       },
     } as any,
+    plugins: [
+      dash({
+        apiKey: env.BETTER_AUTH_API_KEY,
+      }),
+    ],
     advanced: {
       database: {
         generateId: () => createId("usr"),
@@ -207,7 +237,7 @@ export async function syncMutate(env: AppEnv, mutation: SyncMutation) {
 export async function bootstrapSyncStore(env: AppEnv) {
   return syncMutate(env, {
     type: "bootstrap",
-    defaultModelId: env.DEFAULT_MODEL_ID,
+    defaultModelId: getDefaultModelId(env),
   });
 }
 
@@ -423,7 +453,7 @@ export async function ensureSeedData(env: AppEnv) {
 
   const workspace = createWorkspace({
     name: "Default Workspace",
-    defaultModelId: env.DEFAULT_MODEL_ID,
+    defaultModelId: getDefaultModelId(env),
     defaultSearchMode: false,
     systemPrompt: "",
   });

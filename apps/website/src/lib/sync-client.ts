@@ -3,6 +3,11 @@ import { createMergeableStore } from "tinybase";
 import { createLocalPersister } from "tinybase/persisters/persister-browser";
 import { createWsSynchronizer } from "tinybase/synchronizers/synchronizer-ws-client";
 
+type SyncSnapshot = {
+  tables?: Record<string, Record<string, unknown>>;
+  values?: Record<string, string | number | boolean | null>;
+};
+
 class SyncClient {
   store = createMergeableStore("g3-chat-client")
     .setTablesSchema(tablesSchema)
@@ -30,7 +35,12 @@ class SyncClient {
       body: JSON.stringify(mutation),
     });
     if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    const snapshot = (await response.json()) as SyncSnapshot;
+    this.store.transaction(() => {
+      if (snapshot.tables) this.store.setTables(snapshot.tables as any);
+      if (snapshot.values) this.store.setValues(snapshot.values as any);
+    });
+    return snapshot;
   }
 
   get tables() {

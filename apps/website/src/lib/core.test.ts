@@ -46,6 +46,7 @@ describe("server helpers", () => {
     ALLOWED_EMAIL: "owner@example.com",
     BETTER_AUTH_SECRET: "test-secret",
     BETTER_AUTH_URL: "https://chat.example.com",
+    BETTER_AUTH_API_KEY: "better-auth-key",
     GOOGLE_CLIENT_ID: "google-client",
     GOOGLE_CLIENT_SECRET: "google-secret",
     OPENCODE_GO_BASE_URL: "https://api.example.com",

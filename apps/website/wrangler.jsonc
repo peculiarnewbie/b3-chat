@@ -5,11 +5,25 @@
   "main": "src/worker.ts",
   "compatibility_date": "2026-03-22",
   "compatibility_flags": ["nodejs_compat"],
+  "routes": [{ "pattern": "chat.peculiarnewbie.com", "custom_domain": true }],
   "assets": {
     "directory": "dist/client",
     "binding": "ASSETS",
     "html_handling": "none",
-    "not_found_handling": "single-page-application",
+    "not_found_handling": "none",
+  },
+  "secrets": {
+    "required": [
+      "ALLOWED_EMAIL",
+      "BETTER_AUTH_SECRET",
+      "BETTER_AUTH_URL",
+      "BETTER_AUTH_API_KEY",
+      "GOOGLE_CLIENT_ID",
+      "GOOGLE_CLIENT_SECRET",
+      "OPENCODE_GO_BASE_URL",
+      "OPENCODE_GO_API_KEY",
+      "DEFAULT_MODEL_ID",
+    ],
   },
   "observability": {
     "enabled": true,
