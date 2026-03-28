@@ -1,3 +1,5 @@
+@import "highlight.js/styles/github-dark-dimmed.css";
+
 /* ── Theme tokens ─────────────────────────────────── */
 
 [data-theme="clean"] {
@@ -447,7 +449,7 @@ a {
   opacity: 0.5;
 }
 
-.msg p {
+.msg.user p {
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -474,6 +476,131 @@ a {
 
 .msg .search-results a:hover {
   text-decoration: underline;
+}
+
+/* ── Markdown content (assistant messages) ───────── */
+
+.msg.assistant .md-content {
+  word-break: break-word;
+}
+
+.md-content h1,
+.md-content h2,
+.md-content h3,
+.md-content h4 {
+  margin: 0.6em 0 0.3em;
+  line-height: 1.3;
+}
+.md-content h1 {
+  font-size: 1.15em;
+}
+.md-content h2 {
+  font-size: 1.05em;
+}
+.md-content h3 {
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.md-content p {
+  margin: 0.4em 0;
+}
+.md-content p:first-child {
+  margin-top: 0;
+}
+.md-content p:last-child {
+  margin-bottom: 0;
+}
+
+.md-content ul,
+.md-content ol {
+  margin: 0.4em 0;
+  padding-left: 1.4em;
+}
+.md-content li {
+  margin: 0.15em 0;
+}
+
+.md-content code {
+  background: var(--panel-strong);
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+  font-size: 0.85em;
+  font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+}
+
+.md-content pre {
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0.5em 0;
+  overflow-x: auto;
+  font-size: 0.82em;
+  line-height: 1.5;
+}
+.md-content pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+}
+
+.md-content blockquote {
+  border-left: 3px solid var(--accent);
+  margin: 0.5em 0;
+  padding: 0.2em 0 0.2em 0.8em;
+  color: var(--text-secondary);
+}
+
+.md-content table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.85em;
+  width: 100%;
+}
+.md-content th,
+.md-content td {
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+  text-align: left;
+}
+.md-content th {
+  background: var(--panel-strong);
+  font-weight: 600;
+}
+
+.md-content a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.md-content a:hover {
+  text-decoration: underline;
+}
+
+.md-content hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 0.6em 0;
+}
+
+/* ── Streaming cursor ────────────────────────────── */
+
+.streaming-cursor {
+  display: inline-block;
+  width: 6px;
+  height: 1em;
+  background: var(--accent);
+  border-radius: 1px;
+  animation: blink 1s step-end infinite;
+  vertical-align: text-bottom;
+  margin-left: 2px;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
 }
 
 /* ── Composer ─────────────────────────────────────── */

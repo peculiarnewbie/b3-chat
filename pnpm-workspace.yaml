@@ -5,7 +5,12 @@ packages:
 
 catalog:
   "@better-auth/infra": ^0.1.13
+  "@types/dompurify": ^3.2.0
   "@types/node": ^24
+  dompurify: ^3.3.3
+  highlight.js: ^11.11.1
+  marked: ^17.0.5
+  marked-highlight: ^2.2.3
   typescript: ^5
   vite: npm:@voidzero-dev/vite-plus-core@latest
   vite-plus: latest

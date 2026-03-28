@@ -18,6 +18,7 @@ import {
   TABLES,
   VALUES,
 } from "@g3-chat/domain";
+import Markdown from "../components/Markdown";
 import { authClient } from "../lib/auth-client";
 import { syncClient } from "../lib/sync-client";
 
@@ -415,7 +416,12 @@ export default function Home() {
                       <span class="msg-status">{message.status}</span>
                     </Show>
                   </div>
-                  <p>{message.text || "…"}</p>
+                  <Show when={message.role === "assistant"} fallback={<p>{message.text || "…"}</p>}>
+                    <Markdown text={message.text || "…"} />
+                    <Show when={message.status === "streaming"}>
+                      <span class="streaming-cursor" />
+                    </Show>
+                  </Show>
                   <Show when={searchResults().get(message.id)?.length}>
                     <div class="search-results">
                       <span class="sr-label">Web results</span>
