@@ -35,5 +35,36 @@
     "vite-plugin-solid": "^2.11.0",
     "vite-plus": "catalog:",
     "wrangler": "^4.56.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "ALLOWED_EMAIL": {
+        "description": "Comma-separated list of email addresses allowed to sign in."
+      },
+      "BETTER_AUTH_SECRET": {
+        "description": "A random secret for Better Auth. Generate one with `openssl rand -hex 32`."
+      },
+      "BETTER_AUTH_URL": {
+        "description": "The public URL of your deployed app (e.g. `https://your-worker.workers.dev`)."
+      },
+      "BETTER_AUTH_API_KEY": {
+        "description": "API key for Better Auth admin operations. Generate one with `openssl rand -hex 32`."
+      },
+      "GOOGLE_CLIENT_ID": {
+        "description": "Google OAuth Client ID from the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)."
+      },
+      "GOOGLE_CLIENT_SECRET": {
+        "description": "Google OAuth Client Secret from the [Google Cloud Console](https://console.cloud.google.com/apis/credentials)."
+      },
+      "OPENCODE_GO_BASE_URL": {
+        "description": "Base URL for the OpenCode Go API backend."
+      },
+      "OPENCODE_GO_API_KEY": {
+        "description": "API key for authenticating with the OpenCode Go API."
+      },
+      "DEFAULT_MODEL_ID": {
+        "description": "Default LLM model ID to use (e.g. `claude-sonnet-4-20250514`)."
+      }
+    }
   }
 }

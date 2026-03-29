@@ -1,6 +1,8 @@
-# Vite+ Monorepo Starter
+# g3-chat
 
-A starter for creating a Vite+ monorepo.
+A full-stack chat application built with SolidJS and Cloudflare Workers.
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/peculiarnewbie/g3-chat)
 
 ## Development
 
