@@ -9,7 +9,7 @@ import {
   onMount,
 } from "solid-js";
 import { createStore } from "solid-js/store";
-import { LOCAL_VALUES, TABLES } from "@g3-chat/domain";
+import { LOCAL_VALUES, TABLES, nowIso } from "@g3-chat/domain";
 import Markdown from "../components/Markdown";
 import { authClient } from "../lib/auth-client";
 import { syncClient } from "../lib/sync-client";
@@ -63,6 +63,20 @@ function getInitialTheme(): Theme {
   return "clean";
 }
 
+function getInitialModelId(): string {
+  if (typeof localStorage !== "undefined") {
+    return localStorage.getItem("g3-modelId") ?? "";
+  }
+  return "";
+}
+
+function getInitialSearch(): boolean {
+  if (typeof localStorage !== "undefined") {
+    return localStorage.getItem("g3-search") === "true";
+  }
+  return false;
+}
+
 const fetchSession = async () => {
   const response = await fetch("/api/session");
   if (response.status === 401) return null;
@@ -99,19 +113,56 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
   const [composer, setComposer] = createStore({
     text: "",
-    modelId: "",
-    search: false,
+    modelId: getInitialModelId(),
+    search: getInitialSearch(),
     sending: false,
   });
+
+  // Inline editing state
+  const [editingThreadId, setEditingThreadId] = createSignal<string | null>(null);
+  const [editingWorkspaceId, setEditingWorkspaceId] = createSignal<string | null>(null);
+  const [editValue, setEditValue] = createSignal("");
 
   // biome-ignore lint: assigned via ref attribute
   // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref
   let timelineRef: HTMLElement | undefined;
 
+  // Smart scroll: track whether user is near the bottom
+  const [isNearBottom, setIsNearBottom] = createSignal(true);
+  const [showScrollBtn, setShowScrollBtn] = createSignal(false);
+
+  const SCROLL_THRESHOLD = 80; // px from bottom to consider "at bottom"
+
+  const handleTimelineScroll = () => {
+    if (!timelineRef) return;
+    const { scrollTop, scrollHeight, clientHeight } = timelineRef;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    const nearBottom = distanceFromBottom <= SCROLL_THRESHOLD;
+    setIsNearBottom(nearBottom);
+    setShowScrollBtn(!nearBottom);
+  };
+
+  const scrollToBottom = () => {
+    if (!timelineRef) return;
+    timelineRef.scrollTo({ top: timelineRef.scrollHeight, behavior: "smooth" });
+  };
+
   // Apply theme to document
   createEffect(() => {
     document.documentElement.setAttribute("data-theme", theme());
     localStorage.setItem("g3-theme", theme());
+  });
+
+  // Persist model selection
+  createEffect(() => {
+    if (composer.modelId) {
+      localStorage.setItem("g3-modelId", composer.modelId);
+    }
+  });
+
+  // Persist search toggle
+  createEffect(() => {
+    localStorage.setItem("g3-search", String(composer.search));
   });
 
   const tables = createMemo(() => {
@@ -127,12 +178,17 @@ export default function Home() {
   createEffect(() => {
     const modelList = models()?.models ?? [];
     if (!composer.modelId && modelList[0]) setComposer("modelId", modelList[0].id);
+    // If we have a persisted model, validate it still exists
+    if (composer.modelId && modelList.length > 0) {
+      const exists = modelList.some((m) => m.id === composer.modelId);
+      if (!exists) setComposer("modelId", modelList[0].id);
+    }
   });
 
-  // Auto-scroll on new messages
+  // Auto-scroll only when user is already near the bottom
   createEffect(() => {
     const _msgs = messages();
-    if (timelineRef) {
+    if (timelineRef && isNearBottom()) {
       requestAnimationFrame(() => {
         timelineRef!.scrollTop = timelineRef!.scrollHeight;
       });
@@ -206,6 +262,35 @@ export default function Home() {
 
   const deleteThread = async (threadId: string) => {
     syncClient.archiveThread(threadId);
+  };
+
+  // Inline rename helpers
+  const startEditingThread = (threadId: string, currentTitle: string) => {
+    setEditingThreadId(threadId);
+    setEditValue(currentTitle);
+  };
+
+  const commitThreadRename = (threadId: string) => {
+    const newTitle = editValue().trim();
+    setEditingThreadId(null);
+    if (!newTitle || newTitle === "") return;
+    const row = syncClient.store.getRow(TABLES.threads, threadId) as any;
+    if (!row || row.title === newTitle) return;
+    syncClient.updateThread({ ...row, title: newTitle, updatedAt: nowIso() });
+  };
+
+  const startEditingWorkspace = (workspaceId: string, currentName: string) => {
+    setEditingWorkspaceId(workspaceId);
+    setEditValue(currentName);
+  };
+
+  const commitWorkspaceRename = (workspaceId: string) => {
+    const newName = editValue().trim();
+    setEditingWorkspaceId(null);
+    if (!newName || newName === "") return;
+    const row = syncClient.store.getRow(TABLES.workspaces, workspaceId) as any;
+    if (!row || row.name === newName) return;
+    syncClient.updateWorkspace({ ...row, name: newName, updatedAt: nowIso() });
   };
 
   const sendMessage = async () => {
@@ -283,10 +368,37 @@ export default function Home() {
                   classList={{ "nav-item": true, active: workspace.id === activeWorkspace()?.id }}
                   onClick={() => {
                     syncClient.setActiveWorkspaceId(workspace.id);
+                    // Focus on the newest thread in the target workspace
+                    const wsThreads = Object.values<any>(tables()?.[TABLES.threads] ?? {})
+                      .filter((t) => t.workspaceId === workspace.id && !t.archivedAt)
+                      .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
+                    if (wsThreads[0]) {
+                      syncClient.setActiveThreadId(wsThreads[0].id);
+                    }
                     setSidebarOpen(false);
                   }}
+                  onDblClick={(e) => {
+                    e.preventDefault();
+                    startEditingWorkspace(workspace.id, workspace.name);
+                  }}
                 >
-                  <strong>{workspace.name}</strong>
+                  <Show
+                    when={editingWorkspaceId() === workspace.id}
+                    fallback={<strong>{workspace.name}</strong>}
+                  >
+                    <input
+                      class="inline-edit"
+                      value={editValue()}
+                      onInput={(e) => setEditValue(e.currentTarget.value)}
+                      onBlur={() => commitWorkspaceRename(workspace.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitWorkspaceRename(workspace.id);
+                        if (e.key === "Escape") setEditingWorkspaceId(null);
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                      ref={(el) => requestAnimationFrame(() => el.focus())}
+                    />
+                  </Show>
                 </button>
               )}
             </For>
@@ -300,9 +412,29 @@ export default function Home() {
                     syncClient.setActiveThreadId(thread.id);
                     setSidebarOpen(false);
                   }}
+                  onDblClick={(e) => {
+                    e.preventDefault();
+                    startEditingThread(thread.id, thread.title);
+                  }}
                 >
                   <div class="nav-item-header">
-                    <strong>{thread.title}</strong>
+                    <Show
+                      when={editingThreadId() === thread.id}
+                      fallback={<strong>{thread.title}</strong>}
+                    >
+                      <input
+                        class="inline-edit"
+                        value={editValue()}
+                        onInput={(e) => setEditValue(e.currentTarget.value)}
+                        onBlur={() => commitThreadRename(thread.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") commitThreadRename(thread.id);
+                          if (e.key === "Escape") setEditingThreadId(null);
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        ref={(el) => requestAnimationFrame(() => el.focus())}
+                      />
+                    </Show>
                     <button
                       class="delete-btn"
                       title="Delete thread"
@@ -353,7 +485,7 @@ export default function Home() {
             </Show>
           </header>
 
-          <section class="timeline" ref={timelineRef}>
+          <section class="timeline" ref={timelineRef} onScroll={handleTimelineScroll}>
             <For each={messages()}>
               {(message) => (
                 <article
@@ -414,6 +546,20 @@ export default function Home() {
               )}
             </For>
           </section>
+
+          <Show when={showScrollBtn()}>
+            <button class="scroll-to-bottom" onClick={scrollToBottom} title="Scroll to bottom">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path
+                  d="M8 3v10M4 9l4 4 4-4"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+          </Show>
 
           <footer class="composer">
             <textarea

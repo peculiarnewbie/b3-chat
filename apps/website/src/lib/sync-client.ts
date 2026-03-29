@@ -532,6 +532,14 @@ class SyncClient {
     });
   }
 
+  updateThread(thread: Thread) {
+    return this.enqueueCommand("update_thread", { thread });
+  }
+
+  updateWorkspace(workspace: any) {
+    return this.enqueueCommand("update_workspace", { workspace });
+  }
+
   sendMessage(input: { thread: Thread; text: string; modelId: string; search: boolean }) {
     const opId = createId("op");
     const updatedAt = nowIso();

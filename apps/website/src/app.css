@@ -366,6 +366,7 @@ a {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
 }
 
 .thread-header {
@@ -636,6 +637,50 @@ a {
   50% {
     opacity: 0;
   }
+}
+
+/* ── Scroll-to-bottom button ─────────────────────── */
+
+.scroll-to-bottom {
+  position: absolute;
+  bottom: 90px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text-secondary);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: all 0.2s ease;
+  backdrop-filter: blur(8px);
+}
+
+.scroll-to-bottom:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+  transform: translateX(-50%) scale(1.08);
+}
+
+/* ── Inline edit ─────────────────────────────────── */
+
+.inline-edit {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: 1px 4px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
 }
 
 /* ── Composer ─────────────────────────────────────── */
