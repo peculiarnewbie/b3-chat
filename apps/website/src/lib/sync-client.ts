@@ -532,22 +532,6 @@ class SyncClient {
     });
   }
 
-  renameThread(threadId: string, title: string) {
-    const row = this.store.getRow(TABLES.threads, threadId) as any;
-    if (!row) return;
-    return this.enqueueCommand("update_thread", {
-      thread: { ...row, title, updatedAt: nowIso(), optimistic: true, opId: createId("op") },
-    });
-  }
-
-  renameWorkspace(workspaceId: string, name: string) {
-    const row = this.store.getRow(TABLES.workspaces, workspaceId) as any;
-    if (!row) return;
-    return this.enqueueCommand("update_workspace", {
-      workspace: { ...row, name, updatedAt: nowIso(), optimistic: true, opId: createId("op") },
-    });
-  }
-
   sendMessage(input: { thread: Thread; text: string; modelId: string; search: boolean }) {
     const opId = createId("op");
     const updatedAt = nowIso();

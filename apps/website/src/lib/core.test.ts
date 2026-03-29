@@ -1,9 +1,7 @@
 import { buildSearchContext, createAttachment, createWorkspace, slugify } from "@g3-chat/domain";
 import {
-  decryptUserSecret,
-  encryptUserSecret,
+  allowedEmail,
   filterModelsCatalog,
-  getDefaultModelId,
   isImageAttachment,
   isInlineTextAttachment,
   normalizeEmail,
@@ -45,30 +43,25 @@ describe("domain helpers", () => {
 
 describe("server helpers", () => {
   const env = {
+    ALLOWED_EMAIL: "owner@example.com",
     BETTER_AUTH_SECRET: "test-secret",
     BETTER_AUTH_URL: "https://chat.example.com",
     BETTER_AUTH_API_KEY: "better-auth-key",
     GOOGLE_CLIENT_ID: "google-client",
     GOOGLE_CLIENT_SECRET: "google-secret",
     OPENCODE_GO_BASE_URL: "https://api.example.com",
+    OPENCODE_GO_API_KEY: "opencode-key",
     OPENCODE_GO_MODEL_ALLOWLIST: "openai/gpt-4.1,anthropic/claude-sonnet-4",
     DEFAULT_MODEL_ID: "openai/gpt-4.1",
-    USER_SECRET_ENCRYPTION_KEY: "encryption-secret",
+    EXA_API_KEY: "exa-key",
     AUTH_DB: {} as D1Database,
     UPLOADS: {} as R2Bucket,
     SYNC_ENGINE: {} as DurableObjectNamespace,
   };
 
-  it("normalizes email and returns the default model", () => {
+  it("normalizes and checks the allowed email", () => {
     expect(normalizeEmail(" Owner@Example.com ")).toBe("owner@example.com");
-    expect(getDefaultModelId(env)).toBe("openai/gpt-4.1");
-  });
-
-  it("encrypts and decrypts user secrets with the scoped key", async () => {
-    const encrypted = await encryptUserSecret(env, "g3-chat:user:u1:provider:opencode", "secret");
-    const decrypted = await decryptUserSecret(env, "g3-chat:user:u1:provider:opencode", encrypted);
-
-    expect(decrypted).toBe("secret");
+    expect(allowedEmail(env)).toBe("owner@example.com");
   });
 
   it("filters models.dev data to the allowlist", () => {

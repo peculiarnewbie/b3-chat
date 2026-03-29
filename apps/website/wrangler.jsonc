@@ -14,14 +14,15 @@
   },
   "secrets": {
     "required": [
+      "ALLOWED_EMAIL",
       "BETTER_AUTH_SECRET",
       "BETTER_AUTH_URL",
       "BETTER_AUTH_API_KEY",
       "GOOGLE_CLIENT_ID",
       "GOOGLE_CLIENT_SECRET",
       "OPENCODE_GO_BASE_URL",
+      "OPENCODE_GO_API_KEY",
       "DEFAULT_MODEL_ID",
-      "USER_SECRET_ENCRYPTION_KEY",
     ],
   },
   "observability": {

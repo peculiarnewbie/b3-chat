@@ -11,67 +11,23 @@ import {
   type SyncCommandPayloadMap,
   type SyncCommandType,
   type SyncSnapshot,
-  type UserProviderSettingsInput,
-  type UserProviderSettingsState,
-  type UserRuntimeConfig,
 } from "@g3-chat/domain";
 
 export type AppEnv = {
+  ALLOWED_EMAIL: string;
   BETTER_AUTH_SECRET: string;
   BETTER_AUTH_URL: string;
   BETTER_AUTH_API_KEY: string;
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   OPENCODE_GO_BASE_URL: string;
+  OPENCODE_GO_API_KEY: string;
   OPENCODE_GO_MODEL_ALLOWLIST?: string;
   DEFAULT_MODEL_ID: string;
-  USER_SECRET_ENCRYPTION_KEY: string;
+  EXA_API_KEY: string;
   AUTH_DB: D1Database;
   UPLOADS: R2Bucket;
   SYNC_ENGINE: DurableObjectNamespace;
-};
-
-export type SessionUser = {
-  userId: string;
-  email: string;
-  name: string | null;
-  image: string | null;
-};
-
-type ExaSearchResult = {
-  title?: string;
-  url: string;
-  highlights?: string[];
-  text?: string;
-  publishedDate?: string | null;
-  highlightScores?: number[];
-};
-
-type ExaSearchResponse = {
-  results?: ExaSearchResult[];
-};
-
-type InternalCommandResponse = {
-  ok: boolean;
-  snapshot?: SyncSnapshot;
-  reason?: string;
-  code?: string;
-};
-
-type BetterAuthSession = {
-  user?: {
-    id?: string;
-    email?: string;
-    name?: string | null;
-    image?: string | null;
-  };
-};
-
-type EncryptedSecretRecord = {
-  version: 1;
-  algorithm: "AES-GCM";
-  iv: string;
-  ciphertext: string;
 };
 
 declare global {
@@ -133,10 +89,33 @@ const verification = sqliteTable("verification", {
 const authSchema = { user, session, account, verification };
 const DAY_MS = 24 * 60 * 60 * 1000;
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
+
+type ExaSearchResult = {
+  title?: string;
+  url: string;
+  highlights?: string[];
+  text?: string;
+  publishedDate?: string | null;
+  highlightScores?: number[];
+};
+
+type ExaSearchResponse = {
+  results?: ExaSearchResult[];
+};
+
+type InternalCommandResponse = {
+  ok: boolean;
+  snapshot?: SyncSnapshot;
+  reason?: string;
+  code?: string;
+};
 
 export function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
+}
+
+export function allowedEmail(env: AppEnv) {
+  return normalizeEmail(env.ALLOWED_EMAIL);
 }
 
 export function getDefaultModelId(env: Pick<AppEnv, "DEFAULT_MODEL_ID">) {
@@ -184,12 +163,18 @@ export function createAuth(env: AppEnv) {
     databaseHooks: {
       user: {
         create: {
-          before: async (rawUser: Record<string, unknown>) => ({
-            data: {
-              ...rawUser,
-              email: normalizeEmail(typeof rawUser.email === "string" ? rawUser.email : ""),
-            },
-          }),
+          before: async (user: Record<string, unknown>) => {
+            const email = normalizeEmail(typeof user.email === "string" ? user.email : "");
+            if (email !== allowedEmail(env)) {
+              throw new Error("UNAUTHORIZED_EMAIL");
+            }
+            return {
+              data: {
+                ...user,
+                email,
+              },
+            };
+          },
         },
       },
     } as any,
@@ -210,22 +195,12 @@ export function createAuth(env: AppEnv) {
 export async function getSession(request: Request, env: AppEnv) {
   await ensureAuthSchema(env);
   const auth = createAuth(env);
-  const session = (await auth.api.getSession({
+  const session = await auth.api.getSession({
     headers: request.headers,
-  })) as BetterAuthSession | null;
-  if (!session?.user?.id || !session.user.email) return null;
+  });
+  if (!session?.user?.email) return null;
+  if (normalizeEmail(session.user.email) !== allowedEmail(env)) return null;
   return session;
-}
-
-export async function getSessionUser(request: Request, env: AppEnv): Promise<SessionUser | null> {
-  const session = await getSession(request, env);
-  if (!session?.user?.id || !session.user.email) return null;
-  return {
-    userId: session.user.id,
-    email: normalizeEmail(session.user.email),
-    name: session.user.name ?? null,
-    image: session.user.image ?? null,
-  };
 }
 
 export async function requireSession(request: Request, env: AppEnv) {
@@ -234,30 +209,20 @@ export async function requireSession(request: Request, env: AppEnv) {
   return session;
 }
 
-export async function requireSessionUser(request: Request, env: AppEnv) {
-  const user = await getSessionUser(request, env);
-  if (!user) throw new Response("Unauthorized", { status: 401 });
-  return user;
+export async function getSyncStub(env: AppEnv) {
+  return env.SYNC_ENGINE.get(env.SYNC_ENGINE.idFromName(allowedEmail(env)));
 }
 
-export function getSyncStubForUser(env: AppEnv, userId: string) {
-  return env.SYNC_ENGINE.get(env.SYNC_ENGINE.idFromName(userId));
-}
-
-export async function sendInternalSyncCommandForUser<T extends SyncCommandType>(
+export async function sendInternalSyncCommand<T extends SyncCommandType>(
   env: AppEnv,
-  userId: string,
   commandType: T,
   payload: SyncCommandPayloadMap[T],
   opId = createId("srvop"),
 ) {
-  const stub = getSyncStubForUser(env, userId);
+  const stub = await getSyncStub(env);
   const response = await stub.fetch("https://sync.internal/internal/command", {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-g3-user-id": userId,
-    },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({
       opId,
       commandType,
@@ -270,47 +235,7 @@ export async function sendInternalSyncCommandForUser<T extends SyncCommandType>(
   return (await response.json()) as InternalCommandResponse;
 }
 
-export async function fetchUserProviderSettings(env: AppEnv, userId: string) {
-  const stub = getSyncStubForUser(env, userId);
-  const response = await stub.fetch("https://sync.internal/settings/providers", {
-    headers: {
-      "x-g3-user-id": userId,
-    },
-  });
-  if (!response.ok) throw new Error(await response.text());
-  return (await response.json()) as UserProviderSettingsState;
-}
-
-export async function saveUserProviderSettings(
-  env: AppEnv,
-  userId: string,
-  input: UserProviderSettingsInput,
-) {
-  const stub = getSyncStubForUser(env, userId);
-  const response = await stub.fetch("https://sync.internal/settings/providers", {
-    method: "PUT",
-    headers: {
-      "content-type": "application/json",
-      "x-g3-user-id": userId,
-    },
-    body: JSON.stringify(input),
-  });
-  if (!response.ok) throw new Error(await response.text());
-  return (await response.json()) as UserProviderSettingsState;
-}
-
-export async function fetchUserRuntimeConfig(env: AppEnv, userId: string) {
-  const stub = getSyncStubForUser(env, userId);
-  const response = await stub.fetch("https://sync.internal/runtime-config", {
-    headers: {
-      "x-g3-user-id": userId,
-    },
-  });
-  if (!response.ok) throw new Error(await response.text());
-  return (await response.json()) as UserRuntimeConfig;
-}
-
-export async function fetchModelsCatalog(_env: AppEnv, cache: Cache) {
+export async function fetchModelsCatalog(env: AppEnv, cache: Cache) {
   const url = "https://models.dev/api.json";
   const cacheKey = new Request(url);
   const cached = await cache.match(cacheKey);
@@ -333,10 +258,7 @@ export async function fetchModelsCatalog(_env: AppEnv, cache: Cache) {
   return json;
 }
 
-export function filterModelsCatalog(
-  raw: any,
-  env: Pick<AppEnv, "OPENCODE_GO_MODEL_ALLOWLIST" | "OPENCODE_GO_BASE_URL">,
-) {
+export function filterModelsCatalog(raw: any, env: AppEnv) {
   const provider = raw["opencode-go"] ?? {};
   const allowed = new Set(
     (env.OPENCODE_GO_MODEL_ALLOWLIST ?? "")
@@ -363,12 +285,12 @@ export function filterModelsCatalog(
   };
 }
 
-export async function exaSearch(apiKey: string, query: string) {
+export async function exaSearch(env: AppEnv, query: string) {
   const response = await fetch("https://api.exa.ai/search", {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-api-key": apiKey,
+      "x-api-key": env.EXA_API_KEY,
     },
     body: JSON.stringify({
       query,
@@ -403,13 +325,12 @@ export function parseExaMcpTextResponse(responseText: string) {
   return "";
 }
 
-export async function exaMcpSearchContext(apiKey: string, query: string) {
+export async function exaMcpSearchContext(query: string) {
   const response = await fetch("https://mcp.exa.ai/mcp", {
     method: "POST",
     headers: {
       accept: "application/json, text/event-stream",
       "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
       jsonrpc: "2.0",
@@ -499,14 +420,14 @@ export async function signUploadToken(env: AppEnv, payload: Record<string, unkno
     ["sign"],
   );
   const signature = await crypto.subtle.sign("HMAC", keyMaterial, data);
-  return `${bytesToBase64(data)}.${bytesToBase64(new Uint8Array(signature))}`;
+  return `${btoa(String.fromCharCode(...data))}.${btoa(String.fromCharCode(...new Uint8Array(signature)))}`;
 }
 
 export async function verifyUploadToken(env: AppEnv, token: string) {
   const [payloadPart, signaturePart] = token.split(".");
   if (!payloadPart || !signaturePart) return null;
-  const payloadBytes = base64ToBytes(payloadPart);
-  const signatureBytes = base64ToBytes(signaturePart);
+  const payloadBytes = Uint8Array.from(atob(payloadPart), (char) => char.charCodeAt(0));
+  const signatureBytes = Uint8Array.from(atob(signaturePart), (char) => char.charCodeAt(0));
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
     encoder.encode(env.BETTER_AUTH_SECRET),
@@ -516,7 +437,7 @@ export async function verifyUploadToken(env: AppEnv, token: string) {
   );
   const valid = await crypto.subtle.verify("HMAC", keyMaterial, signatureBytes, payloadBytes);
   if (!valid) return null;
-  return JSON.parse(decoder.decode(payloadBytes)) as Record<string, unknown>;
+  return JSON.parse(new TextDecoder().decode(payloadBytes)) as Record<string, unknown>;
 }
 
 export async function heartbeat(env: AppEnv) {
@@ -526,72 +447,4 @@ export async function heartbeat(env: AppEnv) {
     ok: true,
     at: nowIso(),
   };
-}
-
-function bytesToBase64(bytes: Uint8Array) {
-  return btoa(String.fromCharCode(...bytes));
-}
-
-function base64ToBytes(value: string) {
-  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
-}
-
-async function deriveSecretKey(secret: string, scope: string) {
-  const material = await crypto.subtle.importKey("raw", encoder.encode(secret), "HKDF", false, [
-    "deriveKey",
-  ]);
-  return crypto.subtle.deriveKey(
-    {
-      name: "HKDF",
-      hash: "SHA-256",
-      salt: encoder.encode("g3-chat:user-secret:v1"),
-      info: encoder.encode(scope),
-    },
-    material,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"],
-  );
-}
-
-export async function encryptUserSecret(
-  env: Pick<AppEnv, "USER_SECRET_ENCRYPTION_KEY">,
-  scope: string,
-  plaintext: string,
-) {
-  const key = await deriveSecretKey(env.USER_SECRET_ENCRYPTION_KEY, scope);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    {
-      name: "AES-GCM",
-      iv,
-      additionalData: encoder.encode(scope),
-    },
-    key,
-    encoder.encode(plaintext),
-  );
-  return {
-    version: 1,
-    algorithm: "AES-GCM",
-    iv: bytesToBase64(iv),
-    ciphertext: bytesToBase64(new Uint8Array(ciphertext)),
-  } satisfies EncryptedSecretRecord;
-}
-
-export async function decryptUserSecret(
-  env: Pick<AppEnv, "USER_SECRET_ENCRYPTION_KEY">,
-  scope: string,
-  record: EncryptedSecretRecord,
-) {
-  const key = await deriveSecretKey(env.USER_SECRET_ENCRYPTION_KEY, scope);
-  const plaintext = await crypto.subtle.decrypt(
-    {
-      name: "AES-GCM",
-      iv: base64ToBytes(record.iv),
-      additionalData: encoder.encode(scope),
-    },
-    key,
-    base64ToBytes(record.ciphertext),
-  );
-  return decoder.decode(plaintext);
 }

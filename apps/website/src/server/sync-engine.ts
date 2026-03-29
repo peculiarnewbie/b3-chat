@@ -26,15 +26,11 @@ import {
   type SyncServerEvent,
   type SyncSnapshot,
   type Thread,
-  type UserProviderSettingsInput,
-  type UserProviderSettingsState,
-  type UserRuntimeConfig,
   type Workspace,
 } from "@g3-chat/domain";
 import {
   completeTextAttachment,
-  decryptUserSecret,
-  encryptUserSecret,
+  exaMcpSearchContext,
   exaSearch,
   getDefaultModelId,
   getSignedAttachmentUrl,
@@ -49,28 +45,6 @@ type SyncCommandResult = {
 };
 
 type DeferredFollowUp = () => Promise<void>;
-
-type ProviderName = "opencode" | "exa";
-
-type StoredEncryptedSecret = {
-  encrypted: {
-    version: 1;
-    algorithm: "AES-GCM";
-    iv: string;
-    ciphertext: string;
-  };
-  updatedAt: string;
-};
-
-type StoredProviderSettings = {
-  opencode: StoredEncryptedSecret | null;
-  exa: StoredEncryptedSecret | null;
-  updatedAt: string;
-  lastValidatedOpencodeAt: string | null;
-  lastValidatedExaAt: string | null;
-  lastOpencodeError: string | null;
-  lastExaError: string | null;
-};
 
 function json<T>(value: T) {
   return JSON.stringify(value);
@@ -92,33 +66,10 @@ function syncLog(message: string, details?: Record<string, unknown>) {
   console.log(`[sync-do] ${message}`);
 }
 
-function isAuthFailure(status: number) {
-  return status === 401 || status === 403;
-}
-
-function normalizeProviderKey(value: string | null | undefined) {
-  if (value == null) return value;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function createDefaultProviderSettings(now = nowIso()): StoredProviderSettings {
-  return {
-    opencode: null,
-    exa: null,
-    updatedAt: now,
-    lastValidatedOpencodeAt: null,
-    lastValidatedExaAt: null,
-    lastOpencodeError: null,
-    lastExaError: null,
-  };
-}
-
 export class SyncEngineDurableObject {
   private initialized = false;
   private readonly ctx: DurableObjectState;
   private readonly env: AppEnv;
-  private userId: string | null = null;
 
   constructor(ctx: DurableObjectState, env: AppEnv) {
     this.ctx = ctx;
@@ -126,10 +77,9 @@ export class SyncEngineDurableObject {
   }
 
   async fetch(request: Request) {
-    await this.captureUserId(request);
     await this.ensureInitialized();
     const url = new URL(request.url);
-    syncLog("fetch", { path: url.pathname, method: request.method, userId: this.userId });
+    syncLog("fetch", { path: url.pathname, method: request.method });
 
     if (url.pathname === "/ws") {
       if (!isWebSocketRequest(request)) {
@@ -162,19 +112,6 @@ export class SyncEngineDurableObject {
       return Response.json(await this.getSnapshot());
     }
 
-    if (url.pathname === "/settings/providers" && request.method === "GET") {
-      return Response.json(this.getProviderSettingsState());
-    }
-
-    if (url.pathname === "/settings/providers" && request.method === "PUT") {
-      const input = (await request.json().catch(() => ({}))) as UserProviderSettingsInput;
-      return Response.json(await this.updateProviderSettings(input));
-    }
-
-    if (url.pathname === "/runtime-config" && request.method === "GET") {
-      return Response.json(this.getRuntimeConfig());
-    }
-
     return new Response("Not found", { status: 404 });
   }
 
@@ -199,23 +136,6 @@ export class SyncEngineDurableObject {
   }
 
   async webSocketClose(_ws: WebSocket) {}
-
-  private async captureUserId(request: Request) {
-    const requestUserId = request.headers.get("x-g3-user-id")?.trim() || null;
-    const persistedUserId =
-      this.userId ?? ((await this.ctx.storage.get<string>("__user_id"))?.trim() || null);
-    if (requestUserId) {
-      if (persistedUserId && persistedUserId !== requestUserId) {
-        throw new Response("User mismatch", { status: 403 });
-      }
-      this.userId = requestUserId;
-      if (persistedUserId !== requestUserId) {
-        await this.ctx.storage.put("__user_id", requestUserId);
-      }
-      return;
-    }
-    this.userId = persistedUserId;
-  }
 
   private async ensureInitialized() {
     if (this.initialized) return;
@@ -279,11 +199,6 @@ export class SyncEngineDurableObject {
         id TEXT PRIMARY KEY,
         message_id TEXT NOT NULL,
         row_json TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS user_settings (
-        key TEXT PRIMARY KEY,
-        value_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_events_seq ON events(seq);
       CREATE INDEX IF NOT EXISTS idx_commands_seq ON commands(acked_seq);
@@ -621,50 +536,45 @@ export class SyncEngineDurableObject {
       assistantMessage: Message;
     },
   ) {
+    syncLog("assistant_turn_start", {
+      threadId: payload.threadId,
+      assistantMessageId: payload.assistantMessage.id,
+      modelId: payload.modelId,
+      search: payload.search,
+    });
+    const snapshot = await this.getSnapshot();
     const thread = this.getThread(payload.threadId);
     if (!thread) return;
     const workspace = this.getWorkspace(thread.workspaceId);
     if (!workspace) return;
 
-    const opencodeKey = await this.getProviderSecret("opencode");
-    if (!opencodeKey) {
-      await this.emitMessageFailed(
-        payload.assistantMessage.id,
-        "PROVIDER_NOT_CONFIGURED",
-        "OpenCode API key not configured.",
-      );
-      return;
-    }
-
     let searchRows: SearchResult[] = [];
     let searchContext = "";
     if (payload.search) {
-      const exaKey = await this.getProviderSecret("exa");
-      if (!exaKey) {
-        await this.markProviderError("exa", "SEARCH_NOT_CONFIGURED");
-      } else {
-        try {
-          searchRows = (await exaSearch(exaKey, payload.promptText)).map((row) =>
+      try {
+        if (this.env.EXA_API_KEY) {
+          searchRows = (await exaSearch(this.env, payload.promptText)).map((row) =>
             decodeSearchResultRow({
               ...row,
+              id: createId("src"),
               messageId: payload.assistantMessage.id,
             }),
           );
           searchContext = buildSearchContext(searchRows);
-          await this.markProviderValidated("exa");
-        } catch (error) {
-          if (
-            error instanceof Error &&
-            error.message.startsWith("Exa search failed:") &&
-            isAuthFailure(Number(error.message.split(":").at(-1)?.trim() ?? 0))
-          ) {
-            await this.markProviderError("exa", "INVALID_PROVIDER_KEY");
-          } else {
-            await this.markProviderError("exa", "PROVIDER_UPSTREAM_ERROR");
-          }
+        } else {
+          searchContext = await exaMcpSearchContext(payload.promptText);
+        }
+      } catch {
+        if (searchRows.length === 0) {
+          searchContext = await exaMcpSearchContext(payload.promptText);
         }
       }
     }
+    syncLog("assistant_turn_context_ready", {
+      assistantMessageId: payload.assistantMessage.id,
+      searchResults: searchRows.length,
+      hasSearchContext: Boolean(searchContext),
+    });
 
     if (searchRows.length > 0) {
       const searchEvent = await this.appendServerEvent(null, "search_results_replaced", {
@@ -674,7 +584,6 @@ export class SyncEngineDurableObject {
       this.broadcast(searchEvent);
     }
 
-    const snapshot = await this.getSnapshot();
     const messages = await this.buildOpenAiMessages(snapshot, thread.id, workspace.id);
     if (searchContext) {
       messages.push({
@@ -683,49 +592,38 @@ export class SyncEngineDurableObject {
       });
     }
 
-    const startedAt = Date.now();
     const upstream = await fetch(
       `${this.env.OPENCODE_GO_BASE_URL.replace(/\/$/, "")}/chat/completions`,
       {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${opencodeKey}`,
+          authorization: `Bearer ${this.env.OPENCODE_GO_API_KEY}`,
         },
         body: JSON.stringify({
           model: payload.modelId || workspace.defaultModelId || getDefaultModelId(this.env),
           stream: true,
+          stream_options: { include_usage: true },
           messages,
         }),
       },
-    ).catch((error) => error);
-
-    if (upstream instanceof Error) {
-      await this.markProviderError("opencode", "PROVIDER_UPSTREAM_ERROR");
-      await this.emitMessageFailed(
-        payload.assistantMessage.id,
-        "PROVIDER_UPSTREAM_ERROR",
-        "OpenCode request failed.",
-      );
-      return;
-    }
+    );
+    syncLog("assistant_turn_upstream", {
+      assistantMessageId: payload.assistantMessage.id,
+      ok: upstream.ok,
+      status: upstream.status,
+    });
 
     if (!upstream.ok || !upstream.body) {
-      const errorCode = isAuthFailure(upstream.status)
-        ? "INVALID_PROVIDER_KEY"
-        : "PROVIDER_UPSTREAM_ERROR";
-      await this.markProviderError("opencode", errorCode);
-      await this.emitMessageFailed(
-        payload.assistantMessage.id,
-        errorCode,
-        errorCode === "INVALID_PROVIDER_KEY"
-          ? "OpenCode API key rejected."
-          : "OpenCode request failed.",
-      );
+      const failed = await this.appendServerEvent(null, "message_failed", {
+        messageId: payload.assistantMessage.id,
+        errorCode: String(upstream.status),
+        errorMessage: await upstream.text(),
+        updatedAt: nowIso(),
+      });
+      this.broadcast(failed);
       return;
     }
-
-    await this.markProviderValidated("opencode");
 
     const reader = upstream.body.getReader();
     const decoder = new TextDecoder();
@@ -733,12 +631,17 @@ export class SyncEngineDurableObject {
     let accumulated = "";
     let pendingDelta = "";
     let seq = 0;
-    let ttftMs: number | null = null;
+    let chunkCount = 0;
+    let deltaCount = 0;
+    const streamStartedAt = Date.now();
+    let firstTokenAt: number | null = null;
+    let promptTokens: number | null = null;
+    let completionTokens: number | null = null;
 
     const flushDelta = async () => {
       if (!pendingDelta) return;
+      deltaCount += 1;
       accumulated += pendingDelta;
-      const updatedAt = nowIso();
       const part = createMessagePart({
         messageId: payload.assistantMessage.id,
         seq: seq++,
@@ -749,10 +652,16 @@ export class SyncEngineDurableObject {
       const deltaEvent = await this.appendServerEvent(null, "message_delta", {
         messageId: payload.assistantMessage.id,
         delta: pendingDelta,
-        updatedAt,
+        updatedAt: nowIso(),
       });
       this.broadcast(partEvent);
       this.broadcast(deltaEvent);
+      syncLog("assistant_turn_delta", {
+        assistantMessageId: payload.assistantMessage.id,
+        seq: part.seq,
+        chars: pendingDelta.length,
+        totalChars: accumulated.length,
+      });
       pendingDelta = "";
     };
 
@@ -760,6 +669,7 @@ export class SyncEngineDurableObject {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        chunkCount += 1;
         buffer += decoder.decode(value, { stream: true });
         while (buffer.includes("\n\n")) {
           const idx = buffer.indexOf("\n\n");
@@ -773,9 +683,13 @@ export class SyncEngineDurableObject {
           const payloadJson = dataLines.join("\n");
           if (payloadJson === "[DONE]") continue;
           const parsed = JSON.parse(payloadJson);
+          if (parsed.usage) {
+            promptTokens = parsed.usage.prompt_tokens ?? null;
+            completionTokens = parsed.usage.completion_tokens ?? null;
+          }
           const delta = parsed.choices?.[0]?.delta?.content ?? "";
           if (!delta) continue;
-          if (ttftMs == null) ttftMs = Date.now() - startedAt;
+          if (firstTokenAt === null) firstTokenAt = Date.now();
           pendingDelta += delta;
           if (pendingDelta.length >= 96 || /\n/.test(pendingDelta)) {
             await flushDelta();
@@ -783,161 +697,39 @@ export class SyncEngineDurableObject {
         }
       }
       await flushDelta();
+      const durationMs = Date.now() - streamStartedAt;
+      const ttftMs = firstTokenAt !== null ? firstTokenAt - streamStartedAt : null;
       const completed = await this.appendServerEvent(null, "message_completed", {
         messageId: payload.assistantMessage.id,
         text: accumulated,
         updatedAt: nowIso(),
-        durationMs: Date.now() - startedAt,
+        durationMs,
         ttftMs,
-        promptTokens: null,
-        completionTokens: null,
+        promptTokens,
+        completionTokens,
       });
       this.broadcast(completed);
-    } catch {
-      await this.markProviderError("opencode", "PROVIDER_UPSTREAM_ERROR");
-      await this.emitMessageFailed(
-        payload.assistantMessage.id,
-        "PROVIDER_UPSTREAM_ERROR",
-        "OpenCode streaming failed.",
-      );
+      syncLog("assistant_turn_completed", {
+        assistantMessageId: payload.assistantMessage.id,
+        chunkCount,
+        deltaCount,
+        totalChars: accumulated.length,
+      });
+    } catch (error) {
+      const failed = await this.appendServerEvent(null, "message_failed", {
+        messageId: payload.assistantMessage.id,
+        errorCode: "stream_error",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        updatedAt: nowIso(),
+      });
+      this.broadcast(failed);
+      console.error("[sync-do] assistant_turn_failed", {
+        assistantMessageId: payload.assistantMessage.id,
+        chunkCount,
+        deltaCount,
+        error,
+      });
     }
-  }
-
-  private async emitMessageFailed(messageId: string, errorCode: string, errorMessage: string) {
-    const failed = await this.appendServerEvent(null, "message_failed", {
-      messageId,
-      errorCode,
-      errorMessage,
-      updatedAt: nowIso(),
-    });
-    this.broadcast(failed);
-  }
-
-  private async updateProviderSettings(input: UserProviderSettingsInput) {
-    const settings = this.getStoredProviderSettings();
-    const now = nowIso();
-
-    if (Object.hasOwn(input, "opencodeApiKey")) {
-      const opencodeApiKey = normalizeProviderKey(input.opencodeApiKey);
-      settings.opencode = opencodeApiKey
-        ? {
-            encrypted: await encryptUserSecret(
-              this.env,
-              this.getSecretScope("opencode"),
-              opencodeApiKey,
-            ),
-            updatedAt: now,
-          }
-        : null;
-      settings.lastValidatedOpencodeAt = null;
-      settings.lastOpencodeError = null;
-    }
-
-    if (Object.hasOwn(input, "exaApiKey")) {
-      const exaApiKey = normalizeProviderKey(input.exaApiKey);
-      settings.exa = exaApiKey
-        ? {
-            encrypted: await encryptUserSecret(this.env, this.getSecretScope("exa"), exaApiKey),
-            updatedAt: now,
-          }
-        : null;
-      settings.lastValidatedExaAt = null;
-      settings.lastExaError = null;
-    }
-
-    settings.updatedAt = now;
-    this.setStoredProviderSettings(settings);
-    return this.toProviderSettingsState(settings);
-  }
-
-  private getProviderSettingsState(): UserProviderSettingsState {
-    return this.toProviderSettingsState(this.getStoredProviderSettings());
-  }
-
-  private getRuntimeConfig(): UserRuntimeConfig {
-    const state = this.getProviderSettingsState();
-    return {
-      hasOpencodeKey: state.hasOpencodeKey,
-      hasExaKey: state.hasExaKey,
-      defaultModelId: getDefaultModelId(this.env),
-      availableFeatures: {
-        chat: state.hasOpencodeKey,
-        search: state.hasExaKey,
-      },
-    };
-  }
-
-  private getStoredProviderSettings(): StoredProviderSettings {
-    const row = this.queryOne<{ value_json: string }>(
-      `SELECT value_json FROM user_settings WHERE key = ?`,
-      "provider_credentials",
-    );
-    if (!row?.value_json) return createDefaultProviderSettings();
-    return {
-      ...createDefaultProviderSettings(),
-      ...parseJson<StoredProviderSettings>(row.value_json),
-    };
-  }
-
-  private setStoredProviderSettings(settings: StoredProviderSettings) {
-    this.exec(
-      `INSERT OR REPLACE INTO user_settings (key, value_json, updated_at) VALUES (?, ?, ?)`,
-      "provider_credentials",
-      json(settings),
-      settings.updatedAt,
-    );
-  }
-
-  private toProviderSettingsState(settings: StoredProviderSettings): UserProviderSettingsState {
-    return {
-      hasOpencodeKey: Boolean(settings.opencode),
-      hasExaKey: Boolean(settings.exa),
-      updatedAt: settings.updatedAt ?? null,
-      lastValidatedOpencodeAt: settings.lastValidatedOpencodeAt ?? null,
-      lastValidatedExaAt: settings.lastValidatedExaAt ?? null,
-      lastOpencodeError: settings.lastOpencodeError ?? null,
-      lastExaError: settings.lastExaError ?? null,
-    };
-  }
-
-  private async getProviderSecret(provider: ProviderName) {
-    const settings = this.getStoredProviderSettings();
-    const record = settings[provider];
-    if (!record) return null;
-    return decryptUserSecret(this.env, this.getSecretScope(provider), record.encrypted);
-  }
-
-  private async markProviderValidated(provider: ProviderName) {
-    const settings = this.getStoredProviderSettings();
-    const now = nowIso();
-    settings.updatedAt = now;
-    if (provider === "opencode") {
-      settings.lastValidatedOpencodeAt = now;
-      settings.lastOpencodeError = null;
-    } else {
-      settings.lastValidatedExaAt = now;
-      settings.lastExaError = null;
-    }
-    this.setStoredProviderSettings(settings);
-  }
-
-  private async markProviderError(
-    provider: ProviderName,
-    error: "SEARCH_NOT_CONFIGURED" | "INVALID_PROVIDER_KEY" | "PROVIDER_UPSTREAM_ERROR",
-  ) {
-    const settings = this.getStoredProviderSettings();
-    settings.updatedAt = nowIso();
-    if (provider === "opencode") {
-      settings.lastOpencodeError = error;
-    } else {
-      settings.lastExaError = error;
-    }
-    this.setStoredProviderSettings(settings);
-  }
-
-  private getSecretScope(provider: ProviderName) {
-    if (!this.userId) throw new Error("User id unavailable");
-    return `g3-chat:user:${this.userId}:provider:${provider}`;
   }
 
   private async buildOpenAiMessages(snapshot: SyncSnapshot, threadId: string, workspaceId: string) {
@@ -1159,6 +951,10 @@ export class SyncEngineDurableObject {
             text: event.text,
             status: "completed",
             updatedAt: event.updatedAt,
+            durationMs: event.durationMs ?? null,
+            ttftMs: event.ttftMs ?? null,
+            promptTokens: event.promptTokens ?? null,
+            completionTokens: event.completionTokens ?? null,
             optimistic: false,
           },
         });
