@@ -257,7 +257,35 @@ a {
   text-overflow: ellipsis;
 }
 
-.delete-btn {
+/* Thread footer: timestamp on the left, action buttons on the right */
+.nav-item-footer {
+  display: flex;
+  align-items: center;
+  min-height: 18px;
+}
+
+.nav-item-time {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+/* On hover, hide the timestamp and show action buttons */
+.nav-item:hover .nav-item-time {
+  display: none;
+}
+
+.nav-item-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.nav-item:hover .nav-item-actions {
+  display: flex;
+}
+
+/* Shared action button style (rename ✎, delete ×) */
+.action-btn {
   flex-shrink: 0;
   width: 20px;
   height: 20px;
@@ -266,7 +294,7 @@ a {
   border-radius: 4px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 1rem;
+  font-size: 0.8rem;
   line-height: 1;
   cursor: pointer;
   opacity: 0;
@@ -278,11 +306,16 @@ a {
   place-items: center;
 }
 
-.nav-item:hover .delete-btn {
+.nav-item:hover .action-btn {
   opacity: 1;
 }
 
-.delete-btn:hover {
+.action-btn:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.action-btn-danger:hover {
   background: rgba(255, 59, 48, 0.12);
   color: #ff3b30;
 }
