@@ -370,7 +370,7 @@ export default function Home() {
   const userAttachments = (messageId: string) => {
     const allAttachments = tables()?.[TABLES.attachments] ?? {};
     return Object.values<any>(allAttachments).filter(
-      (a) => a.messageId === messageId && a.status === "ready",
+      (a) => a.messageId === messageId && a.status !== "failed",
     );
   };
   const userImageAttachments = (messageId: string) =>

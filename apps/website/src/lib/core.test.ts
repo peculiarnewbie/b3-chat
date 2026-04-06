@@ -3,6 +3,7 @@ import {
   buildSearchContext,
   createAttachment,
   createWorkspace,
+  mergeAttachmentLink,
   slugify,
 } from "@b3-chat/domain";
 import {
@@ -36,6 +37,28 @@ describe("domain helpers", () => {
 
     expect(attachment.status).toBe("queued");
     expect(attachment.threadId).toBe("thd_123");
+  });
+
+  it("preserves an existing attachment message link on later upserts", () => {
+    const attachment = createAttachment({
+      threadId: "thd_123",
+      objectKey: "thd_123/cat.png",
+      fileName: "cat.png",
+      mimeType: "image/png",
+      sizeBytes: 128,
+    });
+
+    const merged = mergeAttachmentLink(
+      { messageId: "msg_123" },
+      {
+        ...attachment,
+        messageId: null,
+        status: "ready",
+      },
+    );
+
+    expect(merged.messageId).toBe("msg_123");
+    expect(merged.status).toBe("ready");
   });
 
   it("builds grounded search context blocks", () => {
@@ -120,6 +143,7 @@ describe("domain helpers", () => {
       ],
     });
 
+    expect(query).toContain("Today's date is ");
     expect(query).toContain("Latest user request:\nwhat about now?");
     expect(query).toContain("Recent conversation:");
     expect(query).toContain("user: what day is it?");
@@ -288,29 +312,29 @@ describe("server helpers", () => {
     });
   });
 
-  it("fails closed when a search plan is missing the summary", () => {
+  it("falls back summary to query when summary is empty", () => {
     const plan = parseSearchPlan(
       '{"needsSearch": true, "summary": "", "query": "current time right now", "numResults": 3}',
     );
 
     expect(plan).toEqual({
-      needsSearch: false,
-      summary: "",
-      query: "",
-      numResults: 0,
+      needsSearch: true,
+      summary: "current time right now",
+      query: "current time right now",
+      numResults: 3,
     });
   });
 
-  it("fails closed when a search plan is missing numResults", () => {
+  it("defaults numResults when missing from search plan", () => {
     const plan = parseSearchPlan(
       '{"needsSearch": true, "summary": "User wants the current time.", "query": "current time right now"}',
     );
 
     expect(plan).toEqual({
-      needsSearch: false,
-      summary: "",
-      query: "",
-      numResults: 0,
+      needsSearch: true,
+      summary: "User wants the current time.",
+      query: "current time right now",
+      numResults: 5,
     });
   });
 

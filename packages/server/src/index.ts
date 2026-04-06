@@ -383,15 +383,15 @@ export function parseSearchPlan(text: string): SearchPlan {
   const numResults =
     typeof parsed?.numResults === "number" && Number.isFinite(parsed.numResults)
       ? clampExaResults(parsed.numResults)
-      : null;
+      : DEFAULT_EXA_RESULTS;
 
-  if (!summary || !query || numResults === null) {
+  if (!query) {
     return noSearchPlan();
   }
 
   return {
     needsSearch: true,
-    summary,
+    summary: summary || query,
     query,
     numResults,
   };
@@ -420,6 +420,7 @@ export async function planSearch(
           role: "system",
           content: [
             "Decide whether the assistant should perform a web search before answering.",
+            `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
             "Return JSON only with this exact shape:",
             '{"needsSearch": boolean, "summary": string, "query": string, "numResults": number}',
             "Search only when current or external web information is needed or clearly useful.",
@@ -440,9 +441,15 @@ export async function planSearch(
       ],
     }),
   });
-  if (!response.ok) throw new Error(`Search planning failed: ${response.status}`);
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`Search planning failed: ${response.status} ${body.slice(0, 200)}`);
+  }
   const json = (await response.json()) as ChatCompletionResponse;
-  return parseSearchPlan(extractChatCompletionText(json.choices?.[0]?.message?.content));
+  const rawText = extractChatCompletionText(json.choices?.[0]?.message?.content);
+  const plan = parseSearchPlan(rawText);
+  console.log("[planSearch]", JSON.stringify({ rawText, plan }));
+  return plan;
 }
 
 export function parseExaMcpTextResponse(responseText: string) {

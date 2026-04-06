@@ -11,6 +11,7 @@ import {
   decodeSearchResultRow,
   decodeThreadRow,
   decodeWorkspaceRow,
+  mergeAttachmentLink,
   nowIso,
   type Attachment,
   type CreateUserMessagePayload,
@@ -470,9 +471,13 @@ export class SyncEngineDurableObject {
           const command = payload as
             | SyncCommandPayloadMap["register_attachment"]
             | SyncCommandPayloadMap["complete_attachment"];
+          const existing = this.getAttachment(command.attachment.id);
           pendingEvents.push(
             this.insertEvent(opId, "attachment_upserted", {
-              row: this.normalizeAttachment(command.attachment, opId),
+              row: this.normalizeAttachment(
+                mergeAttachmentLink(existing, command.attachment),
+                opId,
+              ),
             }),
           );
           break;
@@ -579,7 +584,11 @@ export class SyncEngineDurableObject {
           modelId,
           planningContext,
         });
-      } catch {
+      } catch (error) {
+        syncLog("assistant_turn_search_plan_error", {
+          assistantMessageId: payload.assistantMessage.id,
+          error: String(error),
+        });
         searchPlan = {
           needsSearch: false,
           summary: "",
@@ -612,9 +621,20 @@ export class SyncEngineDurableObject {
           } else {
             searchContext = await exaMcpSearchContext(searchPlan.query, searchPlan.numResults);
           }
-        } catch {
+        } catch (error) {
+          syncLog("assistant_turn_exa_error", {
+            assistantMessageId: payload.assistantMessage.id,
+            error: String(error),
+          });
           if (searchRows.length === 0) {
-            searchContext = await exaMcpSearchContext(searchPlan.query, searchPlan.numResults);
+            try {
+              searchContext = await exaMcpSearchContext(searchPlan.query, searchPlan.numResults);
+            } catch (mcpError) {
+              syncLog("assistant_turn_exa_mcp_fallback_error", {
+                assistantMessageId: payload.assistantMessage.id,
+                error: String(mcpError),
+              });
+            }
           }
         }
       }

@@ -7,6 +7,7 @@ import {
   createWorkspace,
   decodeAttachmentRow,
   localValuesSchema,
+  mergeAttachmentLink,
   nowIso,
   summarizeThreadTitle,
   tablesSchema,
@@ -297,6 +298,17 @@ class SyncClient {
             payload.assistantMessage.id,
             payload.assistantMessage as any,
           );
+          for (const attachmentId of payload.attachmentIds ?? []) {
+            const existing = this.store.getRow(
+              TABLES.attachments,
+              attachmentId,
+            ) as Attachment | null;
+            if (!existing) continue;
+            this.store.setRow(TABLES.attachments, attachmentId, {
+              ...existing,
+              messageId: payload.userMessage.id,
+            } as any);
+          }
           break;
         }
         case "register_attachment":
@@ -304,7 +316,15 @@ class SyncClient {
           const payload = op.payload as
             | SyncCommandPayloadMap["register_attachment"]
             | SyncCommandPayloadMap["complete_attachment"];
-          this.store.setRow(TABLES.attachments, payload.attachment.id, payload.attachment as any);
+          const existing = this.store.getRow(
+            TABLES.attachments,
+            payload.attachment.id,
+          ) as Attachment | null;
+          this.store.setRow(
+            TABLES.attachments,
+            payload.attachment.id,
+            mergeAttachmentLink(existing, payload.attachment) as any,
+          );
           break;
         }
         case "delete_attachment": {
@@ -451,7 +471,12 @@ class SyncClient {
         }
         case "attachment_upserted": {
           const event = payload as SyncEventPayloadMap["attachment_upserted"];
-          this.store.setRow(TABLES.attachments, event.row.id, event.row as any);
+          const existing = this.store.getRow(TABLES.attachments, event.row.id) as Attachment | null;
+          this.store.setRow(
+            TABLES.attachments,
+            event.row.id,
+            mergeAttachmentLink(existing, event.row) as any,
+          );
           break;
         }
         case "attachment_deleted": {
@@ -578,6 +603,15 @@ class SyncClient {
       optimistic: true,
       opId,
     });
+    for (const attachmentId of input.attachmentIds ?? []) {
+      const attachment = this.store.getRow(TABLES.attachments, attachmentId) as Attachment | null;
+      if (!attachment) continue;
+      this.completeAttachment({
+        ...attachment,
+        messageId: userMessage.id,
+        status: "ready",
+      });
+    }
     return this.enqueueCommand("create_user_message", {
       threadId: input.thread.id,
       thread: thread as Thread,

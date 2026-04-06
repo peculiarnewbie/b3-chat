@@ -148,6 +148,16 @@ export type MessagePart = Schema.Schema.Type<typeof MessagePartRow>;
 export type Attachment = Schema.Schema.Type<typeof AttachmentRow>;
 export type SearchResult = Schema.Schema.Type<typeof SearchResultRow>;
 
+export function mergeAttachmentLink(
+  existing: Pick<Attachment, "messageId"> | null | undefined,
+  incoming: Attachment,
+) {
+  return decodeAttachmentRow({
+    ...incoming,
+    messageId: incoming.messageId ?? existing?.messageId ?? null,
+  });
+}
+
 export type SyncTables = Partial<Record<(typeof TABLES)[keyof typeof TABLES], Record<string, any>>>;
 
 export type SyncSnapshot = {
@@ -553,6 +563,8 @@ export function buildSearchPlanningContext(input: {
   const contextMessages = normalizedMessages.slice(-(input.maxContextMessages ?? 8));
 
   return [
+    `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
+    "",
     "Latest user request:",
     promptText,
     "",
