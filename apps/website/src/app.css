@@ -563,15 +563,55 @@ a {
   font-family: "SF Mono", "Fira Code", "Consolas", monospace;
 }
 
-.md-content pre {
-  background: var(--panel-strong);
+.md-content .code-block {
+  margin: 0.5em 0;
   border: 1px solid var(--line);
   border-radius: 8px;
+  overflow: hidden;
+}
+
+.md-content .code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  background: var(--panel-strong);
+  border-bottom: 1px solid var(--line);
+  font-size: 0.7rem;
+}
+
+.md-content .code-lang {
+  color: var(--text-secondary);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.md-content .copy-btn {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text-secondary);
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.md-content .copy-btn:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.md-content pre {
+  background: var(--panel-strong);
   padding: 10px 12px;
-  margin: 0.5em 0;
+  margin: 0;
   overflow-x: auto;
   font-size: 0.82em;
   line-height: 1.5;
+  border-radius: 0;
 }
 .md-content pre code {
   background: none;
@@ -785,6 +825,227 @@ a {
   font-size: 0.7rem;
   color: var(--text-secondary);
   margin-left: 4px;
+}
+
+/* ── Attach button ────────────────────────────────── */
+
+.attach-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 1.1rem;
+  font-weight: 300;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.attach-btn:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ── Attachment strip ─────────────────────────────── */
+
+.attachment-strip {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 2px 0;
+  animation: strip-enter 0.25s ease-out;
+}
+
+@keyframes strip-enter {
+  from {
+    opacity: 0;
+    max-height: 0;
+    padding: 0;
+  }
+  to {
+    opacity: 1;
+    max-height: 60px;
+    padding: 2px 0;
+  }
+}
+
+.attachment-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 40px;
+  padding: 4px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  flex-shrink: 0;
+  position: relative;
+  animation: chip-enter 0.2s ease-out;
+  transition:
+    opacity 0.15s,
+    border-color 0.15s;
+}
+
+@keyframes chip-enter {
+  from {
+    opacity: 0;
+    transform: translateX(-8px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+.attachment-chip-thumb {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.attachment-chip-ext {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: var(--panel-strong);
+  display: grid;
+  place-items: center;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.attachment-chip-name {
+  font-size: 0.75rem;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.attachment-chip-spinner {
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+.attachment-chip-remove {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transition: all 0.15s;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.attachment-chip:hover .attachment-chip-remove {
+  opacity: 1;
+}
+
+.attachment-chip-remove:hover {
+  background: rgba(255, 59, 48, 0.12);
+  color: #ff3b30;
+}
+
+.attachment-chip-uploading {
+  border-color: var(--accent);
+  position: relative;
+  overflow: hidden;
+}
+
+.attachment-chip-uploading::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, var(--accent-soft) 50%, transparent 100%);
+  animation: shimmer 1.5s ease-in-out infinite;
+  pointer-events: none;
+  border-radius: 9px;
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.attachment-chip-failed {
+  border-color: rgba(255, 59, 48, 0.4);
+  opacity: 0.7;
+}
+
+.attachment-chip-failed .attachment-chip-name {
+  color: #ff3b30;
+}
+
+/* ── Drag overlay ────────────────────────────────── */
+
+.composer-dragging {
+  border: 2px dashed var(--accent);
+  background: var(--accent-soft) !important;
+  transition: all 0.2s;
+}
+
+/* ── Message attachments ─────────────────────────── */
+
+.msg-attachments {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.msg-attachment-img {
+  width: 120px;
+  height: 90px;
+  object-fit: cover;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.msg-attachment-img:hover {
+  opacity: 0.85;
+}
+
+.msg-attachment-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.15);
+  font-size: 0.75rem;
+}
+
+.msg.assistant .msg-attachment-file {
+  background: var(--panel-strong);
 }
 
 /* ── Scrollbar ────────────────────────────────────── */

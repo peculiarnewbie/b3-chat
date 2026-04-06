@@ -1,5 +1,5 @@
-import { getRuntimeEnv, requireSession, sendInternalSyncCommand } from "@g3-chat/server";
-import { decodeAttachmentRow } from "@g3-chat/domain";
+import { getRuntimeEnv, requireSession, sendInternalSyncCommand } from "@b3-chat/server";
+import { decodeAttachmentRow } from "@b3-chat/domain";
 
 export async function handleUploadComplete(request: Request): Promise<Response> {
   const env = getRuntimeEnv();

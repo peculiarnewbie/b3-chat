@@ -1,4 +1,4 @@
-import { createAuth, ensureAuthSchema, getRuntimeEnv } from "@g3-chat/server";
+import { createAuth, ensureAuthSchema, getRuntimeEnv } from "@b3-chat/server";
 
 export async function handleAuth(request: Request): Promise<Response> {
   const env = getRuntimeEnv();

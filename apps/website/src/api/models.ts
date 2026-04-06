@@ -3,7 +3,7 @@ import {
   filterModelsCatalog,
   getRuntimeEnv,
   requireSession,
-} from "@g3-chat/server";
+} from "@b3-chat/server";
 
 export async function handleModels(request: Request): Promise<Response> {
   const env = getRuntimeEnv();

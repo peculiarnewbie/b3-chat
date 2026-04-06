@@ -1,4 +1,4 @@
-import { getRuntimeEnv, getSession } from "@g3-chat/server";
+import { getRuntimeEnv, getSession } from "@b3-chat/server";
 
 export async function handleSession(request: Request): Promise<Response> {
   const env = getRuntimeEnv();

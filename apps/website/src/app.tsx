@@ -7,7 +7,7 @@ import Forbidden from "./routes/forbidden";
 export default function App() {
   return (
     <MetaProvider>
-      <Title>g3 chat</Title>
+      <Title>b3 chat</Title>
       <Router>
         <Route path="/" component={Home} />
         <Route path="/forbidden" component={Forbidden} />

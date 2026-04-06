@@ -1,4 +1,4 @@
-import { buildSearchContext, createAttachment, createWorkspace, slugify } from "@g3-chat/domain";
+import { buildSearchContext, createAttachment, createWorkspace, slugify } from "@b3-chat/domain";
 import {
   allowedEmail,
   filterModelsCatalog,
@@ -6,7 +6,7 @@ import {
   isInlineTextAttachment,
   normalizeEmail,
   parseExaMcpTextResponse,
-} from "@g3-chat/server";
+} from "@b3-chat/server";
 import { describe, expect, it } from "vite-plus/test";
 
 describe("domain helpers", () => {

@@ -1,5 +1,5 @@
 {
-  "name": "@g3-chat/server",
+  "name": "@b3-chat/server",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -11,8 +11,8 @@
     "test": "vp test"
   },
   "dependencies": {
+    "@b3-chat/domain": "workspace:*",
     "@better-auth/infra": "catalog:",
-    "@g3-chat/domain": "workspace:*",
     "better-auth": "^1.3.14",
     "drizzle-orm": "^0.44.5",
     "effect": "^3.18.4",

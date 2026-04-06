@@ -1,4 +1,4 @@
-import type { AppEnv } from "@g3-chat/server";
+import type { AppEnv } from "@b3-chat/server";
 import { handleAuth } from "./api/auth";
 import { handleSession } from "./api/session";
 import { handleModels } from "./api/models";
@@ -16,7 +16,7 @@ type Env = AppEnv & {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Make env available to getRuntimeEnv() used throughout @g3-chat/server
+    // Make env available to getRuntimeEnv() used throughout @b3-chat/server
     globalThis.__env__ = env;
 
     const url = new URL(request.url);

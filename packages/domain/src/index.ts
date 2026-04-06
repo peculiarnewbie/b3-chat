@@ -193,6 +193,7 @@ export type CreateUserMessagePayload = {
   promptText: string;
   modelId: string;
   search: boolean;
+  attachmentIds: string[];
 };
 
 export type StartAssistantTurnPayload = {

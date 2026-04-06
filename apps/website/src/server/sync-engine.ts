@@ -27,7 +27,7 @@ import {
   type SyncSnapshot,
   type Thread,
   type Workspace,
-} from "@g3-chat/domain";
+} from "@b3-chat/domain";
 import {
   completeTextAttachment,
   exaMcpSearchContext,
@@ -37,7 +37,7 @@ import {
   isImageAttachment,
   isInlineTextAttachment,
   type AppEnv,
-} from "@g3-chat/server";
+} from "@b3-chat/server";
 type SyncCommandResult = {
   ack?: SyncServerAck;
   events: SyncServerEvent[];
@@ -415,6 +415,19 @@ export class SyncEngineDurableObject {
             this.insertEvent(opId, "message_upserted", { row: userMessage }),
             this.insertEvent(opId, "message_upserted", { row: assistantMessage }),
           );
+          // Link attachments to the user message
+          if (command.attachmentIds?.length) {
+            for (const attId of command.attachmentIds) {
+              const attRow = this.getAttachment(attId);
+              if (attRow) {
+                pendingEvents.push(
+                  this.insertEvent(opId, "attachment_upserted", {
+                    row: this.normalizeAttachment({ ...attRow, messageId: userMessage.id }, opId),
+                  }),
+                );
+              }
+            }
+          }
           followUp = () =>
             this.runAssistantTurn({
               ...command,
@@ -1119,6 +1132,14 @@ export class SyncEngineDurableObject {
       id,
     );
     return row ? parseJson<Message>(row.row_json) : null;
+  }
+
+  private getAttachment(id: string) {
+    const row = this.queryOne<{ row_json: string }>(
+      `SELECT row_json FROM attachments WHERE id = ?`,
+      id,
+    );
+    return row ? parseJson<Attachment>(row.row_json) : null;
   }
 
   private getLastServerSeq() {

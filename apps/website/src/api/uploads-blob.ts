@@ -1,4 +1,4 @@
-import { getRuntimeEnv, requireSession, verifyUploadToken } from "@g3-chat/server";
+import { getRuntimeEnv, requireSession, verifyUploadToken } from "@b3-chat/server";
 
 function readObjectKey(url: URL) {
   const index = url.pathname.indexOf("/api/uploads/blob/");

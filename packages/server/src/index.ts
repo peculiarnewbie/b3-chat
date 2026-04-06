@@ -11,7 +11,7 @@ import {
   type SyncCommandPayloadMap,
   type SyncCommandType,
   type SyncSnapshot,
-} from "@g3-chat/domain";
+} from "@b3-chat/domain";
 
 export type AppEnv = {
   ALLOWED_EMAIL: string;
@@ -187,7 +187,7 @@ export function createAuth(env: AppEnv) {
       database: {
         generateId: () => createId("usr"),
       },
-      cookiePrefix: "g3",
+      cookiePrefix: "b3",
     },
   });
 }

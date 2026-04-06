@@ -1,5 +1,5 @@
-import { createAttachment } from "@g3-chat/domain";
-import { createUploadUrl, getRuntimeEnv, requireSession, signUploadToken } from "@g3-chat/server";
+import { createAttachment } from "@b3-chat/domain";
+import { createUploadUrl, getRuntimeEnv, requireSession, signUploadToken } from "@b3-chat/server";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 

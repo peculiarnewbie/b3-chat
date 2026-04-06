@@ -20,14 +20,14 @@ import {
   type SyncEventType,
   type SyncServerEnvelope,
   type Thread,
-} from "@g3-chat/domain";
+} from "@b3-chat/domain";
 import { createMergeableStore } from "tinybase";
 import { createMiddleware } from "tinybase/middleware";
 import { createLocalPersister } from "tinybase/persisters/persister-browser";
 
-const PENDING_OPS_KEY = "g3.pendingOps";
-const LAST_SERVER_SEQ_KEY = "g3.lastServerSeq";
-const CLIENT_ID_KEY = "g3.clientId";
+const PENDING_OPS_KEY = "b3.pendingOps";
+const LAST_SERVER_SEQ_KEY = "b3.lastServerSeq";
+const CLIENT_ID_KEY = "b3.clientId";
 
 function syncLog(message: string, details?: Record<string, unknown>) {
   if (details) {
@@ -49,11 +49,11 @@ function readJson<T>(key: string, fallback: T): T {
 }
 
 class SyncClient {
-  store = createMergeableStore("g3-chat-client")
+  store = createMergeableStore("b3-chat-client")
     .setTablesSchema(tablesSchema)
     .setValuesSchema(localValuesSchema);
   middleware = createMiddleware(this.store as any);
-  persister = createLocalPersister(this.store as any, "g3-chat.local");
+  persister = createLocalPersister(this.store as any, "b3-chat.local");
   socket?: WebSocket;
   started = false;
   reconnectAttempt = 0;
@@ -540,7 +540,13 @@ class SyncClient {
     return this.enqueueCommand("update_workspace", { workspace });
   }
 
-  sendMessage(input: { thread: Thread; text: string; modelId: string; search: boolean }) {
+  sendMessage(input: {
+    thread: Thread;
+    text: string;
+    modelId: string;
+    search: boolean;
+    attachmentIds?: string[];
+  }) {
     const opId = createId("op");
     const updatedAt = nowIso();
     const thread = {
@@ -580,6 +586,7 @@ class SyncClient {
       promptText: input.text,
       modelId: input.modelId,
       search: input.search,
+      attachmentIds: input.attachmentIds ?? [],
     } satisfies CreateUserMessagePayload);
   }
 

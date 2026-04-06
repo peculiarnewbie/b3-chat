@@ -9,9 +9,10 @@ import {
   onMount,
 } from "solid-js";
 import { createStore } from "solid-js/store";
-import { LOCAL_VALUES, TABLES, nowIso } from "@g3-chat/domain";
+import { createId, LOCAL_VALUES, TABLES, nowIso } from "@b3-chat/domain";
 import Markdown from "../components/Markdown";
 import { authClient } from "../lib/auth-client";
+import { isAllowedFile, isImageMime, uploadFile } from "../lib/upload";
 import { syncClient } from "../lib/sync-client";
 
 type SessionPayload = {
@@ -57,7 +58,7 @@ const THEMES: { id: Theme; label: string }[] = [
 
 function getInitialTheme(): Theme {
   if (typeof localStorage !== "undefined") {
-    const saved = localStorage.getItem("g3-theme") as Theme | null;
+    const saved = localStorage.getItem("b3-theme") as Theme | null;
     if (saved && THEMES.some((t) => t.id === saved)) return saved;
   }
   return "clean";
@@ -65,14 +66,14 @@ function getInitialTheme(): Theme {
 
 function getInitialModelId(): string {
   if (typeof localStorage !== "undefined") {
-    return localStorage.getItem("g3-modelId") ?? "";
+    return localStorage.getItem("b3-modelId") ?? "";
   }
   return "";
 }
 
 function getInitialSearch(): boolean {
   if (typeof localStorage !== "undefined") {
-    return localStorage.getItem("g3-search") === "true";
+    return localStorage.getItem("b3-search") === "true";
   }
   return false;
 }
@@ -116,6 +117,15 @@ export default function Home() {
     modelId: getInitialModelId(),
     search: getInitialSearch(),
     sending: false,
+    attachments: [] as Array<{
+      localId: string;
+      attachmentId: string | null;
+      fileName: string;
+      mimeType: string;
+      sizeBytes: number;
+      status: "uploading" | "ready" | "failed";
+      previewUrl?: string;
+    }>,
   });
 
   // Inline editing state
@@ -126,6 +136,86 @@ export default function Home() {
   // biome-ignore lint: assigned via ref attribute
   // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref
   let timelineRef: HTMLElement | undefined;
+  // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref attribute
+  let fileInputRef: HTMLInputElement | undefined;
+
+  // Drag-and-drop state
+  const [isDragging, setIsDragging] = createSignal(false);
+  let dragCounter = 0;
+
+  // File upload handlers
+  const handleFileSelect = async (files: FileList | null) => {
+    if (!files || !activeThread()) return;
+    for (const file of Array.from(files)) {
+      if (!isAllowedFile(file)) continue;
+      const localId = createId("local");
+      const previewUrl = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined;
+
+      setComposer("attachments", (prev) => [
+        ...prev,
+        {
+          localId,
+          attachmentId: null,
+          fileName: file.name,
+          mimeType: file.type,
+          sizeBytes: file.size,
+          status: "uploading",
+          previewUrl,
+        },
+      ]);
+
+      try {
+        const result = await uploadFile(file, activeThread()!.id);
+        setComposer("attachments", (att) => att.localId === localId, {
+          attachmentId: result.attachment.id,
+          status: "ready",
+        });
+        syncClient.registerAttachment(result.attachment as any);
+        syncClient.completeAttachment(result.attachment as any);
+      } catch (err) {
+        console.error("Upload failed:", err);
+        setComposer("attachments", (att) => att.localId === localId, "status", "failed");
+      }
+    }
+    if (fileInputRef) fileInputRef.value = "";
+  };
+
+  const removeAttachment = (localId: string) => {
+    const att = composer.attachments.find((a) => a.localId === localId);
+    if (att?.previewUrl) URL.revokeObjectURL(att.previewUrl);
+    setComposer("attachments", (prev) => prev.filter((a) => a.localId !== localId));
+  };
+
+  const handleDragEnter = (e: DragEvent) => {
+    e.preventDefault();
+    dragCounter++;
+    setIsDragging(true);
+  };
+  const handleDragLeave = (e: DragEvent) => {
+    e.preventDefault();
+    dragCounter--;
+    if (dragCounter <= 0) {
+      dragCounter = 0;
+      setIsDragging(false);
+    }
+  };
+  const handleDragOver = (e: DragEvent) => {
+    e.preventDefault();
+  };
+  const handleDrop = (e: DragEvent) => {
+    e.preventDefault();
+    dragCounter = 0;
+    setIsDragging(false);
+    void handleFileSelect(e.dataTransfer?.files ?? null);
+  };
+
+  const handlePaste = (e: ClipboardEvent) => {
+    const files = e.clipboardData?.files;
+    if (files && files.length > 0) {
+      e.preventDefault();
+      void handleFileSelect(files);
+    }
+  };
 
   // Smart scroll: track whether user is near the bottom
   const [isNearBottom, setIsNearBottom] = createSignal(true);
@@ -150,19 +240,19 @@ export default function Home() {
   // Apply theme to document
   createEffect(() => {
     document.documentElement.setAttribute("data-theme", theme());
-    localStorage.setItem("g3-theme", theme());
+    localStorage.setItem("b3-theme", theme());
   });
 
   // Persist model selection
   createEffect(() => {
     if (composer.modelId) {
-      localStorage.setItem("g3-modelId", composer.modelId);
+      localStorage.setItem("b3-modelId", composer.modelId);
     }
   });
 
   // Persist search toggle
   createEffect(() => {
-    localStorage.setItem("g3-search", String(composer.search));
+    localStorage.setItem("b3-search", String(composer.search));
   });
 
   const tables = createMemo(() => {
@@ -241,6 +331,13 @@ export default function Home() {
     return byMessage;
   });
 
+  const userAttachments = (messageId: string) => {
+    const allAttachments = tables()?.[TABLES.attachments] ?? {};
+    return Object.values<any>(allAttachments).filter(
+      (a) => a.messageId === messageId && a.status === "ready",
+    );
+  };
+
   const signIn = async () => {
     await authClient.signIn.social({
       provider: "google",
@@ -294,10 +391,18 @@ export default function Home() {
   };
 
   const sendMessage = async () => {
-    if (!activeThread() || !composer.text.trim() || composer.sending) return;
+    if (
+      !activeThread() ||
+      (!composer.text.trim() && composer.attachments.length === 0) ||
+      composer.sending
+    )
+      return;
     setComposer("sending", true);
     try {
       const text = composer.text.trim();
+      const attachmentIds = composer.attachments
+        .filter((a) => a.status === "ready" && a.attachmentId)
+        .map((a) => a.attachmentId!);
       syncClient.sendMessage({
         thread: activeThread()!,
         text,
@@ -307,8 +412,13 @@ export default function Home() {
           models()?.models?.[0]?.id ||
           "auto",
         search: composer.search,
+        attachmentIds,
       });
+      for (const att of composer.attachments) {
+        if (att.previewUrl) URL.revokeObjectURL(att.previewUrl);
+      }
       setComposer("text", "");
+      setComposer("attachments", []);
     } finally {
       setComposer("sending", false);
     }
@@ -328,7 +438,7 @@ export default function Home() {
         <main class="auth-shell">
           <section class="auth-card">
             <p class="eyebrow">Personal deployment</p>
-            <h1>g3 chat</h1>
+            <h1>b3 chat</h1>
             <p>Sign in with Google to continue.</p>
             <button class="btn btn-primary" onClick={signIn}>
               Continue with Google
@@ -344,9 +454,9 @@ export default function Home() {
         <aside classList={{ sidebar: true, open: sidebarOpen() }}>
           <div class="sidebar-top">
             <div class="brand">
-              <span class="brand-mark">g3</span>
+              <span class="brand-mark">b3</span>
               <div style="min-width:0">
-                <h1>g3.chat</h1>
+                <h1>b3.chat</h1>
                 <p class="brand-email">{session()?.user?.email}</p>
               </div>
             </div>
@@ -527,7 +637,39 @@ export default function Home() {
                       <span class="msg-status">{message.status}</span>
                     </Show>
                   </div>
-                  <Show when={message.role === "assistant"} fallback={<p>{message.text || "…"}</p>}>
+                  <Show
+                    when={message.role === "assistant"}
+                    fallback={
+                      <>
+                        <Show when={userAttachments(message.id).length > 0}>
+                          <div class="msg-attachments">
+                            <For each={userAttachments(message.id)}>
+                              {(att: any) => (
+                                <Show
+                                  when={isImageMime(att.mimeType)}
+                                  fallback={<span class="msg-attachment-file">{att.fileName}</span>}
+                                >
+                                  <a
+                                    href={`/api/uploads/blob/${att.objectKey}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    <img
+                                      class="msg-attachment-img"
+                                      src={`/api/uploads/blob/${att.objectKey}`}
+                                      alt={att.fileName}
+                                      loading="lazy"
+                                    />
+                                  </a>
+                                </Show>
+                              )}
+                            </For>
+                          </div>
+                        </Show>
+                        <p>{message.text || "…"}</p>
+                      </>
+                    }
+                  >
                     <Markdown text={message.text || "…"} />
                     <Show when={message.status === "streaming"}>
                       <span class="streaming-cursor" />
@@ -587,14 +729,72 @@ export default function Home() {
             </button>
           </Show>
 
-          <footer class="composer">
+          <footer
+            class="composer"
+            classList={{ "composer-dragging": isDragging() }}
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+          >
+            <Show when={composer.attachments.length > 0}>
+              <div class="attachment-strip">
+                <For each={composer.attachments}>
+                  {(att) => (
+                    <div
+                      class="attachment-chip"
+                      classList={{
+                        "attachment-chip-uploading": att.status === "uploading",
+                        "attachment-chip-failed": att.status === "failed",
+                      }}
+                    >
+                      <Show
+                        when={att.previewUrl}
+                        fallback={
+                          <span class="attachment-chip-ext">
+                            {att.fileName.split(".").pop()?.toUpperCase().slice(0, 4) || "FILE"}
+                          </span>
+                        }
+                      >
+                        <img class="attachment-chip-thumb" src={att.previewUrl} alt="" />
+                      </Show>
+                      <span class="attachment-chip-name">{att.fileName}</span>
+                      <Show when={att.status === "uploading"}>
+                        <span class="attachment-chip-spinner" />
+                      </Show>
+                      <button
+                        class="attachment-chip-remove"
+                        onClick={() => removeAttachment(att.localId)}
+                        title="Remove"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
             <textarea
               value={composer.text}
               onInput={(event) => setComposer("text", event.currentTarget.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Message..."
+              onPaste={handlePaste}
+              placeholder={
+                composer.attachments.length > 0 ? "Add a message (optional)..." : "Message..."
+              }
             />
             <div class="composer-bar">
+              <button class="attach-btn" onClick={() => fileInputRef?.click()} title="Attach files">
+                +
+              </button>
+              <input
+                ref={fileInputRef!}
+                type="file"
+                multiple
+                accept="image/*,text/*,.json,.csv,.pdf"
+                style={{ display: "none" }}
+                onChange={(e) => handleFileSelect(e.currentTarget.files)}
+              />
               <select
                 value={composer.modelId}
                 onChange={(event) => setComposer("modelId", event.currentTarget.value)}
@@ -612,7 +812,13 @@ export default function Home() {
                 Search
               </label>
               <span class="kbd-hint">Enter to send</span>
-              <button class="btn btn-primary" disabled={composer.sending} onClick={sendMessage}>
+              <button
+                class="btn btn-primary"
+                disabled={
+                  composer.sending || composer.attachments.some((a) => a.status === "uploading")
+                }
+                onClick={sendMessage}
+              >
                 {composer.sending ? "Sending…" : "Send"}
               </button>
             </div>

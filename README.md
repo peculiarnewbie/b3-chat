@@ -1,8 +1,8 @@
-# g3-chat
+# b3-chat
 
 A full-stack chat application built with SolidJS and Cloudflare Workers.
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/peculiarnewbie/g3-chat)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/peculiarnewbie/b3-chat)
 
 ## Development
 

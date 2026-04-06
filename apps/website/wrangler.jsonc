@@ -5,7 +5,12 @@
   "main": "src/worker.ts",
   "compatibility_date": "2026-03-22",
   "compatibility_flags": ["nodejs_compat"],
-  "routes": [{ "pattern": "chat.peculiarnewbie.com", "custom_domain": true }],
+  "routes": [
+    {
+      "pattern": "chat.peculiarnewbie.com",
+      "custom_domain": true,
+    },
+  ],
   "assets": {
     "directory": "dist/client",
     "binding": "ASSETS",
@@ -31,14 +36,14 @@
   "d1_databases": [
     {
       "binding": "AUTH_DB",
-      "database_name": "g3-chat-auth",
+      "database_name": "b3-chat-auth",
       "database_id": "edae39b9-b1a9-4069-8692-7a423b0aae16",
     },
   ],
   "r2_buckets": [
     {
       "binding": "UPLOADS",
-      "bucket_name": "g3-chat-uploads",
+      "bucket_name": "b3-chat-uploads",
     },
   ],
   "durable_objects": {

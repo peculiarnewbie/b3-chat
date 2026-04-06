@@ -1,5 +1,5 @@
 import { createMemo, type Component } from "solid-js";
-import { Marked } from "marked";
+import { Marked, Renderer } from "marked";
 import { markedHighlight } from "marked-highlight";
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/core";
@@ -23,6 +23,12 @@ hljs.registerLanguage("css", css);
 hljs.registerLanguage("xml", xml);
 hljs.registerLanguage("html", xml);
 
+const renderer = new Renderer();
+renderer.code = ({ text, lang }) => {
+  const langLabel = lang ? `<span class="code-lang">${lang}</span>` : "";
+  return `<div class="code-block"><div class="code-header">${langLabel}<button class="copy-btn" data-code="${encodeURIComponent(text)}">Copy</button></div><pre><code>${text}</code></pre></div>`;
+};
+
 const marked = new Marked(
   markedHighlight({
     langPrefix: "hljs language-",
@@ -38,15 +44,27 @@ const marked = new Marked(
     breaks: true,
   },
 );
+marked.use({ renderer });
 
 const Markdown: Component<{ text: string }> = (props) => {
   const html = createMemo(() => {
     const raw = props.text || "";
     const rendered = marked.parse(raw, { async: false }) as string;
-    return DOMPurify.sanitize(rendered);
+    return DOMPurify.sanitize(rendered, { ADD_ATTR: ["data-code"] });
   });
 
-  return <div class="md-content" innerHTML={html()} />;
+  const handleClick = (e: MouseEvent) => {
+    const target = e.target as HTMLElement;
+    if (!target.classList.contains("copy-btn")) return;
+    const code = decodeURIComponent(target.getAttribute("data-code") || "");
+    void navigator.clipboard.writeText(code);
+    target.textContent = "Copied!";
+    setTimeout(() => {
+      target.textContent = "Copy";
+    }, 1500);
+  };
+
+  return <div class="md-content" innerHTML={html()} onClick={handleClick} />;
 };
 
 export default Markdown;
