@@ -158,6 +158,10 @@ export default function Home() {
   const [editingWorkspaceId, setEditingWorkspaceId] = createSignal<string | null>(null);
   const [editValue, setEditValue] = createSignal("");
 
+  // Settings state
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
+  const [systemPromptDraft, setSystemPromptDraft] = createSignal("");
+
   // biome-ignore lint: assigned via ref attribute
   // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref
   let timelineRef: HTMLElement | undefined;
@@ -278,6 +282,13 @@ export default function Home() {
   // Persist search toggle
   createEffect(() => {
     localStorage.setItem("b3-search", String(composer.search));
+  });
+
+  // Sync system prompt draft when settings opens or workspace changes
+  createEffect(() => {
+    if (settingsOpen()) {
+      setSystemPromptDraft(activeWorkspace()?.systemPrompt ?? "");
+    }
   });
 
   const tables = createMemo(() => {
@@ -417,6 +428,19 @@ export default function Home() {
     const row = syncClient.store.getRow(TABLES.workspaces, workspaceId) as any;
     if (!row || row.name === newName) return;
     syncClient.updateWorkspace({ ...row, name: newName, updatedAt: nowIso() });
+  };
+
+  const saveSystemPrompt = () => {
+    const workspace = activeWorkspace();
+    if (!workspace) return;
+    const row = syncClient.store.getRow(TABLES.workspaces, workspace.id) as any;
+    if (!row) return;
+    syncClient.updateWorkspace({
+      ...row,
+      systemPrompt: systemPromptDraft(),
+      updatedAt: nowIso(),
+    });
+    setSettingsOpen(false);
   };
 
   const sendMessage = async () => {
@@ -632,234 +656,286 @@ export default function Home() {
                 </button>
               )}
             </For>
+            <button
+              classList={{ "theme-btn": true, active: settingsOpen() }}
+              onClick={() => {
+                setSettingsOpen(!settingsOpen());
+                setSidebarOpen(false);
+              }}
+              title="Settings"
+            >
+              ⚙
+            </button>
           </div>
         </aside>
 
         <main class="main-pane">
-          <header class="thread-header">
-            <button class="menu-btn" onClick={() => setSidebarOpen(true)}>
-              ☰
-            </button>
-            <span class="workspace-label">{activeWorkspace()?.name}</span>
-            <h2>{activeThread()?.title ?? "New Chat"}</h2>
-            <Show when={activeWorkspace()?.systemPrompt}>
-              <span class="system-prompt" title={activeWorkspace()?.systemPrompt}>
-                {activeWorkspace()?.systemPrompt}
-              </span>
-            </Show>
-          </header>
-
-          <section class="timeline" ref={timelineRef} onScroll={handleTimelineScroll}>
-            <For each={messages()}>
-              {(message) => (
-                <article
-                  classList={{
-                    msg: true,
-                    assistant: message.role === "assistant",
-                    user: message.role === "user",
-                  }}
-                >
-                  <div class="msg-meta">
-                    <span class="msg-role">{message.role === "assistant" ? "AI" : "You"}</span>
-                    <Show when={message.status && message.status !== "done"}>
-                      <span class="msg-status">{message.status}</span>
-                    </Show>
+          <Show
+            when={!settingsOpen()}
+            fallback={
+              <div class="settings-page">
+                <header class="settings-header">
+                  <button class="btn" onClick={() => setSettingsOpen(false)}>
+                    ← Back
+                  </button>
+                  <h2>Settings</h2>
+                  <span class="settings-workspace">{activeWorkspace()?.name}</span>
+                </header>
+                <div class="settings-body">
+                  <div class="settings-section">
+                    <label class="settings-label">System Prompt</label>
+                    <p class="settings-hint">
+                      Instructions prepended to every conversation in this workspace.
+                    </p>
+                    <textarea
+                      class="settings-textarea"
+                      value={systemPromptDraft()}
+                      onInput={(e) => setSystemPromptDraft(e.currentTarget.value)}
+                      placeholder="You are a helpful assistant..."
+                      rows={8}
+                    />
                   </div>
-                  <Show
-                    when={message.role === "assistant"}
-                    fallback={
-                      <div class="msg-user-stack">
-                        <Show when={userImageAttachments(message.id).length > 0}>
-                          <div class="msg-attachment-gallery">
-                            <For each={userImageAttachments(message.id)}>
-                              {(att: any) => (
-                                <a
-                                  class="msg-attachment-card"
-                                  href={`/api/uploads/blob/${att.objectKey}`}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  <img
-                                    class="msg-attachment-img"
-                                    src={`/api/uploads/blob/${att.objectKey}`}
-                                    alt={att.fileName}
-                                    loading="lazy"
-                                  />
-                                </a>
-                              )}
-                            </For>
-                          </div>
+                  <div class="settings-actions">
+                    <button class="btn" onClick={() => setSettingsOpen(false)}>
+                      Cancel
+                    </button>
+                    <button class="btn btn-primary" onClick={saveSystemPrompt}>
+                      Save
+                    </button>
+                  </div>
+                </div>
+              </div>
+            }
+          >
+            <header class="thread-header">
+              <button class="menu-btn" onClick={() => setSidebarOpen(true)}>
+                ☰
+              </button>
+              <span class="workspace-label">{activeWorkspace()?.name}</span>
+              <h2>{activeThread()?.title ?? "New Chat"}</h2>
+              <Show when={activeWorkspace()?.systemPrompt}>
+                <span class="system-prompt" title={activeWorkspace()?.systemPrompt}>
+                  {activeWorkspace()?.systemPrompt}
+                </span>
+              </Show>
+            </header>
+
+            <section class="timeline" ref={timelineRef} onScroll={handleTimelineScroll}>
+              <For each={messages()}>
+                {(message) => (
+                  <article
+                    classList={{
+                      msg: true,
+                      assistant: message.role === "assistant",
+                      user: message.role === "user",
+                    }}
+                  >
+                    <div class="msg-meta">
+                      <span class="msg-role">{message.role === "assistant" ? "AI" : "You"}</span>
+                      <Show when={message.status && message.status !== "done"}>
+                        <span class="msg-status">{message.status}</span>
+                      </Show>
+                    </div>
+                    <Show
+                      when={message.role === "assistant"}
+                      fallback={
+                        <div class="msg-user-stack">
+                          <Show when={userImageAttachments(message.id).length > 0}>
+                            <div class="msg-attachment-gallery">
+                              <For each={userImageAttachments(message.id)}>
+                                {(att: any) => (
+                                  <a
+                                    class="msg-attachment-card"
+                                    href={`/api/uploads/blob/${att.objectKey}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    <img
+                                      class="msg-attachment-img"
+                                      src={`/api/uploads/blob/${att.objectKey}`}
+                                      alt={att.fileName}
+                                      loading="lazy"
+                                    />
+                                  </a>
+                                )}
+                              </For>
+                            </div>
+                          </Show>
+                          <Show when={message.text?.trim()}>
+                            <div class="msg-user-body">
+                              <p>{message.text}</p>
+                            </div>
+                          </Show>
+                          <Show when={userFileAttachments(message.id).length > 0}>
+                            <div class="msg-attachments msg-attachments-files">
+                              <For each={userFileAttachments(message.id)}>
+                                {(att: any) => (
+                                  <span class="msg-attachment-file">{att.fileName}</span>
+                                )}
+                              </For>
+                            </div>
+                          </Show>
+                        </div>
+                      }
+                    >
+                      <Markdown text={message.text || "…"} />
+                      <Show when={message.status === "streaming"}>
+                        <span class="streaming-cursor" />
+                      </Show>
+                    </Show>
+                    <Show when={searchResults().get(message.id)?.length}>
+                      <div class="search-results">
+                        <span class="sr-label">Web results</span>
+                        <For each={searchResults().get(message.id)}>
+                          {(result) => (
+                            <a href={result.url} target="_blank" rel="noreferrer">
+                              {result.title}
+                            </a>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
+                    <Show
+                      when={
+                        message.role === "assistant" &&
+                        message.status === "completed" &&
+                        message.durationMs
+                      }
+                    >
+                      <div class="msg-stats">
+                        <Show when={message.ttftMs != null}>
+                          <span>TTFT {message.ttftMs}ms</span>
                         </Show>
-                        <Show when={message.text?.trim()}>
-                          <div class="msg-user-body">
-                            <p>{message.text}</p>
-                          </div>
+                        <span>{formatDuration(message.durationMs)}</span>
+                        <Show when={message.completionTokens != null}>
+                          <span>{message.completionTokens} tokens</span>
                         </Show>
-                        <Show when={userFileAttachments(message.id).length > 0}>
-                          <div class="msg-attachments msg-attachments-files">
-                            <For each={userFileAttachments(message.id)}>
-                              {(att: any) => (
-                                <span class="msg-attachment-file">{att.fileName}</span>
-                              )}
-                            </For>
-                          </div>
+                        <Show when={message.completionTokens != null && message.durationMs}>
+                          <span>
+                            {((message.completionTokens / message.durationMs) * 1000).toFixed(1)}{" "}
+                            tok/s
+                          </span>
                         </Show>
                       </div>
-                    }
-                  >
-                    <Markdown text={message.text || "…"} />
-                    <Show when={message.status === "streaming"}>
-                      <span class="streaming-cursor" />
                     </Show>
-                  </Show>
-                  <Show when={searchResults().get(message.id)?.length}>
-                    <div class="search-results">
-                      <span class="sr-label">Web results</span>
-                      <For each={searchResults().get(message.id)}>
-                        {(result) => (
-                          <a href={result.url} target="_blank" rel="noreferrer">
-                            {result.title}
-                          </a>
-                        )}
-                      </For>
-                    </div>
-                  </Show>
-                  <Show
-                    when={
-                      message.role === "assistant" &&
-                      message.status === "completed" &&
-                      message.durationMs
-                    }
-                  >
-                    <div class="msg-stats">
-                      <Show when={message.ttftMs != null}>
-                        <span>TTFT {message.ttftMs}ms</span>
-                      </Show>
-                      <span>{formatDuration(message.durationMs)}</span>
-                      <Show when={message.completionTokens != null}>
-                        <span>{message.completionTokens} tokens</span>
-                      </Show>
-                      <Show when={message.completionTokens != null && message.durationMs}>
-                        <span>
-                          {((message.completionTokens / message.durationMs) * 1000).toFixed(1)}{" "}
-                          tok/s
-                        </span>
-                      </Show>
-                    </div>
-                  </Show>
-                </article>
-              )}
-            </For>
-          </section>
+                  </article>
+                )}
+              </For>
+            </section>
 
-          <Show when={showScrollBtn()}>
-            <button class="scroll-to-bottom" onClick={scrollToBottom} title="Scroll to bottom">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                <path
-                  d="M8 3v10M4 9l4 4 4-4"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
-            </button>
-          </Show>
-
-          <footer
-            class="composer"
-            classList={{ "composer-dragging": isDragging() }}
-            onDragEnter={handleDragEnter}
-            onDragLeave={handleDragLeave}
-            onDragOver={handleDragOver}
-            onDrop={handleDrop}
-          >
-            <Show when={composer.attachments.length > 0}>
-              <div class="attachment-strip">
-                <For each={composer.attachments}>
-                  {(att) => (
-                    <div
-                      class="attachment-chip"
-                      classList={{
-                        "attachment-chip-uploading": att.status === "uploading",
-                        "attachment-chip-failed": att.status === "failed",
-                      }}
-                    >
-                      <Show
-                        when={att.previewUrl}
-                        fallback={
-                          <span class="attachment-chip-ext">
-                            {att.fileName.split(".").pop()?.toUpperCase().slice(0, 4) || "FILE"}
-                          </span>
-                        }
-                      >
-                        <img class="attachment-chip-thumb" src={att.previewUrl} alt="" />
-                      </Show>
-                      <span class="attachment-chip-name">{att.fileName}</span>
-                      <Show when={att.status === "uploading"}>
-                        <span class="attachment-chip-spinner" />
-                      </Show>
-                      <button
-                        class="attachment-chip-remove"
-                        onClick={() => removeAttachment(att.localId)}
-                        title="Remove"
-                      >
-                        ×
-                      </button>
-                    </div>
-                  )}
-                </For>
-              </div>
+            <Show when={showScrollBtn()}>
+              <button class="scroll-to-bottom" onClick={scrollToBottom} title="Scroll to bottom">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path
+                    d="M8 3v10M4 9l4 4 4-4"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </button>
             </Show>
-            <textarea
-              value={composer.text}
-              onInput={(event) => setComposer("text", event.currentTarget.value)}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder={
-                composer.attachments.length > 0 ? "Add a message (optional)..." : "Message..."
-              }
-            />
-            <div class="composer-bar">
-              <button class="attach-btn" onClick={() => fileInputRef?.click()} title="Attach files">
-                +
-              </button>
-              <input
-                ref={fileInputRef!}
-                type="file"
-                multiple
-                accept="image/*,text/*,.json,.csv,.pdf"
-                style={{ display: "none" }}
-                onChange={(e) => handleFileSelect(e.currentTarget.files)}
-              />
-              <select
-                value={composer.modelId}
-                onChange={(event) => setComposer("modelId", event.currentTarget.value)}
-              >
-                <For each={models()?.models ?? []}>
-                  {(model) => <option value={model.id}>{model.name}</option>}
-                </For>
-              </select>
-              <label class="search-toggle">
-                <input
-                  type="checkbox"
-                  checked={composer.search}
-                  onChange={(event) => setComposer("search", event.currentTarget.checked)}
-                />
-                Search
-              </label>
-              <span class="kbd-hint">Enter to send</span>
-              <button
-                class="btn btn-primary"
-                disabled={
-                  composer.sending || composer.attachments.some((a) => a.status === "uploading")
+
+            <footer
+              class="composer"
+              classList={{ "composer-dragging": isDragging() }}
+              onDragEnter={handleDragEnter}
+              onDragLeave={handleDragLeave}
+              onDragOver={handleDragOver}
+              onDrop={handleDrop}
+            >
+              <Show when={composer.attachments.length > 0}>
+                <div class="attachment-strip">
+                  <For each={composer.attachments}>
+                    {(att) => (
+                      <div
+                        class="attachment-chip"
+                        classList={{
+                          "attachment-chip-uploading": att.status === "uploading",
+                          "attachment-chip-failed": att.status === "failed",
+                        }}
+                      >
+                        <Show
+                          when={att.previewUrl}
+                          fallback={
+                            <span class="attachment-chip-ext">
+                              {att.fileName.split(".").pop()?.toUpperCase().slice(0, 4) || "FILE"}
+                            </span>
+                          }
+                        >
+                          <img class="attachment-chip-thumb" src={att.previewUrl} alt="" />
+                        </Show>
+                        <span class="attachment-chip-name">{att.fileName}</span>
+                        <Show when={att.status === "uploading"}>
+                          <span class="attachment-chip-spinner" />
+                        </Show>
+                        <button
+                          class="attachment-chip-remove"
+                          onClick={() => removeAttachment(att.localId)}
+                          title="Remove"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    )}
+                  </For>
+                </div>
+              </Show>
+              <textarea
+                value={composer.text}
+                onInput={(event) => setComposer("text", event.currentTarget.value)}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                placeholder={
+                  composer.attachments.length > 0 ? "Add a message (optional)..." : "Message..."
                 }
-                onClick={sendMessage}
-              >
-                {composer.sending ? "Sending…" : "Send"}
-              </button>
-            </div>
-          </footer>
+              />
+              <div class="composer-bar">
+                <button
+                  class="attach-btn"
+                  onClick={() => fileInputRef?.click()}
+                  title="Attach files"
+                >
+                  +
+                </button>
+                <input
+                  ref={fileInputRef!}
+                  type="file"
+                  multiple
+                  accept="image/*,text/*,.json,.csv,.pdf"
+                  style={{ display: "none" }}
+                  onChange={(e) => handleFileSelect(e.currentTarget.files)}
+                />
+                <select
+                  value={composer.modelId}
+                  onChange={(event) => setComposer("modelId", event.currentTarget.value)}
+                >
+                  <For each={models()?.models ?? []}>
+                    {(model) => <option value={model.id}>{model.name}</option>}
+                  </For>
+                </select>
+                <label class="search-toggle">
+                  <input
+                    type="checkbox"
+                    checked={composer.search}
+                    onChange={(event) => setComposer("search", event.currentTarget.checked)}
+                  />
+                  Search
+                </label>
+                <span class="kbd-hint">Enter to send</span>
+                <button
+                  class="btn btn-primary"
+                  disabled={
+                    composer.sending || composer.attachments.some((a) => a.status === "uploading")
+                  }
+                  onClick={sendMessage}
+                >
+                  {composer.sending ? "Sending…" : "Send"}
+                </button>
+              </div>
+            </footer>
+          </Show>
         </main>
       </div>
     </Show>

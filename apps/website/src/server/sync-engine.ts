@@ -1,6 +1,6 @@
 import {
   TABLES,
-  buildConversationSearchContext,
+  buildSearchPlanningContext,
   buildSearchContext,
   createId,
   createMessagePart,
@@ -37,7 +37,8 @@ import {
   getSignedAttachmentUrl,
   isImageAttachment,
   isInlineTextAttachment,
-  rewriteSearchQuery,
+  planSearch,
+  type SearchPlan,
   type AppEnv,
 } from "@b3-chat/server";
 type SyncCommandResult = {
@@ -566,37 +567,55 @@ export class SyncEngineDurableObject {
 
     let searchRows: SearchResult[] = [];
     let searchContext = "";
-    if (payload.search) {
-      const conversationSearchContext = buildConversationSearchContext({
+    if (payload.search && payload.promptText.trim()) {
+      const threadMessages = this.getThreadMessages(snapshot, thread.id);
+      const planningContext = buildSearchPlanningContext({
         promptText: payload.promptText,
-        messages: this.getThreadMessages(snapshot, thread.id),
+        messages: threadMessages,
       });
-      let searchQuery = payload.promptText;
+      let searchPlan: SearchPlan;
       try {
-        searchQuery = await rewriteSearchQuery(this.env, {
+        searchPlan = await planSearch(this.env, {
           modelId,
-          promptText: payload.promptText,
-          conversationContext: conversationSearchContext,
+          planningContext,
         });
       } catch {
-        searchQuery = payload.promptText;
+        searchPlan = {
+          needsSearch: false,
+          summary: "",
+          query: "",
+          numResults: 0,
+        };
       }
-      try {
-        if (this.env.EXA_API_KEY) {
-          searchRows = (await exaSearch(this.env, searchQuery)).map((row) =>
-            decodeSearchResultRow({
-              ...row,
-              id: createId("src"),
-              messageId: payload.assistantMessage.id,
-            }),
-          );
-          searchContext = buildSearchContext(searchRows);
-        } else {
-          searchContext = await exaMcpSearchContext(searchQuery);
-        }
-      } catch {
-        if (searchRows.length === 0) {
-          searchContext = await exaMcpSearchContext(searchQuery);
+      syncLog("assistant_turn_search_plan", {
+        assistantMessageId: payload.assistantMessage.id,
+        needsSearch: searchPlan.needsSearch,
+        summary: searchPlan.summary,
+        query: searchPlan.query,
+        numResults: searchPlan.numResults,
+      });
+      if (searchPlan.needsSearch && searchPlan.query) {
+        try {
+          if (this.env.EXA_API_KEY) {
+            searchRows = (await exaSearch(this.env, searchPlan.query, searchPlan.numResults)).map(
+              (row) =>
+                decodeSearchResultRow({
+                  ...row,
+                  id: createId("src"),
+                  messageId: payload.assistantMessage.id,
+                }),
+            );
+            searchContext = buildSearchContext({
+              query: searchPlan.query,
+              rows: searchRows,
+            });
+          } else {
+            searchContext = await exaMcpSearchContext(searchPlan.query, searchPlan.numResults);
+          }
+        } catch {
+          if (searchRows.length === 0) {
+            searchContext = await exaMcpSearchContext(searchPlan.query, searchPlan.numResults);
+          }
         }
       }
     }

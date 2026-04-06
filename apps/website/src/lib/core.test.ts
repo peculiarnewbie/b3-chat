@@ -1,5 +1,5 @@
 import {
-  buildConversationSearchContext,
+  buildSearchPlanningContext,
   buildSearchContext,
   createAttachment,
   createWorkspace,
@@ -7,6 +7,7 @@ import {
 } from "@b3-chat/domain";
 import {
   allowedEmail,
+  clampExaResults,
   extractChatCompletionText,
   filterModelsCatalog,
   getSignedAttachmentUrl,
@@ -14,6 +15,7 @@ import {
   isInlineTextAttachment,
   normalizeEmail,
   parseExaMcpTextResponse,
+  parseSearchPlan,
   verifyUploadToken,
 } from "@b3-chat/server";
 import { describe, expect, it } from "vite-plus/test";
@@ -37,22 +39,59 @@ describe("domain helpers", () => {
   });
 
   it("builds grounded search context blocks", () => {
-    const context = buildSearchContext([
-      {
-        title: "Example",
-        url: "https://example.com",
-        snippet: "hello world",
-      },
-    ]);
+    const context = buildSearchContext({
+      query: "current date and time right now",
+      rows: [
+        {
+          title: "Example",
+          url: "https://example.com",
+          snippet: "hello world",
+        },
+      ],
+    });
 
+    expect(context).toContain("Tool: exa_web_search");
+    expect(context).toContain("Search query: current date and time right now");
+    expect(context).toContain("<exa_search_results>");
+    expect(context).toContain("do not mention the search tool");
     expect(context).toContain("[1] Example");
     expect(context).toContain("https://example.com");
   });
 
-  it("builds search rewrite context from recent conversation", () => {
-    const query = buildConversationSearchContext({
+  it("builds bounded planning context from recent conversation", () => {
+    const query = buildSearchPlanningContext({
       promptText: "what about now?",
       messages: [
+        {
+          role: "user",
+          text: "message 0 should be dropped once the recent window is applied",
+          status: "completed",
+        },
+        {
+          role: "assistant",
+          text: "message 1 should be dropped once the recent window is applied",
+          status: "completed",
+        },
+        {
+          role: "user",
+          text: "message 2 should be dropped once the recent window is applied",
+          status: "completed",
+        },
+        {
+          role: "assistant",
+          text: "message 3 should be dropped once the recent window is applied",
+          status: "completed",
+        },
+        {
+          role: "user",
+          text: "message 4 should stay inside the recent window",
+          status: "completed",
+        },
+        {
+          role: "assistant",
+          text: "message 5 should stay inside the recent window",
+          status: "completed",
+        },
         {
           role: "user",
           text: "when is your training data cutoff?",
@@ -70,7 +109,7 @@ describe("domain helpers", () => {
         },
         {
           role: "assistant",
-          text: "I don't have access to the current date.",
+          text: `I don't have access to the current date. ${"x".repeat(600)}`,
           status: "completed",
         },
         {
@@ -81,10 +120,16 @@ describe("domain helpers", () => {
       ],
     });
 
-    expect(query).toContain("Latest user request: what about now?");
+    expect(query).toContain("Latest user request:\nwhat about now?");
+    expect(query).toContain("Recent conversation:");
     expect(query).toContain("user: what day is it?");
     expect(query).toContain("assistant: I don't have access to the current date.");
+    expect(query).toContain("Task:");
+    expect(query).toContain("Decide whether web search is needed.");
     expect(query).not.toContain("user: what about now?");
+    expect(query).not.toContain("message 0 should be dropped");
+    expect(query).not.toContain("message 1 should be dropped");
+    expect(query).not.toContain("x".repeat(501));
   });
 });
 
@@ -187,6 +232,86 @@ describe("server helpers", () => {
     ]);
 
     expect(text).toBe("what time is it right now");
+  });
+
+  it("parses a planner response into a normalized search plan", () => {
+    const plan = parseSearchPlan(
+      '{"needsSearch": true, "summary": "User wants the current date and time.", "query": "current date and time right now", "numResults": 9}',
+    );
+
+    expect(plan.needsSearch).toBe(true);
+    expect(plan.summary).toBe("User wants the current date and time.");
+    expect(plan.query).toBe("current date and time right now");
+    expect(plan.numResults).toBe(8);
+  });
+
+  it("parses a no-search planner response", () => {
+    const plan = parseSearchPlan(
+      '{"needsSearch": false, "summary": "", "query": "", "numResults": 0}',
+    );
+
+    expect(plan).toEqual({
+      needsSearch: false,
+      summary: "",
+      query: "",
+      numResults: 0,
+    });
+  });
+
+  it("fails closed on malformed planner output", () => {
+    const plan = parseSearchPlan("needsSearch: true\nquery: current time right now\nnumResults: 3");
+
+    expect(plan).toEqual({
+      needsSearch: false,
+      summary: "",
+      query: "",
+      numResults: 0,
+    });
+  });
+
+  it("clamps exa result counts", () => {
+    expect(clampExaResults(1)).toBe(3);
+    expect(clampExaResults(5)).toBe(5);
+    expect(clampExaResults(99)).toBe(8);
+  });
+
+  it("fails closed when a search plan is missing the rewritten query", () => {
+    const plan = parseSearchPlan(
+      '{"needsSearch": true, "summary": "User wants the current time.", "query": "", "numResults": 3}',
+    );
+
+    expect(plan).toEqual({
+      needsSearch: false,
+      summary: "",
+      query: "",
+      numResults: 0,
+    });
+  });
+
+  it("fails closed when a search plan is missing the summary", () => {
+    const plan = parseSearchPlan(
+      '{"needsSearch": true, "summary": "", "query": "current time right now", "numResults": 3}',
+    );
+
+    expect(plan).toEqual({
+      needsSearch: false,
+      summary: "",
+      query: "",
+      numResults: 0,
+    });
+  });
+
+  it("fails closed when a search plan is missing numResults", () => {
+    const plan = parseSearchPlan(
+      '{"needsSearch": true, "summary": "User wants the current time.", "query": "current time right now"}',
+    );
+
+    expect(plan).toEqual({
+      needsSearch: false,
+      summary: "",
+      query: "",
+      numResults: 0,
+    });
   });
 
   it("signs attachment URLs for authenticated model fetches", async () => {
