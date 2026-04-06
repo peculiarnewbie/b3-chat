@@ -365,6 +365,12 @@ export async function completeTextAttachment(env: AppEnv, objectKey: string) {
 
 export async function getSignedAttachmentUrl(env: AppEnv, objectKey: string) {
   const url = new URL(`/api/uploads/blob/${encodeURIComponent(objectKey)}`, env.BETTER_AUTH_URL);
+  const token = await signUploadToken(env, {
+    action: "read_attachment",
+    objectKey,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+  url.searchParams.set("token", token);
   return url.toString();
 }
 

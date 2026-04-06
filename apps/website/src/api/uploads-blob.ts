@@ -41,8 +41,22 @@ export async function handleUploadBlobPut(request: Request): Promise<Response> {
 
 export async function handleUploadBlobGet(request: Request): Promise<Response> {
   const env = getRuntimeEnv();
-  await requireSession(request, env);
-  const objectKey = readObjectKey(new URL(request.url));
+  const url = new URL(request.url);
+  const objectKey = readObjectKey(url);
+  const token = url.searchParams.get("token");
+
+  if (token) {
+    const payload = await verifyUploadToken(env, token);
+    if (!payload) return new Response("Invalid token", { status: 401 });
+    if (payload.action !== "read_attachment")
+      return new Response("Invalid token action", { status: 401 });
+    if (Number(payload.expiresAt ?? 0) < Date.now())
+      return new Response("Expired token", { status: 401 });
+    if (payload.objectKey !== objectKey) return new Response("Key mismatch", { status: 401 });
+  } else {
+    await requireSession(request, env);
+  }
+
   const object = await env.UPLOADS.get(objectKey);
   if (!object) return new Response("Not found", { status: 404 });
 

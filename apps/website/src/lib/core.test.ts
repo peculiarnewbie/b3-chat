@@ -2,10 +2,12 @@ import { buildSearchContext, createAttachment, createWorkspace, slugify } from "
 import {
   allowedEmail,
   filterModelsCatalog,
+  getSignedAttachmentUrl,
   isImageAttachment,
   isInlineTextAttachment,
   normalizeEmail,
   parseExaMcpTextResponse,
+  verifyUploadToken,
 } from "@b3-chat/server";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -131,5 +133,21 @@ describe("server helpers", () => {
 
     expect(text).toContain("https://example.com");
     expect(text).toContain("Snippet");
+  });
+
+  it("signs attachment URLs for authenticated model fetches", async () => {
+    const signedUrl = await getSignedAttachmentUrl(env as any, "thd_123/cat.png");
+    const url = new URL(signedUrl);
+    const token = url.searchParams.get("token");
+
+    expect(url.origin).toBe("https://chat.example.com");
+    expect(url.pathname).toBe("/api/uploads/blob/thd_123%2Fcat.png");
+    expect(token).toBeTruthy();
+
+    const payload = await verifyUploadToken(env as any, token!);
+
+    expect(payload?.action).toBe("read_attachment");
+    expect(payload?.objectKey).toBe("thd_123/cat.png");
+    expect(Number(payload?.expiresAt)).toBeGreaterThan(Date.now());
   });
 });

@@ -337,6 +337,10 @@ export default function Home() {
       (a) => a.messageId === messageId && a.status === "ready",
     );
   };
+  const userImageAttachments = (messageId: string) =>
+    userAttachments(messageId).filter((attachment) => isImageMime(attachment.mimeType));
+  const userFileAttachments = (messageId: string) =>
+    userAttachments(messageId).filter((attachment) => !isImageMime(attachment.mimeType));
 
   const signIn = async () => {
     await authClient.signIn.social({
@@ -640,34 +644,43 @@ export default function Home() {
                   <Show
                     when={message.role === "assistant"}
                     fallback={
-                      <>
-                        <Show when={userAttachments(message.id).length > 0}>
-                          <div class="msg-attachments">
-                            <For each={userAttachments(message.id)}>
+                      <div class="msg-user-stack">
+                        <Show when={userImageAttachments(message.id).length > 0}>
+                          <div class="msg-attachment-gallery">
+                            <For each={userImageAttachments(message.id)}>
                               {(att: any) => (
-                                <Show
-                                  when={isImageMime(att.mimeType)}
-                                  fallback={<span class="msg-attachment-file">{att.fileName}</span>}
+                                <a
+                                  class="msg-attachment-card"
+                                  href={`/api/uploads/blob/${att.objectKey}`}
+                                  target="_blank"
+                                  rel="noreferrer"
                                 >
-                                  <a
-                                    href={`/api/uploads/blob/${att.objectKey}`}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                  >
-                                    <img
-                                      class="msg-attachment-img"
-                                      src={`/api/uploads/blob/${att.objectKey}`}
-                                      alt={att.fileName}
-                                      loading="lazy"
-                                    />
-                                  </a>
-                                </Show>
+                                  <img
+                                    class="msg-attachment-img"
+                                    src={`/api/uploads/blob/${att.objectKey}`}
+                                    alt={att.fileName}
+                                    loading="lazy"
+                                  />
+                                </a>
                               )}
                             </For>
                           </div>
                         </Show>
-                        <p>{message.text || "…"}</p>
-                      </>
+                        <Show when={message.text?.trim()}>
+                          <div class="msg-user-body">
+                            <p>{message.text}</p>
+                          </div>
+                        </Show>
+                        <Show when={userFileAttachments(message.id).length > 0}>
+                          <div class="msg-attachments msg-attachments-files">
+                            <For each={userFileAttachments(message.id)}>
+                              {(att: any) => (
+                                <span class="msg-attachment-file">{att.fileName}</span>
+                              )}
+                            </For>
+                          </div>
+                        </Show>
+                      </div>
                     }
                   >
                     <Markdown text={message.text || "…"} />
