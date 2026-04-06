@@ -103,6 +103,14 @@ type ExaSearchResponse = {
   results?: ExaSearchResult[];
 };
 
+type ChatCompletionResponse = {
+  choices?: Array<{
+    message?: {
+      content?: string | Array<{ type?: string; text?: string }>;
+    };
+  }>;
+};
+
 type InternalCommandResponse = {
   ok: boolean;
   snapshot?: SyncSnapshot;
@@ -313,6 +321,61 @@ export async function exaSearch(env: AppEnv, query: string) {
     domain: new URL(result.url).hostname,
     score: Number(result.highlightScores?.[0] ?? 0),
   }));
+}
+
+export function extractChatCompletionText(
+  content: string | Array<{ type?: string; text?: string }> | undefined,
+) {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text!.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+export async function rewriteSearchQuery(
+  env: AppEnv,
+  input: {
+    modelId: string;
+    promptText: string;
+    conversationContext: string;
+  },
+) {
+  const response = await fetch(`${env.OPENCODE_GO_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${env.OPENCODE_GO_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: input.modelId || getDefaultModelId(env),
+      stream: false,
+      temperature: 0,
+      max_tokens: 48,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Rewrite the latest user message into a concise web search query. Use conversation context only to resolve references like pronouns, ellipsis, or follow-ups. Focus on the user's real information need, not on the assistant's limitations or prior phrasing. Return only the query text.",
+        },
+        {
+          role: "user",
+          content: input.conversationContext,
+        },
+      ],
+    }),
+  });
+  if (!response.ok) throw new Error(`Search query rewrite failed: ${response.status}`);
+  const json = (await response.json()) as ChatCompletionResponse;
+  const text = extractChatCompletionText(json.choices?.[0]?.message?.content)
+    .replace(/^search query:\s*/i, "")
+    .replace(/^["']|["']$/g, "")
+    .split("\n")[0]
+    .trim();
+  return text || input.promptText.trim();
 }
 
 export function parseExaMcpTextResponse(responseText: string) {

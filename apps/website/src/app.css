@@ -212,14 +212,17 @@ a {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--text-secondary);
-  padding: 8px 8px 2px;
+  color: var(--accent);
+  padding: 12px 8px 4px;
+}
+
+.section-label:first-child {
+  padding-top: 4px;
 }
 
 .nav-item {
   display: flex;
   flex-direction: column;
-  gap: 1px;
   padding: 6px 8px;
   border-radius: var(--radius);
   border: none;
@@ -237,19 +240,16 @@ a {
   background: var(--accent-soft);
 }
 
-.nav-item-header {
+.nav-item-row {
   display: flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
 }
 
-.nav-item-header strong {
+.nav-item strong {
   flex: 1;
   min-width: 0;
-}
-
-.nav-item strong {
   font-size: 0.85rem;
   font-weight: 500;
   white-space: nowrap;
@@ -257,27 +257,12 @@ a {
   text-overflow: ellipsis;
 }
 
-/* Thread footer: timestamp on the left, action buttons on the right */
-.nav-item-footer {
-  display: flex;
-  align-items: center;
-  min-height: 18px;
-}
-
-.nav-item-time {
-  font-size: 0.7rem;
-  color: var(--text-secondary);
-}
-
-/* On hover, hide the timestamp and show action buttons */
-.nav-item:hover .nav-item-time {
-  display: none;
-}
-
 .nav-item-actions {
   display: none;
   align-items: center;
   gap: 2px;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .nav-item:hover .nav-item-actions {

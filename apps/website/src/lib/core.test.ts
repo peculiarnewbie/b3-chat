@@ -1,6 +1,13 @@
-import { buildSearchContext, createAttachment, createWorkspace, slugify } from "@b3-chat/domain";
+import {
+  buildConversationSearchContext,
+  buildSearchContext,
+  createAttachment,
+  createWorkspace,
+  slugify,
+} from "@b3-chat/domain";
 import {
   allowedEmail,
+  extractChatCompletionText,
   filterModelsCatalog,
   getSignedAttachmentUrl,
   isImageAttachment,
@@ -40,6 +47,44 @@ describe("domain helpers", () => {
 
     expect(context).toContain("[1] Example");
     expect(context).toContain("https://example.com");
+  });
+
+  it("builds search rewrite context from recent conversation", () => {
+    const query = buildConversationSearchContext({
+      promptText: "what about now?",
+      messages: [
+        {
+          role: "user",
+          text: "when is your training data cutoff?",
+          status: "completed",
+        },
+        {
+          role: "assistant",
+          text: "My training data runs through June 2025.",
+          status: "completed",
+        },
+        {
+          role: "user",
+          text: "what day is it?",
+          status: "completed",
+        },
+        {
+          role: "assistant",
+          text: "I don't have access to the current date.",
+          status: "completed",
+        },
+        {
+          role: "user",
+          text: "what about now?",
+          status: "completed",
+        },
+      ],
+    });
+
+    expect(query).toContain("Latest user request: what about now?");
+    expect(query).toContain("user: what day is it?");
+    expect(query).toContain("assistant: I don't have access to the current date.");
+    expect(query).not.toContain("user: what about now?");
   });
 });
 
@@ -133,6 +178,15 @@ describe("server helpers", () => {
 
     expect(text).toContain("https://example.com");
     expect(text).toContain("Snippet");
+  });
+
+  it("extracts text from chat completion content arrays", () => {
+    const text = extractChatCompletionText([
+      { type: "text", text: "what time is it right now" },
+      { type: "ignored", text: "nope" },
+    ]);
+
+    expect(text).toBe("what time is it right now");
   });
 
   it("signs attachment URLs for authenticated model fetches", async () => {

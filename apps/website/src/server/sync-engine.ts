@@ -1,5 +1,6 @@
 import {
   TABLES,
+  buildConversationSearchContext,
   buildSearchContext,
   createId,
   createMessagePart,
@@ -36,6 +37,7 @@ import {
   getSignedAttachmentUrl,
   isImageAttachment,
   isInlineTextAttachment,
+  rewriteSearchQuery,
   type AppEnv,
 } from "@b3-chat/server";
 type SyncCommandResult = {
@@ -560,13 +562,28 @@ export class SyncEngineDurableObject {
     if (!thread) return;
     const workspace = this.getWorkspace(thread.workspaceId);
     if (!workspace) return;
+    const modelId = payload.modelId || workspace.defaultModelId || getDefaultModelId(this.env);
 
     let searchRows: SearchResult[] = [];
     let searchContext = "";
     if (payload.search) {
+      const conversationSearchContext = buildConversationSearchContext({
+        promptText: payload.promptText,
+        messages: this.getThreadMessages(snapshot, thread.id),
+      });
+      let searchQuery = payload.promptText;
+      try {
+        searchQuery = await rewriteSearchQuery(this.env, {
+          modelId,
+          promptText: payload.promptText,
+          conversationContext: conversationSearchContext,
+        });
+      } catch {
+        searchQuery = payload.promptText;
+      }
       try {
         if (this.env.EXA_API_KEY) {
-          searchRows = (await exaSearch(this.env, payload.promptText)).map((row) =>
+          searchRows = (await exaSearch(this.env, searchQuery)).map((row) =>
             decodeSearchResultRow({
               ...row,
               id: createId("src"),
@@ -575,11 +592,11 @@ export class SyncEngineDurableObject {
           );
           searchContext = buildSearchContext(searchRows);
         } else {
-          searchContext = await exaMcpSearchContext(payload.promptText);
+          searchContext = await exaMcpSearchContext(searchQuery);
         }
       } catch {
         if (searchRows.length === 0) {
-          searchContext = await exaMcpSearchContext(payload.promptText);
+          searchContext = await exaMcpSearchContext(searchQuery);
         }
       }
     }
@@ -614,7 +631,7 @@ export class SyncEngineDurableObject {
           authorization: `Bearer ${this.env.OPENCODE_GO_API_KEY}`,
         },
         body: JSON.stringify({
-          model: payload.modelId || workspace.defaultModelId || getDefaultModelId(this.env),
+          model: modelId,
           stream: true,
           stream_options: { include_usage: true },
           messages,
@@ -745,11 +762,15 @@ export class SyncEngineDurableObject {
     }
   }
 
-  private async buildOpenAiMessages(snapshot: SyncSnapshot, threadId: string, workspaceId: string) {
-    const workspace = snapshot.tables?.[TABLES.workspaces]?.[workspaceId];
-    const messages = Object.values<any>(snapshot.tables?.[TABLES.messages] ?? {})
+  private getThreadMessages(snapshot: SyncSnapshot, threadId: string) {
+    return Object.values<any>(snapshot.tables?.[TABLES.messages] ?? {})
       .filter((message) => message.threadId === threadId)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  private async buildOpenAiMessages(snapshot: SyncSnapshot, threadId: string, workspaceId: string) {
+    const workspace = snapshot.tables?.[TABLES.workspaces]?.[workspaceId];
+    const messages = this.getThreadMessages(snapshot, threadId);
     const attachments = Object.values<any>(snapshot.tables?.[TABLES.attachments] ?? {}).filter(
       (attachment) => attachment.threadId === threadId && attachment.status === "ready",
     );

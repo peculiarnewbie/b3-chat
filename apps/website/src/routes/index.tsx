@@ -45,6 +45,31 @@ function formatRelativeTime(iso: string): string {
   return date.toLocaleDateString();
 }
 
+function getDateGroup(iso: string): string {
+  const date = new Date(iso);
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterdayStart = new Date(todayStart.getTime() - 86_400_000);
+  const weekStart = new Date(todayStart.getTime() - 6 * 86_400_000);
+
+  if (date >= todayStart) return "Today";
+  if (date >= yesterdayStart) return "Yesterday";
+  if (date >= weekStart) return "Last 7 Days";
+  return "Older";
+}
+
+function groupThreadsByDate(threads: any[]): { label: string; threads: any[] }[] {
+  const order = ["Today", "Yesterday", "Last 7 Days", "Older"];
+  const groups: Record<string, any[]> = {};
+  for (const thread of threads) {
+    const label = getDateGroup(thread.lastMessageAt);
+    (groups[label] ??= []).push(thread);
+  }
+  return order
+    .filter((label) => groups[label]?.length)
+    .map((label) => ({ label, threads: groups[label] }));
+}
+
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
@@ -529,70 +554,69 @@ export default function Home() {
               )}
             </For>
 
-            <p class="section-label">Threads</p>
-            <For each={threads()}>
-              {(thread) => (
-                <div
-                  classList={{ "nav-item": true, active: thread.id === activeThread()?.id }}
-                  onClick={() => {
-                    if (editingThreadId() === thread.id) return;
-                    syncClient.setActiveThreadId(thread.id);
-                    setSidebarOpen(false);
-                  }}
-                >
-                  <Show
-                    when={editingThreadId() === thread.id}
-                    fallback={
-                      <>
-                        <div class="nav-item-header">
-                          <strong>{thread.title}</strong>
-                        </div>
-                        <div class="nav-item-footer">
-                          <span class="nav-item-time">
-                            <Show when={streamingThreadIds().has(thread.id)}>
-                              <span class="thread-spinner" />
-                            </Show>
-                            {formatRelativeTime(thread.lastMessageAt)}
-                          </span>
-                          <div class="nav-item-actions">
-                            <span
-                              class="action-btn"
-                              title="Rename thread"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                startEditingThread(thread.id, thread.title);
-                              }}
-                            >
-                              ✎
-                            </span>
-                            <span
-                              class="action-btn action-btn-danger"
-                              title="Delete thread"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void deleteThread(thread.id);
-                              }}
-                            >
-                              ×
-                            </span>
-                          </div>
-                        </div>
-                      </>
-                    }
-                  >
-                    <input
-                      class="inline-edit"
-                      value={editValue()}
-                      onInput={(e) => setEditValue(e.currentTarget.value)}
-                      onBlur={() => commitThreadRename(thread.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") commitThreadRename(thread.id);
-                        if (e.key === "Escape") setEditingThreadId(null);
-                      }}
-                      ref={(el) => requestAnimationFrame(() => el.focus())}
-                    />
-                  </Show>
-                </div>
+            <For each={groupThreadsByDate(threads())}>
+              {(group) => (
+                <>
+                  <p class="section-label">{group.label}</p>
+                  <For each={group.threads}>
+                    {(thread) => (
+                      <div
+                        classList={{ "nav-item": true, active: thread.id === activeThread()?.id }}
+                        onClick={() => {
+                          if (editingThreadId() === thread.id) return;
+                          syncClient.setActiveThreadId(thread.id);
+                          setSidebarOpen(false);
+                        }}
+                      >
+                        <Show
+                          when={editingThreadId() === thread.id}
+                          fallback={
+                            <div class="nav-item-row">
+                              <Show when={streamingThreadIds().has(thread.id)}>
+                                <span class="thread-spinner" />
+                              </Show>
+                              <strong>{thread.title}</strong>
+                              <div class="nav-item-actions">
+                                <span
+                                  class="action-btn"
+                                  title="Rename thread"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    startEditingThread(thread.id, thread.title);
+                                  }}
+                                >
+                                  ✎
+                                </span>
+                                <span
+                                  class="action-btn action-btn-danger"
+                                  title="Delete thread"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void deleteThread(thread.id);
+                                  }}
+                                >
+                                  ×
+                                </span>
+                              </div>
+                            </div>
+                          }
+                        >
+                          <input
+                            class="inline-edit"
+                            value={editValue()}
+                            onInput={(e) => setEditValue(e.currentTarget.value)}
+                            onBlur={() => commitThreadRename(thread.id)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") commitThreadRename(thread.id);
+                              if (e.key === "Escape") setEditingThreadId(null);
+                            }}
+                            ref={(el) => requestAnimationFrame(() => el.focus())}
+                          />
+                        </Show>
+                      </div>
+                    )}
+                  </For>
+                </>
               )}
             </For>
           </div>

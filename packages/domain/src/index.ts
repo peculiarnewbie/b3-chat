@@ -507,6 +507,44 @@ export function buildSearchContext(rows: Array<{ title: string; url: string; sni
   ].join("\n\n");
 }
 
+export function buildConversationSearchContext(input: {
+  promptText: string;
+  messages: Array<{
+    role: string;
+    text?: string | null;
+    status?: string | null;
+  }>;
+  maxContextMessages?: number;
+}) {
+  const promptText = input.promptText.trim().replace(/\s+/g, " ");
+  if (!promptText) return "";
+
+  const normalizedMessages = input.messages
+    .filter((message) => message.role !== "system")
+    .filter((message) => message.status !== "failed" && message.status !== "cancelled")
+    .map((message) => ({
+      role: message.role,
+      text: (message.text ?? "").trim().replace(/\s+/g, " ").slice(0, 280),
+    }))
+    .filter((message) => message.text.length > 0);
+
+  if (
+    normalizedMessages.at(-1)?.role === "user" &&
+    normalizedMessages.at(-1)?.text === promptText
+  ) {
+    normalizedMessages.pop();
+  }
+
+  const contextMessages = normalizedMessages.slice(-(input.maxContextMessages ?? 6));
+  if (contextMessages.length === 0) return promptText;
+
+  return [
+    `Latest user request: ${promptText}`,
+    "Recent conversation context:",
+    ...contextMessages.map((message) => `${message.role}: ${message.text}`),
+  ].join("\n");
+}
+
 export function summarizeThreadTitle(text: string) {
   const trimmed = text.trim().replace(/\s+/g, " ");
   return trimmed.slice(0, 48) || "New Chat";
