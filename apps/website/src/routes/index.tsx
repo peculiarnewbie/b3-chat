@@ -212,6 +212,12 @@ export default function Home() {
   const version = useStoreVersion();
   const [theme, setTheme] = createSignal<Theme>(getInitialTheme());
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
+  const [collapsedProgressByMessage, setCollapsedProgressByMessage] = createStore<
+    Record<string, boolean>
+  >({});
+  const [didAutoCollapseProgressByMessage, setDidAutoCollapseProgressByMessage] = createStore<
+    Record<string, boolean>
+  >({});
   const [composer, setComposer] = createStore({
     text: "",
     modelId: getInitialModelId(),
@@ -507,10 +513,58 @@ export default function Home() {
       message.status === "pending" ||
       message.status === "streaming") &&
     !message.text?.trim();
+  const hasAssistantPrelude = (message: any) =>
+    message.role === "assistant" &&
+    (activitiesForMessage(message.id).length > 0 ||
+      isWaitingForVisibleAnswer(message) ||
+      thinkingTokens(message.id) != null);
+  const hasAssistantStats = (message: any) =>
+    message.role === "assistant" &&
+    (thinkingTokens(message.id) != null ||
+      message.promptTokens != null ||
+      message.ttftMs != null ||
+      message.durationMs != null ||
+      message.completionTokens != null);
   const thinkingLabel = (messageId: string) => {
     const tokens = thinkingTokens(messageId);
     return tokens != null ? `${formatTokenCount(tokens)} thinking tokens` : "Thinking…";
   };
+  const isAssistantPreludeCollapsed = (messageId: string) =>
+    collapsedProgressByMessage[messageId] ?? false;
+  const toggleAssistantPrelude = (messageId: string) =>
+    setCollapsedProgressByMessage(messageId, !isAssistantPreludeCollapsed(messageId));
+  const assistantPreludeSummary = (message: any) => {
+    const parts: string[] = [];
+    const activities = activitiesForMessage(message.id);
+    const tokens = thinkingTokens(message.id);
+
+    if (activities.length > 0) {
+      parts.push(`${activities.length} step${activities.length === 1 ? "" : "s"}`);
+    }
+    if (tokens != null) {
+      parts.push(`${formatTokenCount(tokens)} thinking tokens`);
+    }
+    if (isWaitingForVisibleAnswer(message)) {
+      parts.push("live");
+    }
+
+    return parts.join(" • ") || "Live model activity";
+  };
+
+  createEffect(() => {
+    for (const message of messages()) {
+      if (
+        message.role !== "assistant" ||
+        !hasAssistantPrelude(message) ||
+        !message.text?.trim() ||
+        didAutoCollapseProgressByMessage[message.id]
+      ) {
+        continue;
+      }
+      setCollapsedProgressByMessage(message.id, true);
+      setDidAutoCollapseProgressByMessage(message.id, true);
+    }
+  });
 
   const userAttachments = (messageId: string) => {
     const allAttachments = tables()?.[TABLES.attachments] ?? {};
@@ -965,64 +1019,165 @@ export default function Home() {
                         </div>
                       }
                     >
-                      <Show
-                        when={message.text?.trim()}
-                        fallback={
-                          <div class="assistant-progress-stack">
-                            <Show when={activitiesForMessage(message.id).length > 0}>
-                              <div class="assistant-progress">
-                                <For each={activitiesForMessage(message.id)}>
-                                  {(activity) => (
-                                    <div
-                                      classList={{
-                                        "assistant-progress-item": true,
-                                        "is-active": activity.state === "active",
-                                        "is-failed": activity.state === "failed",
-                                      }}
-                                    >
-                                      <span class="assistant-progress-marker" aria-hidden="true" />
-                                      <span>{activity.label}</span>
-                                    </div>
-                                  )}
-                                </For>
-                              </div>
-                            </Show>
-                            <Show when={isWaitingForVisibleAnswer(message)} fallback={<p>…</p>}>
-                              <div class="thinking-indicator">
-                                <span class="thinking-spinner" />
-                                <span>{thinkingLabel(message.id)}</span>
-                              </div>
-                            </Show>
-                          </div>
-                        }
-                      >
-                        <Markdown text={message.text} />
-                      </Show>
-                      <Show when={message.status === "streaming" && message.text?.trim()}>
-                        <span class="streaming-cursor" />
-                      </Show>
-                      <Show
-                        when={message.text?.trim() && activitiesForMessage(message.id).length > 0}
-                      >
-                        <div class="assistant-progress">
-                          <For each={activitiesForMessage(message.id)}>
-                            {(activity) => (
-                              <div
-                                classList={{
-                                  "assistant-progress-item": true,
-                                  "is-active": activity.state === "active",
-                                  "is-failed": activity.state === "failed",
-                                }}
+                      <Show when={hasAssistantPrelude(message)}>
+                        <div class="assistant-progress-shell">
+                          <button
+                            type="button"
+                            class="assistant-progress-toggle"
+                            aria-expanded={!isAssistantPreludeCollapsed(message.id)}
+                            aria-controls={`assistant-progress-${message.id}`}
+                            onClick={() => toggleAssistantPrelude(message.id)}
+                          >
+                            <span class="assistant-progress-toggle-copy">
+                              <span class="assistant-progress-toggle-label">Model activity</span>
+                              <span class="assistant-progress-toggle-meta">
+                                {assistantPreludeSummary(message)}
+                              </span>
+                            </span>
+                            <span
+                              classList={{
+                                "assistant-progress-toggle-chevron": true,
+                                "is-collapsed": isAssistantPreludeCollapsed(message.id),
+                              }}
+                              aria-hidden="true"
+                            >
+                              ▾
+                            </span>
+                          </button>
+                          <Show when={!isAssistantPreludeCollapsed(message.id)}>
+                            <div
+                              class="assistant-progress-stack"
+                              id={`assistant-progress-${message.id}`}
+                            >
+                              <Show when={activitiesForMessage(message.id).length > 0}>
+                                <div class="assistant-progress">
+                                  <For each={activitiesForMessage(message.id)}>
+                                    {(activity) => (
+                                      <div
+                                        classList={{
+                                          "assistant-progress-item": true,
+                                          "is-active": activity.state === "active",
+                                          "is-failed": activity.state === "failed",
+                                        }}
+                                      >
+                                        <span
+                                          class="assistant-progress-marker"
+                                          aria-hidden="true"
+                                        />
+                                        <span>{activity.label}</span>
+                                      </div>
+                                    )}
+                                  </For>
+                                </div>
+                              </Show>
+                              <Show
+                                when={
+                                  isWaitingForVisibleAnswer(message) ||
+                                  thinkingTokens(message.id) != null
+                                }
                               >
-                                <span class="assistant-progress-marker" aria-hidden="true" />
-                                <span>{activity.label}</span>
-                              </div>
-                            )}
-                          </For>
+                                <div
+                                  classList={{
+                                    "thinking-indicator": true,
+                                    "is-complete":
+                                      !isWaitingForVisibleAnswer(message) &&
+                                      thinkingTokens(message.id) != null,
+                                  }}
+                                >
+                                  <Show
+                                    when={isWaitingForVisibleAnswer(message)}
+                                    fallback={
+                                      <span
+                                        class="assistant-progress-marker thinking-indicator-marker"
+                                        aria-hidden="true"
+                                      />
+                                    }
+                                  >
+                                    <span class="thinking-spinner" />
+                                  </Show>
+                                  <span>{thinkingLabel(message.id)}</span>
+                                </div>
+                              </Show>
+                            </div>
+                          </Show>
+                        </div>
+                      </Show>
+                      <Show when={message.text?.trim()}>
+                        <div class="assistant-answer-card">
+                          <Markdown text={message.text} />
+                          <Show when={message.status === "streaming"}>
+                            <span class="streaming-cursor" />
+                          </Show>
+                          <Show when={searchRuns().get(message.id)?.length}>
+                            <div class="search-results">
+                              <span class="sr-label">Web search</span>
+                              <For each={searchRuns().get(message.id)}>
+                                {(run) => (
+                                  <div>
+                                    <span class="sr-label">
+                                      #{run.step} {run.query}
+                                    </span>
+                                    <Show
+                                      when={run.results.length > 0}
+                                      fallback={<p>{run.previewText || run.status}</p>}
+                                    >
+                                      <For each={run.results}>
+                                        {(result) => (
+                                          <a href={result.url} target="_blank" rel="noreferrer">
+                                            {result.title}
+                                          </a>
+                                        )}
+                                      </For>
+                                    </Show>
+                                  </div>
+                                )}
+                              </For>
+                            </div>
+                          </Show>
+                          <Show when={hasAssistantStats(message)}>
+                            <div class="msg-stats">
+                              <Show when={thinkingTokens(message.id)}>
+                                <span>
+                                  {formatTokenCount(thinkingTokens(message.id)!)} thinking tokens
+                                </span>
+                              </Show>
+                              <Show when={getTotalTokens(message) != null}>
+                                <span>
+                                  {formatTokenCount(getTotalTokens(message)!)} total tokens
+                                </span>
+                              </Show>
+                              <Show when={message.promptTokens != null}>
+                                <span>{formatTokenCount(message.promptTokens)} prompt</span>
+                              </Show>
+                              <Show when={message.completionTokens != null}>
+                                <span>{formatTokenCount(message.completionTokens)} output</span>
+                              </Show>
+                              <Show when={message.ttftMs != null}>
+                                <span>TTFT {message.ttftMs}ms</span>
+                              </Show>
+                              <Show when={message.durationMs != null}>
+                                <span>{formatDuration(message.durationMs)}</span>
+                              </Show>
+                              <Show
+                                when={
+                                  message.completionTokens != null &&
+                                  message.durationMs != null &&
+                                  message.durationMs > 0
+                                }
+                              >
+                                <span>
+                                  {((message.completionTokens / message.durationMs) * 1000).toFixed(
+                                    1,
+                                  )}{" "}
+                                  tok/s
+                                </span>
+                              </Show>
+                            </div>
+                          </Show>
                         </div>
                       </Show>
                     </Show>
-                    <Show when={searchRuns().get(message.id)?.length}>
+                    <Show when={!message.text?.trim() && searchRuns().get(message.id)?.length}>
                       <div class="search-results">
                         <span class="sr-label">Web search</span>
                         <For each={searchRuns().get(message.id)}>
@@ -1048,16 +1203,7 @@ export default function Home() {
                         </For>
                       </div>
                     </Show>
-                    <Show
-                      when={
-                        message.role === "assistant" &&
-                        (thinkingTokens(message.id) != null ||
-                          message.promptTokens != null ||
-                          message.ttftMs != null ||
-                          message.durationMs != null ||
-                          message.completionTokens != null)
-                      }
-                    >
+                    <Show when={!message.text?.trim() && hasAssistantStats(message)}>
                       <div class="msg-stats">
                         <Show when={thinkingTokens(message.id)}>
                           <span>

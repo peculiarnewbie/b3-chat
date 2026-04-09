@@ -15,6 +15,7 @@ import {
   extractChatCompletionText,
   filterModelsCatalog,
   getSignedAttachmentUrl,
+  getSearchPlannerModelId,
   inferForcedSearchQuery,
   isImageAttachment,
   isInlineTextAttachment,
@@ -266,6 +267,10 @@ describe("server helpers", () => {
     );
 
     expect(result.models).toHaveLength(2);
+  });
+
+  it("uses the dedicated search planner model", () => {
+    expect(getSearchPlannerModelId()).toBe("minimax-m2.5");
   });
 
   it("classifies supported attachment types", () => {

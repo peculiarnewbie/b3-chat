@@ -92,6 +92,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_EXA_RESULTS = 5;
 const MIN_EXA_RESULTS = 3;
 const MAX_EXA_RESULTS = 8;
+const SEARCH_PLANNER_MODEL_ID = "minimax-m2.5";
 const encoder = new TextEncoder();
 
 type ExaSearchResult = {
@@ -206,6 +207,10 @@ export function allowedEmail(env: AppEnv) {
 
 export function getDefaultModelId(env: Pick<AppEnv, "DEFAULT_MODEL_ID">) {
   return env.DEFAULT_MODEL_ID?.trim() || "auto";
+}
+
+export function getSearchPlannerModelId() {
+  return SEARCH_PLANNER_MODEL_ID;
 }
 
 export function getRuntimeEnv() {
@@ -568,7 +573,7 @@ export async function planSearch(
       authorization: `Bearer ${env.OPENCODE_GO_API_KEY}`,
     },
     body: JSON.stringify({
-      model: input.modelId || getDefaultModelId(env),
+      model: getSearchPlannerModelId(),
       stream: false,
       temperature: 0,
       max_tokens: 160,
@@ -583,7 +588,11 @@ export async function planSearch(
             "Search only when current or external web information is needed or clearly useful.",
             "Use recent conversation only to resolve references and follow-ups.",
             "If search is needed, summary must briefly describe the user's real information need for logs/debugging.",
-            "If search is needed, query must be a concise search-engine query for the external information need, not a copy of the assistant's wording.",
+            "If search is needed, query must be a high-quality search-engine query that preserves the user's actual information need with the important entities, dates, locations, and constraints intact.",
+            "Prefer specific natural-language queries over stripped keyword bags.",
+            "Use a full-sentence query when it helps retrieval or disambiguation.",
+            "Do not omit key qualifiers such as timeframe, geography, product/version, or comparison criteria.",
+            "Rewrite the request for search quality, but do not add facts the user did not imply.",
             'Do not search assistant identity or meta questions like "what model are you?" unless the user explicitly asks for externally verifiable current product information.',
             "Do not search casual chat, rewriting, summarization of provided text, or repo-local coding questions.",
             "Choose numResults based on breadth: 3 for narrow factual lookups, 5 for normal lookups, 8 for broad or ambiguous lookups.",
@@ -623,7 +632,7 @@ export async function decideSearchStep(
       authorization: `Bearer ${env.OPENCODE_GO_API_KEY}`,
     },
     body: JSON.stringify({
-      model: input.modelId || getDefaultModelId(env),
+      model: getSearchPlannerModelId(),
       stream: false,
       temperature: 0,
       max_tokens: 180,
@@ -643,7 +652,11 @@ export async function decideSearchStep(
             'If the user explicitly asks to "look up", "search", "check", or "find out" external facts, prefer action=search unless prior search results already answer it.',
             "If the question depends on current time, date, weather, scores, winners, prices, or latest/current facts, prefer action=search.",
             "If search is needed, summary must briefly describe the real information need for logs/debugging.",
-            "If search is needed, query must be a concise search-engine query for the external information need, not a copy of the assistant's wording.",
+            "If search is needed, query must be a high-quality search-engine query that preserves the user's actual information need with the important entities, dates, locations, and constraints intact.",
+            "Prefer specific natural-language queries over stripped keyword bags.",
+            "Use a full-sentence query when it helps retrieval or disambiguation.",
+            "Do not omit key qualifiers such as timeframe, geography, product/version, or comparison criteria.",
+            "Rewrite the request for search quality, but do not add facts the user did not imply.",
             "If prior searches were weak, refine them instead of repeating the same query unless repetition is clearly justified.",
             'Do not search assistant identity or meta questions like "what model are you?" unless the user explicitly asks for externally verifiable current product information.',
             "Do not search casual chat, rewriting, summarization of provided text, or repo-local coding questions.",

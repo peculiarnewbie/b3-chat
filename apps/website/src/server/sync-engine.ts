@@ -738,9 +738,6 @@ export class SyncEngineDurableObject {
       if (!pendingDelta) return;
       deltaCount += 1;
       accumulated += pendingDelta;
-      const part = await appendMessagePart("text", {
-        text: pendingDelta,
-      });
       const deltaEvent = await this.appendServerEvent(null, "message_delta", {
         messageId: payload.assistantMessage.id,
         delta: pendingDelta,
@@ -749,7 +746,6 @@ export class SyncEngineDurableObject {
       this.broadcast(deltaEvent);
       syncLog("assistant_turn_delta", {
         assistantMessageId: payload.assistantMessage.id,
-        seq: part.seq,
         chars: pendingDelta.length,
         totalChars: accumulated.length,
       });

@@ -485,6 +485,9 @@ class SyncClient {
         }
         case "message_part_appended": {
           const event = payload as SyncEventPayloadMap["message_part_appended"];
+          // Text is streamed through `message_delta`; storing duplicate text parts causes
+          // unnecessary UI transactions and makes the streaming UI feel unstable.
+          if (event.row.kind === "text") break;
           this.store.setRow(TABLES.messageParts, event.row.id, event.row as any);
           break;
         }
