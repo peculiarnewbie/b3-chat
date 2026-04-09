@@ -116,18 +116,9 @@ type ChatCompletionResponse = {
   }>;
 };
 
-export type SearchPlan = {
-  needsSearch: boolean;
-  summary: string;
+export type SearchQueryDecision = {
+  shouldSearch: boolean;
   query: string;
-  numResults: number;
-};
-
-export type SearchStepDecision = {
-  action: "answer" | "search";
-  summary: string;
-  query: string;
-  numResults: number;
 };
 
 function normalizeSearchPrompt(text: string) {
@@ -484,158 +475,41 @@ export function extractReasoningTokens(usage: unknown) {
   return null;
 }
 
-function noSearchPlan(): SearchPlan {
+function noSearchQueryDecision(): SearchQueryDecision {
   return {
-    needsSearch: false,
-    summary: "",
+    shouldSearch: false,
     query: "",
-    numResults: 0,
   };
 }
 
-function answerNowDecision(): SearchStepDecision {
-  return {
-    action: "answer",
-    summary: "",
-    query: "",
-    numResults: 0,
-  };
-}
-
-export function parseSearchPlan(text: string): SearchPlan {
+export function parseSearchQueryDecision(text: string): SearchQueryDecision {
   const jsonSlice = text.trim().match(/\{[\s\S]*\}/)?.[0];
-  if (!jsonSlice) return noSearchPlan();
+  if (!jsonSlice) return noSearchQueryDecision();
 
   let parsed: any;
   try {
     parsed = JSON.parse(jsonSlice);
   } catch {
-    return noSearchPlan();
+    return noSearchQueryDecision();
   }
 
-  if (typeof parsed?.needsSearch !== "boolean") {
-    return noSearchPlan();
+  if (typeof parsed?.shouldSearch !== "boolean") {
+    return noSearchQueryDecision();
   }
-  if (parsed.needsSearch === false) {
-    return noSearchPlan();
+  if (parsed.shouldSearch === false) {
+    return noSearchQueryDecision();
   }
 
-  const summary = typeof parsed?.summary === "string" ? parsed.summary.trim() : "";
   const query = typeof parsed?.query === "string" ? parsed.query.trim() : "";
-  const numResults =
-    typeof parsed?.numResults === "number" && Number.isFinite(parsed.numResults)
-      ? clampExaResults(parsed.numResults)
-      : DEFAULT_EXA_RESULTS;
-
-  if (!query) {
-    return noSearchPlan();
-  }
+  if (!query) return noSearchQueryDecision();
 
   return {
-    needsSearch: true,
-    summary: summary || query,
+    shouldSearch: true,
     query,
-    numResults,
   };
 }
 
-export function parseSearchStepDecision(text: string): SearchStepDecision {
-  const jsonSlice = text.trim().match(/\{[\s\S]*\}/)?.[0];
-  if (!jsonSlice) return answerNowDecision();
-
-  let parsed: any;
-  try {
-    parsed = JSON.parse(jsonSlice);
-  } catch {
-    return answerNowDecision();
-  }
-
-  if (parsed?.action !== "answer" && parsed?.action !== "search") {
-    return answerNowDecision();
-  }
-  if (parsed.action === "answer") {
-    return answerNowDecision();
-  }
-
-  const summary = typeof parsed?.summary === "string" ? parsed.summary.trim() : "";
-  const query = typeof parsed?.query === "string" ? parsed.query.trim() : "";
-  const numResults =
-    typeof parsed?.numResults === "number" && Number.isFinite(parsed.numResults)
-      ? clampExaResults(parsed.numResults)
-      : DEFAULT_EXA_RESULTS;
-
-  if (!query) {
-    return answerNowDecision();
-  }
-
-  return {
-    action: "search",
-    summary: summary || query,
-    query,
-    numResults,
-  };
-}
-
-export async function planSearch(
-  env: AppEnv,
-  input: {
-    modelId: string;
-    planningContext: string;
-  },
-) {
-  const response = await fetch(`${env.OPENCODE_GO_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${env.OPENCODE_GO_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: getSearchPlannerModelId(),
-      stream: false,
-      temperature: 0,
-      max_tokens: 160,
-      messages: [
-        {
-          role: "system",
-          content: [
-            "Decide whether the assistant should perform a web search before answering.",
-            `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
-            "Return JSON only with this exact shape:",
-            '{"needsSearch": boolean, "summary": string, "query": string, "numResults": number}',
-            "Search only when current or external web information is needed or clearly useful.",
-            "Use recent conversation only to resolve references and follow-ups.",
-            "If search is needed, summary must briefly describe the user's real information need for logs/debugging.",
-            "If search is needed, query must be a high-quality search-engine query that preserves the user's actual information need with the important entities, dates, locations, and constraints intact.",
-            "Prefer specific natural-language queries over stripped keyword bags.",
-            "Use a full-sentence query when it helps retrieval or disambiguation.",
-            "Do not omit key qualifiers such as timeframe, geography, product/version, or comparison criteria.",
-            "Rewrite the request for search quality, but do not add facts the user did not imply.",
-            'Do not search assistant identity or meta questions like "what model are you?" unless the user explicitly asks for externally verifiable current product information.',
-            "Do not search casual chat, rewriting, summarization of provided text, or repo-local coding questions.",
-            "Choose numResults based on breadth: 3 for narrow factual lookups, 5 for normal lookups, 8 for broad or ambiguous lookups.",
-            'If search is not needed, return exactly {"needsSearch":false,"summary":"","query":"","numResults":0}.',
-            "Return no prose, no markdown, no explanation.",
-          ].join("\n"),
-        },
-        {
-          role: "user",
-          content: input.planningContext,
-        },
-      ],
-    }),
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`Search planning failed: ${response.status} ${body.slice(0, 200)}`);
-  }
-  const json = (await response.json()) as ChatCompletionResponse;
-  const rawText = extractChatCompletionText(json.choices?.[0]?.message?.content);
-  const plan = parseSearchPlan(rawText);
-  console.log("[planSearch]", JSON.stringify({ rawText, plan }));
-  return plan;
-}
-
-export async function decideSearchStep(
+export async function decideSearchQuery(
   env: AppEnv,
   input: {
     modelId: string;
@@ -657,30 +531,18 @@ export async function decideSearchStep(
         {
           role: "system",
           content: [
-            "Decide whether the assistant should answer now or perform another web search first.",
+            "Decide whether the assistant should perform a web search before answering.",
             `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
             "Return JSON only with this exact shape:",
-            '{"action":"answer"|"search","summary":string,"query":string,"numResults":number}',
-            "Use recent conversation, workspace instructions, and prior searches to resolve references and follow-ups.",
-            'If the latest message is an ambiguous follow-up like "what about now?", resolve it against the most recent relevant user request instead of searching the literal phrase.',
-            'If the latest message is a deictic search follow-up like "use your search for this", "look it up", or "search that", resolve "this/that/it" against the most recent relevant user request instead of searching the literal phrase.',
-            "Choose action=answer when the user can be answered directly from existing context or prior search results.",
-            "Choose action=search only when current or external web information is still needed or clearly useful.",
-            "If the user is only asking whether search is available or supported, choose action=answer.",
-            'If the user explicitly asks to "look up", "search", "check", or "find out" external facts, prefer action=search unless prior search results already answer it.',
-            "If the question depends on current time, date, weather, scores, winners, prices, or latest/current facts, prefer action=search.",
-            "If the user asks for a forecast, prediction, or likely outcome about an ongoing or future real-world event, prefer action=search when current external context would materially improve the answer.",
-            "If search is needed, summary must briefly describe the real information need for logs/debugging.",
-            "If search is needed, query must be a high-quality search-engine query that preserves the user's actual information need with the important entities, dates, locations, and constraints intact.",
-            "Prefer specific natural-language queries over stripped keyword bags.",
-            "Use a full-sentence query when it helps retrieval or disambiguation.",
-            "Do not omit key qualifiers such as timeframe, geography, product/version, or comparison criteria.",
-            "Rewrite the request for search quality, but do not add facts the user did not imply.",
-            "If prior searches were weak, refine them instead of repeating the same query unless repetition is clearly justified.",
-            'Do not search assistant identity or meta questions like "what model are you?" unless the user explicitly asks for externally verifiable current product information.',
+            '{"shouldSearch":boolean,"query":string}',
+            "Read the recent raw conversation and resolve follow-ups, references, dates, and timeframe from that context.",
+            "If the latest user message depends on current or external information, set shouldSearch=true and rewrite it into one clean search query.",
+            'Examples of contextual follow-ups include "what about now?", "now you can search for it", "look it up", "search that", and bare follow-ups like "2026".',
+            'If the user can be answered from conversation alone, set shouldSearch=false and query="".',
+            'If the user is asking whether search is available or supported, set shouldSearch=false and query="".',
             "Do not search casual chat, rewriting, summarization of provided text, or repo-local coding questions.",
-            "Choose numResults based on breadth: 3 for narrow factual lookups, 5 for normal lookups, 8 for broad or ambiguous lookups.",
-            'If no further search is needed, return exactly {"action":"answer","summary":"","query":"","numResults":0}.',
+            "Do not return a literal deictic query containing unresolved words like this, that, it, now, or only a year if the conversation provides the missing referent.",
+            'If search is not needed, return exactly {"shouldSearch":false,"query":""}.',
             "Return no prose, no markdown, no explanation.",
           ].join("\n"),
         },
@@ -693,12 +555,12 @@ export async function decideSearchStep(
   });
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(`Search step planning failed: ${response.status} ${body.slice(0, 200)}`);
+    throw new Error(`Search query planning failed: ${response.status} ${body.slice(0, 200)}`);
   }
   const json = (await response.json()) as ChatCompletionResponse;
   const rawText = extractChatCompletionText(json.choices?.[0]?.message?.content);
-  const decision = parseSearchStepDecision(rawText);
-  console.log("[decideSearchStep]", JSON.stringify({ rawText, decision }));
+  const decision = parseSearchQueryDecision(rawText);
+  console.log("[decideSearchQuery]", JSON.stringify({ rawText, decision }));
   return decision;
 }
 

@@ -2,7 +2,6 @@ import {
   buildMultiSearchContext,
   buildSearchPlanningContext,
   buildSearchContext,
-  createSearchRun,
   createAttachment,
   createWorkspace,
   mergeAttachmentLink,
@@ -22,11 +21,9 @@ import {
   isInlineTextAttachment,
   normalizeEmail,
   parseExaMcpTextResponse,
-  parseSearchPlan,
-  parseSearchStepDecision,
+  parseSearchQueryDecision,
   verifyUploadToken,
 } from "@b3-chat/server";
-import { inferContextualFollowUpSearchQuery } from "../server/search";
 import { describe, expect, it } from "vite-plus/test";
 
 describe("domain helpers", () => {
@@ -121,17 +118,6 @@ describe("domain helpers", () => {
     const query = buildSearchPlanningContext({
       promptText: "what about now?",
       systemPrompt: "Answer crisply.",
-      priorSearches: [
-        createSearchRun({
-          messageId: "msg_1",
-          query: "current date and time",
-          status: "completed",
-          step: 1,
-          numResults: 5,
-          resultCount: 3,
-          previewText: "Clock result",
-        }),
-      ],
       messages: [
         {
           role: "user",
@@ -194,17 +180,13 @@ describe("domain helpers", () => {
     expect(query).toContain("Today's date is ");
     expect(query).toContain("Workspace system prompt:");
     expect(query).toContain("Answer crisply.");
-    expect(query).toContain("Latest user request:\nwhat about now?");
-    expect(query).toContain("Recent conversation:");
-    expect(query).toContain("Searches already attempted this turn:");
-    expect(query).toContain("current date and time");
+    expect(query).toContain("Latest user message:\nwhat about now?");
+    expect(query).toContain("Recent raw conversation:");
     expect(query).toContain("user: what day is it?");
     expect(query).toContain("assistant: I don't have access to the current date.");
-    expect(query).toContain("Task:");
-    expect(query).toContain("Decide whether to answer now or perform another web search.");
-    expect(query).not.toContain("user: what about now?");
-    expect(query).not.toContain("message 0 should be dropped");
-    expect(query).not.toContain("message 1 should be dropped");
+    expect(query).toContain("user: what about now?");
+    expect(query).toContain("message 0 should be dropped");
+    expect(query).toContain("message 1 should be dropped");
     expect(query).not.toContain("x".repeat(501));
   });
 
@@ -352,40 +334,22 @@ describe("server helpers", () => {
     expect(extractReasoningTokens({ completion_tokens: 42 })).toBe(null);
   });
 
-  it("parses a planner response into a normalized search plan", () => {
-    const plan = parseSearchPlan(
-      '{"needsSearch": true, "summary": "User wants the current date and time.", "query": "current date and time right now", "numResults": 9}',
-    );
-
-    expect(plan.needsSearch).toBe(true);
-    expect(plan.summary).toBe("User wants the current date and time.");
-    expect(plan.query).toBe("current date and time right now");
-    expect(plan.numResults).toBe(8);
-  });
-
-  it("parses a search-step response into a normalized decision", () => {
-    const decision = parseSearchStepDecision(
-      '{"action":"search","summary":"User needs the current time.","query":"current time in jakarta","numResults":9}',
+  it("parses a planner response into a normalized search decision", () => {
+    const decision = parseSearchQueryDecision(
+      '{"shouldSearch": true, "query": "current date and time right now"}',
     );
 
     expect(decision).toEqual({
-      action: "search",
-      summary: "User needs the current time.",
-      query: "current time in jakarta",
-      numResults: 8,
+      shouldSearch: true,
+      query: "current date and time right now",
     });
   });
 
-  it("parses an answer-now search-step response", () => {
-    const decision = parseSearchStepDecision(
-      '{"action":"answer","summary":"","query":"","numResults":0}',
-    );
-
+  it("parses a no-search planner response", () => {
+    const decision = parseSearchQueryDecision('{"shouldSearch": false, "query": ""}');
     expect(decision).toEqual({
-      action: "answer",
-      summary: "",
+      shouldSearch: false,
       query: "",
-      numResults: 0,
     });
   });
 
@@ -400,147 +364,12 @@ describe("server helpers", () => {
     expect(inferForcedSearchQuery("now you can search for it")).toBe(null);
   });
 
-  it("rewrites ambiguous realtime follow-ups from recent user context", () => {
-    const query = inferContextualFollowUpSearchQuery("what about now?", [
-      {
-        role: "user",
-        text: "what model are you?",
-        status: "completed",
-      },
-      {
-        role: "assistant",
-        text: "I'm an AI assistant.",
-        status: "completed",
-      },
-      {
-        role: "user",
-        text: "what time is it?",
-        status: "completed",
-      },
-      {
-        role: "assistant",
-        text: "I don't have access to the current time.",
-        status: "completed",
-      },
-      {
-        role: "user",
-        text: "what about now?",
-        status: "completed",
-      },
-    ]);
-
-    expect(query).toBe("current local time now");
-  });
-
-  it("does not invent context for ambiguous follow-ups without a prior realtime ask", () => {
-    const query = inferContextualFollowUpSearchQuery("what about now?", [
-      {
-        role: "user",
-        text: "what model are you?",
-        status: "completed",
-      },
-      {
-        role: "assistant",
-        text: "I'm an AI assistant.",
-        status: "completed",
-      },
-      {
-        role: "user",
-        text: "what about now?",
-        status: "completed",
-      },
-    ]);
-
-    expect(query).toBe(null);
-  });
-
-  it("rewrites generic search follow-ups against the prior user request", () => {
-    const query = inferContextualFollowUpSearchQuery("use your search for this", [
-      {
-        role: "user",
-        text: "who is going to win the 2026 f1 wdc you think?",
-        status: "completed",
-      },
-      {
-        role: "assistant",
-        text: "Here is a speculative answer without live data.",
-        status: "completed",
-      },
-      {
-        role: "user",
-        text: "use your search for this",
-        status: "completed",
-      },
-    ]);
-
-    expect(query).toBe("who is going to win the 2026 f1 wdc you think?");
-  });
-
-  it("rewrites conversational search follow-ups with extra lead-in words", () => {
-    const query = inferContextualFollowUpSearchQuery("now you can search for it", [
-      {
-        role: "user",
-        text: "who currently leads the f1 wdc?",
-        status: "completed",
-      },
-      {
-        role: "assistant",
-        text: "I answered from stale context.",
-        status: "completed",
-      },
-      {
-        role: "user",
-        text: "now you can search for it",
-        status: "completed",
-      },
-    ]);
-
-    expect(query).toBe("who currently leads the f1 wdc");
-  });
-
-  it("expands bare year follow-ups using the prior user request", () => {
-    const query = inferContextualFollowUpSearchQuery("2026", [
-      {
-        role: "user",
-        text: "who currently leads the f1 wdc?",
-        status: "completed",
-      },
-      {
-        role: "assistant",
-        text: "Max Verstappen leads as of older context.",
-        status: "completed",
-      },
-      {
-        role: "user",
-        text: "2026",
-        status: "completed",
-      },
-    ]);
-
-    expect(query).toBe("who currently leads the f1 wdc 2026");
-  });
-
-  it("parses a no-search planner response", () => {
-    const plan = parseSearchPlan(
-      '{"needsSearch": false, "summary": "", "query": "", "numResults": 0}',
-    );
-
-    expect(plan).toEqual({
-      needsSearch: false,
-      summary: "",
-      query: "",
-      numResults: 0,
-    });
-  });
-
   it("fails closed on malformed planner output", () => {
-    const plan = parseSearchPlan("needsSearch: true\nquery: current time right now\nnumResults: 3");
+    const decision = parseSearchQueryDecision("shouldSearch: true\nquery: current time right now");
 
-    expect(plan).toEqual({
-      needsSearch: false,
-      summary: "",
+    expect(decision).toEqual({
+      shouldSearch: false,
       query: "",
-      numResults: 0,
     });
   });
 
@@ -550,42 +379,12 @@ describe("server helpers", () => {
     expect(clampExaResults(99)).toBe(8);
   });
 
-  it("fails closed when a search plan is missing the rewritten query", () => {
-    const plan = parseSearchPlan(
-      '{"needsSearch": true, "summary": "User wants the current time.", "query": "", "numResults": 3}',
-    );
+  it("fails closed when a search decision is missing the rewritten query", () => {
+    const decision = parseSearchQueryDecision('{"shouldSearch": true, "query": ""}');
 
-    expect(plan).toEqual({
-      needsSearch: false,
-      summary: "",
+    expect(decision).toEqual({
+      shouldSearch: false,
       query: "",
-      numResults: 0,
-    });
-  });
-
-  it("falls back summary to query when summary is empty", () => {
-    const plan = parseSearchPlan(
-      '{"needsSearch": true, "summary": "", "query": "current time right now", "numResults": 3}',
-    );
-
-    expect(plan).toEqual({
-      needsSearch: true,
-      summary: "current time right now",
-      query: "current time right now",
-      numResults: 3,
-    });
-  });
-
-  it("defaults numResults when missing from search plan", () => {
-    const plan = parseSearchPlan(
-      '{"needsSearch": true, "summary": "User wants the current time.", "query": "current time right now"}',
-    );
-
-    expect(plan).toEqual({
-      needsSearch: true,
-      summary: "User wants the current time.",
-      query: "current time right now",
-      numResults: 5,
     });
   });
 

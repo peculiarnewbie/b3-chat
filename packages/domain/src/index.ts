@@ -643,24 +643,8 @@ export function buildSearchPlanningContext(input: {
       text: (message.text ?? "").trim().replace(/\s+/g, " ").slice(0, 500),
     }))
     .filter((message) => message.text.length > 0);
-
-  if (
-    normalizedMessages.at(-1)?.role === "user" &&
-    normalizedMessages.at(-1)?.text === promptText
-  ) {
-    normalizedMessages.pop();
-  }
-
-  const contextMessages = normalizedMessages.slice(-(input.maxContextMessages ?? 8));
+  const contextMessages = normalizedMessages.slice(-(input.maxContextMessages ?? 12));
   const systemPrompt = (input.systemPrompt ?? "").trim().replace(/\s+/g, " ").slice(0, 800);
-  const priorSearches = (input.priorSearches ?? [])
-    .map((search) => ({
-      query: search.query.trim().replace(/\s+/g, " "),
-      resultCount: Number.isFinite(search.resultCount) ? Number(search.resultCount) : 0,
-      summary: (search.summary ?? "").trim().replace(/\s+/g, " ").slice(0, 240),
-      status: (search.status ?? "").trim(),
-    }))
-    .filter((search) => search.query.length > 0);
 
   return [
     `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
@@ -668,36 +652,13 @@ export function buildSearchPlanningContext(input: {
     "Workspace system prompt:",
     systemPrompt || "(none)",
     "",
-    "Latest user request:",
-    promptText,
-    "",
-    "Recent conversation:",
+    "Recent raw conversation:",
     ...(contextMessages.length > 0
       ? contextMessages.map((message) => `${message.role}: ${message.text}`)
       : ["(none)"]),
     "",
-    "Searches already attempted this turn:",
-    ...(priorSearches.length > 0
-      ? priorSearches.map((search) =>
-          [
-            `step ${search.status === "failed" ? "failed" : "completed"}: ${search.query}`,
-            search.resultCount > 0 ? `results: ${search.resultCount}` : null,
-            search.summary ? `summary: ${search.summary}` : null,
-          ]
-            .filter(Boolean)
-            .join(" | "),
-        )
-      : ["(none)"]),
-    "",
-    "Task:",
-    "Decide whether to answer now or perform another web search.",
-    "If needed, summarize the real information need into a concise search-engine query.",
-    "Use conversation only to resolve references and follow-ups.",
-    'If the latest message is an ambiguous follow-up like "what about now?", resolve it against the most recent relevant user request instead of searching the literal phrase.',
-    'If the latest message is a deictic search follow-up like "use your search for this", "look it up", or "search that", resolve "this/that/it" against the most recent relevant user request instead of searching the literal phrase.',
-    "Use prior searches to avoid repeating the same weak query when refinement is possible.",
-    "If the user is only asking whether search is available or supported, answer directly and do not search.",
-    "Do not search for assistant self-identity, casual chat, rewriting, coding based on repo context, or questions answerable without the web.",
+    "Latest user message:",
+    promptText,
   ].join("\n");
 }
 

@@ -8,15 +8,14 @@ import {
   type SearchRun,
 } from "@b3-chat/domain";
 import {
-  decideSearchStep,
+  decideSearchQuery,
   exaMcpSearchRawText,
   exaSearch,
   inferForcedSearchQuery,
   type AppEnv,
-  type SearchStepDecision,
+  type SearchQueryDecision,
 } from "@b3-chat/server";
-
-const MAX_SEARCH_STEPS = 2;
+const SEARCH_RESULTS_PER_RUN = 5;
 
 type SearchGroundingRun = {
   query: string;
@@ -51,10 +50,6 @@ function summarizeRawText(text: string) {
   return text.replace(/\s+/g, " ").trim().slice(0, 240);
 }
 
-function stableQueryKey(query: string) {
-  return query.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
 function normalizePromptText(text: string) {
   return text.trim().replace(/\s+/g, " ").toLowerCase();
 }
@@ -68,93 +63,6 @@ function isSearchCapabilityQuestion(promptText: string) {
     /^(do|does)\s+you\s+(have|support|use)\s+(web\s+)?(search|searches|browsing)(\s+capabilit(?:y|ies))?\??$/,
     /^are\s+you\s+(able|capable)\s+to\s+(search|browse|look up)(\s+the\s+web)?\??$/,
   ].some((pattern) => pattern.test(normalized));
-}
-
-function isAmbiguousRealtimeFollowUp(promptText: string) {
-  const normalized = normalizePromptText(promptText);
-  if (!normalized) return false;
-
-  return [
-    /^(what|how)\s+about\s+(right\s+now|now|today|currently|the\s+latest)\??$/,
-    /^and\s+(right\s+)?now\??$/,
-    /^(now|right\s+now)\??$/,
-  ].some((pattern) => pattern.test(normalized));
-}
-
-function isContextualSearchFollowUp(promptText: string) {
-  const normalized = normalizePromptText(promptText);
-  if (!normalized) return false;
-
-  return [
-    /^(please\s+)?use\s+(your\s+)?(web\s+)?search(\s+for)?\s+(this|that|it)\??$/,
-    /^(please\s+)?use\s+(the\s+)?web\s+for\s+(this|that|it)\??$/,
-    /^(now\s+)?you\s+can\s+(look up|search( for)?|check( online)?|find out|google|browse)\s+(this|that|it)\??$/,
-    /^(please\s+)?(look up|search( for)?|check( online)?|find out|google|browse)\s+(this|that|it)\??$/,
-    /^(please\s+)?look\s+(this|that|it)\s+up\??$/,
-    /^(please\s+)?(look it up|search for it|search it|check it|find out|google it|browse it)\??$/,
-    /^(can|could|would|will)\s+you\s+(look up|search( for)?|check( online)?|find out|google|browse)\s+(this|that|it)\??$/,
-  ].some((pattern) => pattern.test(normalized));
-}
-
-function isBareYearFollowUp(promptText: string) {
-  const normalized = normalizePromptText(promptText);
-  return /^(19|20)\d{2}$/.test(normalized);
-}
-
-export function inferContextualFollowUpSearchQuery(
-  promptText: string,
-  messages: Array<Pick<Message, "role" | "text" | "status">>,
-) {
-  const isRealtimeFollowUp = isAmbiguousRealtimeFollowUp(promptText);
-  const isSearchFollowUp = isContextualSearchFollowUp(promptText);
-  const isYearFollowUp = isBareYearFollowUp(promptText);
-  if (!isRealtimeFollowUp && !isSearchFollowUp && !isYearFollowUp) return null;
-
-  const normalizedPrompt = normalizePromptText(promptText);
-  const priorUsers = messages
-    .filter((message) => message.role === "user")
-    .filter((message) => message.status !== "failed" && message.status !== "cancelled")
-    .map((message) => normalizePromptText(message.text ?? ""))
-    .filter(Boolean);
-
-  if (priorUsers.at(-1) === normalizedPrompt) priorUsers.pop();
-
-  for (const priorPrompt of priorUsers.reverse()) {
-    if (
-      isSearchCapabilityQuestion(priorPrompt) ||
-      isContextualSearchFollowUp(priorPrompt) ||
-      isAmbiguousRealtimeFollowUp(priorPrompt)
-    ) {
-      continue;
-    }
-    const query = inferForcedSearchQuery(priorPrompt);
-    if (query && isYearFollowUp) return `${query} ${normalizedPrompt}`.trim();
-    if (query) return query;
-    if (isSearchFollowUp) return priorPrompt;
-    if (isYearFollowUp) return `${priorPrompt} ${normalizedPrompt}`.trim();
-  }
-
-  return null;
-}
-
-function noSearchDecision(): SearchStepDecision {
-  return {
-    action: "answer",
-    summary: "",
-    query: "",
-    numResults: 0,
-  };
-}
-
-function forcedSearchDecision(promptText: string): SearchStepDecision | null {
-  const query = inferForcedSearchQuery(promptText);
-  if (!query) return null;
-  return {
-    action: "search",
-    summary: "Explicit lookup or current external information request",
-    query,
-    numResults: 5,
-  };
 }
 
 export async function prepareAssistantSearch(input: {
@@ -191,17 +99,11 @@ export async function prepareAssistantSearch(input: {
   const searchRuns: SearchRun[] = [];
   const searchResults: SearchResult[] = [];
   const groundingRuns: SearchGroundingRun[] = [];
-  const attemptedQueries = new Set<string>();
-  const contextualFollowUpQuery = inferContextualFollowUpSearchQuery(
-    input.promptText,
-    input.messages,
-  );
   input.log?.("assistant_turn_search_context", {
     assistantMessageId: input.assistantMessageId,
     promptText: input.promptText,
     enabled: input.enabled,
     messageCount: input.messages.length,
-    contextualFollowUpQuery,
     recentUserMessages: input.messages
       .filter((message) => message.role === "user")
       .slice(-6)
@@ -210,184 +112,121 @@ export async function prepareAssistantSearch(input: {
         status: message.status,
       })),
   });
+  await input.onProgress?.({
+    label: "Planning search query",
+    state: "active",
+    step: 1,
+  });
+  const planningContext = buildSearchPlanningContext({
+    promptText: input.promptText,
+    messages: input.messages,
+    systemPrompt: input.systemPrompt,
+  });
 
-  for (let step = 1; step <= MAX_SEARCH_STEPS; step += 1) {
-    await input.onProgress?.({
-      label: searchRuns.length > 0 ? `Reviewing sources for step ${step}` : "Planning next step",
-      state: "active",
-      step,
+  let decision: SearchQueryDecision;
+  try {
+    decision = await decideSearchQuery(input.env, {
+      modelId: input.modelId,
+      planningContext,
     });
-    const planningContext = buildSearchPlanningContext({
-      promptText: input.promptText,
-      messages: input.messages,
-      systemPrompt: input.systemPrompt,
-      priorSearches: searchRuns.map((run) => ({
-        query: run.query,
-        resultCount: run.resultCount,
-        summary: run.previewText,
-        status: run.status,
-      })),
-    });
-
-    let decision: SearchStepDecision;
-    try {
-      decision = await decideSearchStep(input.env, {
-        modelId: input.modelId,
-        planningContext,
-      });
-    } catch (error) {
-      input.log?.("assistant_turn_search_step_error", {
-        assistantMessageId: input.assistantMessageId,
-        step,
-        error: String(error),
-      });
-      decision = noSearchDecision();
-    }
-
-    const forcedDecision =
-      searchRuns.length === 0
-        ? contextualFollowUpQuery
-          ? {
-              action: "search" as const,
-              summary: "Ambiguous follow-up resolved from prior realtime request",
-              query: contextualFollowUpQuery,
-              numResults: 5,
-            }
-          : forcedSearchDecision(input.promptText)
-        : null;
-    const shouldRewriteAmbiguousEcho =
-      Boolean(contextualFollowUpQuery) &&
-      decision.action === "search" &&
-      stableQueryKey(decision.query) === stableQueryKey(input.promptText);
-    input.log?.("assistant_turn_search_step_pre_force", {
+  } catch (error) {
+    input.log?.("assistant_turn_search_planner_error", {
       assistantMessageId: input.assistantMessageId,
-      step,
-      plannerAction: decision.action,
-      plannerQuery: decision.query,
-      plannerSummary: decision.summary,
-      contextualFollowUpQuery,
-      shouldRewriteAmbiguousEcho,
+      error: String(error),
     });
-    if (forcedDecision && (decision.action !== "search" || shouldRewriteAmbiguousEcho)) {
-      input.log?.("assistant_turn_search_forced", {
-        assistantMessageId: input.assistantMessageId,
-        step,
-        originalAction: decision.action,
-        originalQuery: decision.query,
-        forcedQuery: forcedDecision.query,
-        reason: contextualFollowUpQuery ? "contextual_follow_up" : "explicit_or_realtime",
-      });
-      decision = forcedDecision;
-    }
+    const fallbackQuery = inferForcedSearchQuery(input.promptText);
+    decision = {
+      shouldSearch: Boolean(fallbackQuery),
+      query: fallbackQuery ?? "",
+    };
+  }
 
-    input.log?.("assistant_turn_search_step", {
-      assistantMessageId: input.assistantMessageId,
-      step,
-      action: decision.action,
-      summary: decision.summary,
-      query: decision.query,
-      numResults: decision.numResults,
-    });
+  input.log?.("assistant_turn_search_decision", {
+    assistantMessageId: input.assistantMessageId,
+    shouldSearch: decision.shouldSearch,
+    query: decision.query,
+  });
 
-    if (decision.action !== "search" || !decision.query.trim()) {
-      await input.onProgress?.({
-        label:
-          searchRuns.length > 0
-            ? "Search complete, drafting answer"
-            : "Answering from current context",
-        state: "completed",
-        step,
-        detail: decision.summary || undefined,
-      });
-      break;
-    }
-
-    const query = decision.query.trim();
-    const queryKey = stableQueryKey(query);
-    if (attemptedQueries.has(queryKey)) {
-      input.log?.("assistant_turn_search_duplicate_query_skipped", {
-        assistantMessageId: input.assistantMessageId,
-        step,
-        query,
-      });
-      await input.onProgress?.({
-        label: `Skipping duplicate search for "${query}"`,
-        state: "completed",
-        step,
-        query,
-      });
-      break;
-    }
-    attemptedQueries.add(queryKey);
+  if (!decision.shouldSearch || !decision.query.trim()) {
     await input.onProgress?.({
-      label: `Searching the web for "${query}"`,
-      state: "active",
-      step,
-      query,
-      detail: decision.summary || undefined,
+      label: "Answering from current context",
+      state: "completed",
+      step: 1,
     });
+    return {
+      searchRuns,
+      searchResults,
+      searchContext: "",
+    };
+  }
 
-    try {
-      if (input.env.EXA_API_KEY) {
-        const runRows = (await exaSearch(input.env, query, decision.numResults)).map((row) =>
-          decodeSearchResultRow({
-            ...row,
-            searchRunId: "",
-            messageId: input.assistantMessageId,
-          }),
-        );
-        const run = createSearchRun({
+  const query = decision.query.trim();
+  await input.onProgress?.({
+    label: `Searching the web for "${query}"`,
+    state: "active",
+    step: 1,
+    query,
+  });
+
+  try {
+    if (input.env.EXA_API_KEY) {
+      const runRows = (await exaSearch(input.env, query, SEARCH_RESULTS_PER_RUN)).map((row) =>
+        decodeSearchResultRow({
+          ...row,
+          searchRunId: "",
           messageId: input.assistantMessageId,
-          query,
-          status: "completed",
-          step,
-          numResults: decision.numResults,
-          resultCount: runRows.length,
-          previewText: summarizeStructuredResults(runRows),
-        });
-        const normalizedRows = runRows.map((row) =>
-          decodeSearchResultRow({
-            ...row,
-            searchRunId: run.id,
-            messageId: input.assistantMessageId,
-          }),
-        );
-
-        searchRuns.push(run);
-        searchResults.push(...normalizedRows);
-        groundingRuns.push({
-          query,
-          rows: normalizedRows.map((row) => ({
-            title: row.title,
-            url: row.url,
-            snippet: row.snippet,
-          })),
-        });
-        input.log?.("assistant_turn_search_execution_success", {
-          assistantMessageId: input.assistantMessageId,
-          step,
-          query,
-          resultCount: normalizedRows.length,
-          mode: "exa_api",
-          previewText: run.previewText,
-        });
-        await input.onProgress?.({
-          label: `Found ${normalizedRows.length} result${normalizedRows.length === 1 ? "" : "s"} for "${query}"`,
-          state: "completed",
-          step,
-          query,
-          detail: run.previewText || undefined,
-        });
-        continue;
-      }
-
-      const rawText = await exaMcpSearchRawText(query, decision.numResults);
+        }),
+      );
       const run = createSearchRun({
         messageId: input.assistantMessageId,
         query,
         status: "completed",
-        step,
-        numResults: decision.numResults,
+        step: 1,
+        numResults: SEARCH_RESULTS_PER_RUN,
+        resultCount: runRows.length,
+        previewText: summarizeStructuredResults(runRows),
+      });
+      const normalizedRows = runRows.map((row) =>
+        decodeSearchResultRow({
+          ...row,
+          searchRunId: run.id,
+          messageId: input.assistantMessageId,
+        }),
+      );
+
+      searchRuns.push(run);
+      searchResults.push(...normalizedRows);
+      groundingRuns.push({
+        query,
+        rows: normalizedRows.map((row) => ({
+          title: row.title,
+          url: row.url,
+          snippet: row.snippet,
+        })),
+      });
+      input.log?.("assistant_turn_search_execution_success", {
+        assistantMessageId: input.assistantMessageId,
+        step: 1,
+        query,
+        resultCount: normalizedRows.length,
+        mode: "exa_api",
+        previewText: run.previewText,
+      });
+      await input.onProgress?.({
+        label: `Found ${normalizedRows.length} result${normalizedRows.length === 1 ? "" : "s"} for "${query}"`,
+        state: "completed",
+        step: 1,
+        query,
+        detail: run.previewText || undefined,
+      });
+    } else {
+      const rawText = await exaMcpSearchRawText(query, SEARCH_RESULTS_PER_RUN);
+      const run = createSearchRun({
+        messageId: input.assistantMessageId,
+        query,
+        status: "completed",
+        step: 1,
+        numResults: SEARCH_RESULTS_PER_RUN,
         resultCount: 0,
         previewText: summarizeRawText(rawText),
       });
@@ -398,7 +237,7 @@ export async function prepareAssistantSearch(input: {
       });
       input.log?.("assistant_turn_search_execution_success", {
         assistantMessageId: input.assistantMessageId,
-        step,
+        step: 1,
         query,
         resultCount: 0,
         mode: "exa_mcp",
@@ -407,37 +246,36 @@ export async function prepareAssistantSearch(input: {
       await input.onProgress?.({
         label: `Search finished for "${query}"`,
         state: "completed",
-        step,
+        step: 1,
         query,
         detail: run.previewText || undefined,
       });
-    } catch (error) {
-      input.log?.("assistant_turn_search_execution_error", {
-        assistantMessageId: input.assistantMessageId,
-        step,
-        query,
-        error: String(error),
-      });
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      searchRuns.push(
-        createSearchRun({
-          messageId: input.assistantMessageId,
-          query,
-          status: "failed",
-          step,
-          numResults: decision.numResults,
-          errorMessage,
-        }),
-      );
-      await input.onProgress?.({
-        label: `Search failed for "${query}"`,
-        state: "failed",
-        step,
-        query,
-        detail: errorMessage,
-      });
-      break;
     }
+  } catch (error) {
+    input.log?.("assistant_turn_search_execution_error", {
+      assistantMessageId: input.assistantMessageId,
+      step: 1,
+      query,
+      error: String(error),
+    });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    searchRuns.push(
+      createSearchRun({
+        messageId: input.assistantMessageId,
+        query,
+        status: "failed",
+        step: 1,
+        numResults: SEARCH_RESULTS_PER_RUN,
+        errorMessage,
+      }),
+    );
+    await input.onProgress?.({
+      label: `Search failed for "${query}"`,
+      state: "failed",
+      step: 1,
+      query,
+      detail: errorMessage,
+    });
   }
 
   return {
