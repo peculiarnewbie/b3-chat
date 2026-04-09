@@ -252,6 +252,7 @@ a {
   align-items: center;
   gap: 4px;
   min-width: 0;
+  width: 100%;
 }
 
 .nav-item strong {
@@ -399,6 +400,58 @@ a {
   cursor: default;
 }
 
+.btn-danger {
+  color: #fff;
+  background: #c73c32;
+  border-color: #c73c32;
+}
+
+.btn-danger:hover {
+  background: #b33329;
+  border-color: #b33329;
+}
+
+/* ── Modal ────────────────────────────────────────── */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(8px);
+}
+
+.modal-card {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.modal-card h3 {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.modal-copy {
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 /* ── Main pane ────────────────────────────────────── */
 
 .main-pane {
@@ -542,6 +595,58 @@ a {
 
 .msg .search-results a:hover {
   text-decoration: underline;
+}
+
+.assistant-progress-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.assistant-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.assistant-progress-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.assistant-progress-item.is-active {
+  color: var(--text);
+}
+
+.assistant-progress-item.is-failed {
+  color: #b94a48;
+}
+
+.assistant-progress-marker {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.5;
+  flex: 0 0 auto;
+}
+
+.assistant-progress-item.is-active .assistant-progress-marker {
+  opacity: 1;
+  box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 16%, transparent);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    transform: scale(1.15);
+  }
 }
 
 /* ── Markdown content (assistant messages) ───────── */

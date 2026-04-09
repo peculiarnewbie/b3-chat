@@ -30,6 +30,13 @@ type ModelsPayload = {
 };
 
 type Theme = "clean" | "night" | "warm";
+type AssistantActivity = {
+  label: string;
+  state: "active" | "completed" | "failed";
+  step: number | null;
+  query: string | null;
+  detail: string | null;
+};
 
 function getDateGroup(iso: string): string {
   const date = new Date(iso);
@@ -65,6 +72,17 @@ function formatTokenCount(tokens: number): string {
   return new Intl.NumberFormat().format(tokens);
 }
 
+function getTotalTokens(message: {
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+}) {
+  const promptTokens = typeof message.promptTokens === "number" ? message.promptTokens : null;
+  const completionTokens =
+    typeof message.completionTokens === "number" ? message.completionTokens : null;
+  if (promptTokens == null && completionTokens == null) return null;
+  return (promptTokens ?? 0) + (completionTokens ?? 0);
+}
+
 function parseThinkingTokens(part: { kind?: string; text?: string; json?: string | null }) {
   if (part.kind !== "thinking_tokens") return null;
 
@@ -87,6 +105,49 @@ function parseThinkingTokens(part: { kind?: string; text?: string; json?: string
   }
 
   return null;
+}
+
+function parseAssistantActivity(part: { kind?: string; text?: string; json?: string | null }) {
+  if (part.kind !== "activity") return null;
+
+  const fallbackLabel = typeof part.text === "string" ? part.text.trim() : "";
+  if (typeof part.json !== "string" || !part.json.trim()) {
+    return fallbackLabel
+      ? {
+          label: fallbackLabel,
+          state: "active" as const,
+          step: null,
+          query: null,
+          detail: null,
+        }
+      : null;
+  }
+
+  try {
+    const parsed = JSON.parse(part.json) as Record<string, unknown>;
+    const label =
+      typeof parsed.label === "string" && parsed.label.trim() ? parsed.label.trim() : fallbackLabel;
+    if (!label) return null;
+
+    return {
+      label,
+      state: parsed.state === "completed" || parsed.state === "failed" ? parsed.state : "active",
+      step: typeof parsed.step === "number" ? parsed.step : null,
+      query: typeof parsed.query === "string" && parsed.query.trim() ? parsed.query.trim() : null,
+      detail:
+        typeof parsed.detail === "string" && parsed.detail.trim() ? parsed.detail.trim() : null,
+    } satisfies AssistantActivity;
+  } catch {
+    return fallbackLabel
+      ? {
+          label: fallbackLabel,
+          state: "active" as const,
+          step: null,
+          query: null,
+          detail: null,
+        }
+      : null;
+  }
 }
 
 const THEMES: { id: Theme; label: string }[] = [
@@ -171,6 +232,10 @@ export default function Home() {
   const [editingThreadId, setEditingThreadId] = createSignal<string | null>(null);
   const [editingWorkspaceId, setEditingWorkspaceId] = createSignal<string | null>(null);
   const [editValue, setEditValue] = createSignal("");
+  const [workspaceDeleteTarget, setWorkspaceDeleteTarget] = createSignal<{
+    id: string;
+    name: string;
+  } | null>(null);
 
   // Settings state
   const [settingsOpen, setSettingsOpen] = createSignal(false);
@@ -328,6 +393,7 @@ export default function Home() {
   // Auto-scroll only when user is already near the bottom
   createEffect(() => {
     const _msgs = messages();
+    const _activities = assistantActivities();
     if (timelineRef && isNearBottom()) {
       requestAnimationFrame(() => {
         timelineRef!.scrollTop = timelineRef!.scrollHeight;
@@ -414,8 +480,27 @@ export default function Home() {
       Array.from(byMessage.entries()).map(([messageId, value]) => [messageId, value.tokens]),
     );
   });
+  const assistantActivities = createMemo(() => {
+    const byMessage = new Map<string, Array<AssistantActivity & { seq: number }>>();
+    for (const row of Object.values<any>(tables()?.[TABLES.messageParts] ?? {})) {
+      const activity = parseAssistantActivity(row);
+      if (!activity) continue;
+      const list = byMessage.get(row.messageId) ?? [];
+      list.push({
+        ...activity,
+        seq: row.seq,
+      });
+      byMessage.set(row.messageId, list);
+    }
+
+    for (const list of byMessage.values()) {
+      list.sort((a, b) => a.seq - b.seq);
+    }
+    return byMessage;
+  });
 
   const thinkingTokens = (messageId: string) => thinkingTokensByMessage().get(messageId) ?? null;
+  const activitiesForMessage = (messageId: string) => assistantActivities().get(messageId) ?? [];
   const isWaitingForVisibleAnswer = (message: any) =>
     message.role === "assistant" &&
     (message.status === "queued" ||
@@ -459,6 +544,26 @@ export default function Home() {
 
   const deleteThread = async (threadId: string) => {
     syncClient.archiveThread(threadId);
+  };
+
+  const requestWorkspaceDelete = (workspaceId: string, workspaceName: string) => {
+    if (workspaces().length <= 1) return;
+    setWorkspaceDeleteTarget({ id: workspaceId, name: workspaceName });
+  };
+
+  const closeWorkspaceDeleteModal = () => {
+    setWorkspaceDeleteTarget(null);
+  };
+
+  const confirmWorkspaceDelete = () => {
+    const target = workspaceDeleteTarget();
+    if (!target) return;
+    if (editingWorkspaceId() === target.id) {
+      setEditingWorkspaceId(null);
+      setEditValue("");
+    }
+    syncClient.archiveWorkspace(target.id);
+    setWorkspaceDeleteTarget(null);
   };
 
   // Inline rename helpers
@@ -610,18 +715,32 @@ export default function Home() {
                   <Show
                     when={editingWorkspaceId() === workspace.id}
                     fallback={
-                      <div class="nav-item-header">
+                      <div class="nav-item-row">
                         <strong>{workspace.name}</strong>
-                        <span
-                          class="action-btn"
-                          title="Rename workspace"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            startEditingWorkspace(workspace.id, workspace.name);
-                          }}
-                        >
-                          ✎
-                        </span>
+                        <div class="nav-item-actions">
+                          <button
+                            class="action-btn"
+                            title="Rename workspace"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              startEditingWorkspace(workspace.id, workspace.name);
+                            }}
+                          >
+                            ✎
+                          </button>
+                          <Show when={workspaces().length > 1}>
+                            <button
+                              class="action-btn action-btn-danger"
+                              title="Delete workspace"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                requestWorkspaceDelete(workspace.id, workspace.name);
+                              }}
+                            >
+                              ×
+                            </button>
+                          </Show>
+                        </div>
                       </div>
                     }
                   >
@@ -849,18 +968,58 @@ export default function Home() {
                       <Show
                         when={message.text?.trim()}
                         fallback={
-                          <Show when={isWaitingForVisibleAnswer(message)} fallback={<p>…</p>}>
-                            <div class="thinking-indicator">
-                              <span class="thinking-spinner" />
-                              <span>{thinkingLabel(message.id)}</span>
-                            </div>
-                          </Show>
+                          <div class="assistant-progress-stack">
+                            <Show when={activitiesForMessage(message.id).length > 0}>
+                              <div class="assistant-progress">
+                                <For each={activitiesForMessage(message.id)}>
+                                  {(activity) => (
+                                    <div
+                                      classList={{
+                                        "assistant-progress-item": true,
+                                        "is-active": activity.state === "active",
+                                        "is-failed": activity.state === "failed",
+                                      }}
+                                    >
+                                      <span class="assistant-progress-marker" aria-hidden="true" />
+                                      <span>{activity.label}</span>
+                                    </div>
+                                  )}
+                                </For>
+                              </div>
+                            </Show>
+                            <Show when={isWaitingForVisibleAnswer(message)} fallback={<p>…</p>}>
+                              <div class="thinking-indicator">
+                                <span class="thinking-spinner" />
+                                <span>{thinkingLabel(message.id)}</span>
+                              </div>
+                            </Show>
+                          </div>
                         }
                       >
                         <Markdown text={message.text} />
                       </Show>
                       <Show when={message.status === "streaming" && message.text?.trim()}>
                         <span class="streaming-cursor" />
+                      </Show>
+                      <Show
+                        when={message.text?.trim() && activitiesForMessage(message.id).length > 0}
+                      >
+                        <div class="assistant-progress">
+                          <For each={activitiesForMessage(message.id)}>
+                            {(activity) => (
+                              <div
+                                classList={{
+                                  "assistant-progress-item": true,
+                                  "is-active": activity.state === "active",
+                                  "is-failed": activity.state === "failed",
+                                }}
+                              >
+                                <span class="assistant-progress-marker" aria-hidden="true" />
+                                <span>{activity.label}</span>
+                              </div>
+                            )}
+                          </For>
+                        </div>
                       </Show>
                     </Show>
                     <Show when={searchRuns().get(message.id)?.length}>
@@ -893,8 +1052,9 @@ export default function Home() {
                       when={
                         message.role === "assistant" &&
                         (thinkingTokens(message.id) != null ||
+                          message.promptTokens != null ||
                           message.ttftMs != null ||
-                          message.durationMs ||
+                          message.durationMs != null ||
                           message.completionTokens != null)
                       }
                     >
@@ -904,16 +1064,28 @@ export default function Home() {
                             {formatTokenCount(thinkingTokens(message.id)!)} thinking tokens
                           </span>
                         </Show>
+                        <Show when={getTotalTokens(message) != null}>
+                          <span>{formatTokenCount(getTotalTokens(message)!)} total tokens</span>
+                        </Show>
+                        <Show when={message.promptTokens != null}>
+                          <span>{formatTokenCount(message.promptTokens)} prompt</span>
+                        </Show>
+                        <Show when={message.completionTokens != null}>
+                          <span>{formatTokenCount(message.completionTokens)} output</span>
+                        </Show>
                         <Show when={message.ttftMs != null}>
                           <span>TTFT {message.ttftMs}ms</span>
                         </Show>
-                        <Show when={message.durationMs}>
+                        <Show when={message.durationMs != null}>
                           <span>{formatDuration(message.durationMs)}</span>
                         </Show>
-                        <Show when={message.completionTokens != null}>
-                          <span>{message.completionTokens} tokens</span>
-                        </Show>
-                        <Show when={message.completionTokens != null && message.durationMs}>
+                        <Show
+                          when={
+                            message.completionTokens != null &&
+                            message.durationMs != null &&
+                            message.durationMs > 0
+                          }
+                        >
                           <span>
                             {((message.completionTokens / message.durationMs) * 1000).toFixed(1)}{" "}
                             tok/s
@@ -1040,6 +1212,33 @@ export default function Home() {
             </footer>
           </Show>
         </main>
+        <Show when={workspaceDeleteTarget()}>
+          {(target) => (
+            <div class="modal-backdrop" onClick={closeWorkspaceDeleteModal}>
+              <div
+                class="modal-card"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="workspace-delete-title"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h3 id="workspace-delete-title">Delete workspace?</h3>
+                <p class="modal-copy">
+                  <strong>{target().name}</strong> will be removed from your sidebar. This action
+                  cannot be undone.
+                </p>
+                <div class="modal-actions">
+                  <button class="btn" onClick={closeWorkspaceDeleteModal}>
+                    Cancel
+                  </button>
+                  <button class="btn btn-danger" onClick={confirmWorkspaceDelete}>
+                    Delete workspace
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </Show>
       </div>
     </Show>
   );

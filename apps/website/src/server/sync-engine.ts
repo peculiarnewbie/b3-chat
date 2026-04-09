@@ -37,7 +37,7 @@ import {
   isInlineTextAttachment,
   type AppEnv,
 } from "@b3-chat/server";
-import { prepareAssistantSearch } from "./search";
+import { prepareAssistantSearch, type SearchProgressEvent } from "./search";
 type SyncCommandResult = {
   ack?: SyncServerAck;
   events: SyncServerEvent[];
@@ -583,8 +583,41 @@ export class SyncEngineDurableObject {
     const workspace = this.getWorkspace(thread.workspaceId);
     if (!workspace) return;
     const modelId = payload.modelId || workspace.defaultModelId || getDefaultModelId(this.env);
+    let seq = 0;
+
+    const appendMessagePart = async (
+      kind: string,
+      input: {
+        text?: string;
+        json?: string | null;
+      },
+    ) => {
+      const part = createMessagePart({
+        messageId: payload.assistantMessage.id,
+        seq: seq++,
+        kind,
+        text: input.text ?? "",
+        json: input.json ?? null,
+      });
+      const event = await this.appendServerEvent(null, "message_part_appended", { row: part });
+      this.broadcast(event);
+      return part;
+    };
+
+    const reportActivity = async (activity: SearchProgressEvent) => {
+      await appendMessagePart("activity", {
+        text: activity.label,
+        json: json(activity),
+      });
+    };
 
     const threadMessages = this.getThreadMessages(snapshot, thread.id);
+    if (payload.search) {
+      await reportActivity({
+        label: "Checking whether web search is needed",
+        state: "active",
+      });
+    }
     const preparedSearch = await prepareAssistantSearch({
       env: this.env,
       assistantMessageId: payload.assistantMessage.id,
@@ -594,6 +627,7 @@ export class SyncEngineDurableObject {
       systemPrompt: workspace.systemPrompt,
       enabled: payload.search,
       log: syncLog,
+      onProgress: reportActivity,
     });
     const searchRuns = preparedSearch.searchRuns;
     const searchRows = preparedSearch.searchResults;
@@ -638,6 +672,15 @@ export class SyncEngineDurableObject {
         content: searchContext,
       });
     }
+    await reportActivity({
+      label:
+        searchRuns.length > 0 ? "Grounded context ready, generating answer" : "Generating answer",
+      state: "active",
+      detail:
+        searchRuns.length > 0
+          ? `${searchRuns.length} search step${searchRuns.length === 1 ? "" : "s"} completed`
+          : undefined,
+    });
 
     const upstream = await fetch(
       `${this.env.OPENCODE_GO_BASE_URL.replace(/\/$/, "")}/chat/completions`,
@@ -662,6 +705,10 @@ export class SyncEngineDurableObject {
     });
 
     if (!upstream.ok || !upstream.body) {
+      await reportActivity({
+        label: "Failed to start response generation",
+        state: "failed",
+      });
       const failed = await this.appendServerEvent(null, "message_failed", {
         messageId: payload.assistantMessage.id,
         errorCode: String(upstream.status),
@@ -677,7 +724,6 @@ export class SyncEngineDurableObject {
     let buffer = "";
     let accumulated = "";
     let pendingDelta = "";
-    let seq = 0;
     let chunkCount = 0;
     let deltaCount = 0;
     const streamStartedAt = Date.now();
@@ -686,24 +732,20 @@ export class SyncEngineDurableObject {
     let completionTokens: number | null = null;
     let reasoningTokens: number | null = null;
     let lastReportedReasoningTokens: number | null = null;
+    let responseStartedReported = false;
 
     const flushDelta = async () => {
       if (!pendingDelta) return;
       deltaCount += 1;
       accumulated += pendingDelta;
-      const part = createMessagePart({
-        messageId: payload.assistantMessage.id,
-        seq: seq++,
-        kind: "text",
+      const part = await appendMessagePart("text", {
         text: pendingDelta,
       });
-      const partEvent = await this.appendServerEvent(null, "message_part_appended", { row: part });
       const deltaEvent = await this.appendServerEvent(null, "message_delta", {
         messageId: payload.assistantMessage.id,
         delta: pendingDelta,
         updatedAt: nowIso(),
       });
-      this.broadcast(partEvent);
       this.broadcast(deltaEvent);
       syncLog("assistant_turn_delta", {
         assistantMessageId: payload.assistantMessage.id,
@@ -719,15 +761,10 @@ export class SyncEngineDurableObject {
         return;
       }
       lastReportedReasoningTokens = tokens;
-      const part = createMessagePart({
-        messageId: payload.assistantMessage.id,
-        seq: seq++,
-        kind: "thinking_tokens",
+      const part = await appendMessagePart("thinking_tokens", {
         text: String(tokens),
         json: json({ tokens }),
       });
-      const partEvent = await this.appendServerEvent(null, "message_part_appended", { row: part });
-      this.broadcast(partEvent);
       syncLog("assistant_turn_thinking_tokens", {
         assistantMessageId: payload.assistantMessage.id,
         seq: part.seq,
@@ -769,7 +806,16 @@ export class SyncEngineDurableObject {
           }
           const delta = parsed.choices?.[0]?.delta?.content ?? "";
           if (!delta) continue;
-          if (firstTokenAt === null) firstTokenAt = Date.now();
+          if (firstTokenAt === null) {
+            firstTokenAt = Date.now();
+          }
+          if (!responseStartedReported) {
+            responseStartedReported = true;
+            await reportActivity({
+              label: "Response streaming",
+              state: "completed",
+            });
+          }
           pendingDelta += delta;
           if (pendingDelta.length >= 96 || /\n/.test(pendingDelta)) {
             await flushDelta();
@@ -792,6 +838,10 @@ export class SyncEngineDurableObject {
         completionTokens,
       });
       this.broadcast(completed);
+      await reportActivity({
+        label: "Response complete",
+        state: "completed",
+      });
       syncLog("assistant_turn_completed", {
         assistantMessageId: payload.assistantMessage.id,
         chunkCount,
@@ -816,6 +866,11 @@ export class SyncEngineDurableObject {
         updatedAt: nowIso(),
       });
       this.broadcast(failed);
+      await reportActivity({
+        label: "Response failed",
+        state: "failed",
+        detail: error instanceof Error ? error.message : String(error),
+      });
       console.error("[sync-do] assistant_turn_failed", {
         assistantMessageId: payload.assistantMessage.id,
         chunkCount,

@@ -329,6 +329,18 @@ class SyncClient {
           }
           break;
         }
+        case "archive_workspace": {
+          const payload = op.payload as SyncCommandPayloadMap["archive_workspace"];
+          const row = this.store.getRow(TABLES.workspaces, payload.id) as any;
+          if (row) {
+            this.store.setRow(TABLES.workspaces, payload.id, {
+              ...row,
+              archivedAt: payload.archivedAt,
+              updatedAt: nowIso(),
+            });
+          }
+          break;
+        }
         case "create_user_message": {
           const payload = op.payload as SyncCommandPayloadMap["create_user_message"];
           this.store.setRow(TABLES.threads, payload.thread.id, payload.thread as any);
@@ -603,10 +615,21 @@ class SyncClient {
   }
 
   archiveThread(threadId: string) {
-    return this.enqueueCommand("archive_thread", {
+    const op = this.enqueueCommand("archive_thread", {
       id: threadId,
       archivedAt: nowIso(),
     });
+    this.ensureActiveSelection();
+    return op;
+  }
+
+  archiveWorkspace(workspaceId: string) {
+    const op = this.enqueueCommand("archive_workspace", {
+      id: workspaceId,
+      archivedAt: nowIso(),
+    });
+    this.ensureActiveSelection();
+    return op;
   }
 
   updateThread(thread: Thread) {

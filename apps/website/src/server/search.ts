@@ -30,6 +30,14 @@ export type PreparedAssistantSearch = {
   searchContext: string;
 };
 
+export type SearchProgressEvent = {
+  label: string;
+  state?: "active" | "completed" | "failed";
+  step?: number;
+  query?: string;
+  detail?: string;
+};
+
 function summarizeStructuredResults(rows: Array<{ title: string; snippet: string }>) {
   return rows
     .slice(0, 3)
@@ -125,6 +133,7 @@ export async function prepareAssistantSearch(input: {
   systemPrompt?: string | null;
   enabled: boolean;
   log?: (event: string, details?: Record<string, unknown>) => void;
+  onProgress?: (event: SearchProgressEvent) => void | Promise<void>;
 }): Promise<PreparedAssistantSearch> {
   if (!input.enabled || !input.promptText.trim()) {
     return {
@@ -156,6 +165,11 @@ export async function prepareAssistantSearch(input: {
   );
 
   for (let step = 1; step <= MAX_SEARCH_STEPS; step += 1) {
+    await input.onProgress?.({
+      label: searchRuns.length > 0 ? `Reviewing sources for step ${step}` : "Planning next step",
+      state: "active",
+      step,
+    });
     const planningContext = buildSearchPlanningContext({
       promptText: input.promptText,
       messages: input.messages,
@@ -219,7 +233,18 @@ export async function prepareAssistantSearch(input: {
       numResults: decision.numResults,
     });
 
-    if (decision.action !== "search" || !decision.query.trim()) break;
+    if (decision.action !== "search" || !decision.query.trim()) {
+      await input.onProgress?.({
+        label:
+          searchRuns.length > 0
+            ? "Search complete, drafting answer"
+            : "Answering from current context",
+        state: "completed",
+        step,
+        detail: decision.summary || undefined,
+      });
+      break;
+    }
 
     const query = decision.query.trim();
     const queryKey = stableQueryKey(query);
@@ -229,9 +254,22 @@ export async function prepareAssistantSearch(input: {
         step,
         query,
       });
+      await input.onProgress?.({
+        label: `Skipping duplicate search for "${query}"`,
+        state: "completed",
+        step,
+        query,
+      });
       break;
     }
     attemptedQueries.add(queryKey);
+    await input.onProgress?.({
+      label: `Searching the web for "${query}"`,
+      state: "active",
+      step,
+      query,
+      detail: decision.summary || undefined,
+    });
 
     try {
       if (input.env.EXA_API_KEY) {
@@ -277,6 +315,13 @@ export async function prepareAssistantSearch(input: {
           mode: "exa_api",
           previewText: run.previewText,
         });
+        await input.onProgress?.({
+          label: `Found ${normalizedRows.length} result${normalizedRows.length === 1 ? "" : "s"} for "${query}"`,
+          state: "completed",
+          step,
+          query,
+          detail: run.previewText || undefined,
+        });
         continue;
       }
 
@@ -303,6 +348,13 @@ export async function prepareAssistantSearch(input: {
         mode: "exa_mcp",
         previewText: run.previewText,
       });
+      await input.onProgress?.({
+        label: `Search finished for "${query}"`,
+        state: "completed",
+        step,
+        query,
+        detail: run.previewText || undefined,
+      });
     } catch (error) {
       input.log?.("assistant_turn_search_execution_error", {
         assistantMessageId: input.assistantMessageId,
@@ -310,6 +362,7 @@ export async function prepareAssistantSearch(input: {
         query,
         error: String(error),
       });
+      const errorMessage = error instanceof Error ? error.message : String(error);
       searchRuns.push(
         createSearchRun({
           messageId: input.assistantMessageId,
@@ -317,9 +370,16 @@ export async function prepareAssistantSearch(input: {
           status: "failed",
           step,
           numResults: decision.numResults,
-          errorMessage: String(error),
+          errorMessage,
         }),
       );
+      await input.onProgress?.({
+        label: `Search failed for "${query}"`,
+        state: "failed",
+        step,
+        query,
+        detail: errorMessage,
+      });
       break;
     }
   }
