@@ -525,6 +525,11 @@ export default function Home() {
       message.ttftMs != null ||
       message.durationMs != null ||
       message.completionTokens != null);
+  const hasAssistantAnswerCard = (message: any) =>
+    message.role === "assistant" &&
+    (Boolean(message.text?.trim()) ||
+      (searchRuns().get(message.id)?.length ?? 0) > 0 ||
+      hasAssistantStats(message));
   const thinkingLabel = (messageId: string) => {
     const tokens = thinkingTokens(messageId);
     return tokens != null ? `${formatTokenCount(tokens)} thinking tokens` : "Thinking…";
@@ -556,6 +561,7 @@ export default function Home() {
       if (
         message.role !== "assistant" ||
         !hasAssistantPrelude(message) ||
+        message.status !== "completed" ||
         !message.text?.trim() ||
         didAutoCollapseProgressByMessage[message.id]
       ) {
@@ -1102,10 +1108,12 @@ export default function Home() {
                           </Show>
                         </div>
                       </Show>
-                      <Show when={message.text?.trim()}>
+                      <Show when={hasAssistantAnswerCard(message)}>
                         <div class="assistant-answer-card">
-                          <Markdown text={message.text} />
-                          <Show when={message.status === "streaming"}>
+                          <Show when={message.text?.trim()}>
+                            <Markdown text={message.text} />
+                          </Show>
+                          <Show when={message.status === "streaming" && message.text?.trim()}>
                             <span class="streaming-cursor" />
                           </Show>
                           <Show when={searchRuns().get(message.id)?.length}>
@@ -1176,68 +1184,6 @@ export default function Home() {
                           </Show>
                         </div>
                       </Show>
-                    </Show>
-                    <Show when={!message.text?.trim() && searchRuns().get(message.id)?.length}>
-                      <div class="search-results">
-                        <span class="sr-label">Web search</span>
-                        <For each={searchRuns().get(message.id)}>
-                          {(run) => (
-                            <div>
-                              <span class="sr-label">
-                                #{run.step} {run.query}
-                              </span>
-                              <Show
-                                when={run.results.length > 0}
-                                fallback={<p>{run.previewText || run.status}</p>}
-                              >
-                                <For each={run.results}>
-                                  {(result) => (
-                                    <a href={result.url} target="_blank" rel="noreferrer">
-                                      {result.title}
-                                    </a>
-                                  )}
-                                </For>
-                              </Show>
-                            </div>
-                          )}
-                        </For>
-                      </div>
-                    </Show>
-                    <Show when={!message.text?.trim() && hasAssistantStats(message)}>
-                      <div class="msg-stats">
-                        <Show when={thinkingTokens(message.id)}>
-                          <span>
-                            {formatTokenCount(thinkingTokens(message.id)!)} thinking tokens
-                          </span>
-                        </Show>
-                        <Show when={getTotalTokens(message) != null}>
-                          <span>{formatTokenCount(getTotalTokens(message)!)} total tokens</span>
-                        </Show>
-                        <Show when={message.promptTokens != null}>
-                          <span>{formatTokenCount(message.promptTokens)} prompt</span>
-                        </Show>
-                        <Show when={message.completionTokens != null}>
-                          <span>{formatTokenCount(message.completionTokens)} output</span>
-                        </Show>
-                        <Show when={message.ttftMs != null}>
-                          <span>TTFT {message.ttftMs}ms</span>
-                        </Show>
-                        <Show when={message.durationMs != null}>
-                          <span>{formatDuration(message.durationMs)}</span>
-                        </Show>
-                        <Show
-                          when={
-                            message.completionTokens != null &&
-                            message.durationMs != null &&
-                            message.durationMs > 0
-                          }
-                        >
-                          <span>
-                            {((message.completionTokens / message.durationMs) * 1000).toFixed(1)}{" "}
-                            tok/s
-                          </span>
-                        </Show>
-                      </div>
                     </Show>
                   </article>
                 )}
