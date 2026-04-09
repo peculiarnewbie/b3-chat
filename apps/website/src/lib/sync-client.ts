@@ -484,6 +484,18 @@ class SyncClient {
           this.store.delRow(TABLES.attachments, event.id);
           break;
         }
+        case "search_runs_replaced": {
+          const event = payload as SyncEventPayloadMap["search_runs_replaced"];
+          for (const existingId of this.store.getRowIds(TABLES.searchRuns)) {
+            const row = this.store.getRow(TABLES.searchRuns, existingId) as any;
+            if (row?.messageId === event.messageId)
+              this.store.delRow(TABLES.searchRuns, existingId);
+          }
+          for (const row of event.rows) {
+            this.store.setRow(TABLES.searchRuns, row.id, row as any);
+          }
+          break;
+        }
         case "search_results_replaced": {
           const event = payload as SyncEventPayloadMap["search_results_replaced"];
           for (const existingId of this.store.getRowIds(TABLES.searchResults)) {

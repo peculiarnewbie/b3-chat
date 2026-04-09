@@ -9,7 +9,7 @@
     "preview": "vp preview",
     "test": "vp test",
     "check": "vp check",
-    "deploy": "vp build && vp exec wrangler deploy"
+    "deploy": "node ./scripts/deploy.mjs"
   },
   "dependencies": {
     "@b3-chat/domain": "workspace:*",

@@ -122,6 +122,13 @@ a {
   line-height: 1.4;
 }
 
+.app-version {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  font-family:
+    ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
 .eyebrow {
   font-size: 0.75rem;
   text-transform: uppercase;
@@ -314,8 +321,22 @@ a {
   padding: 8px 12px;
   border-top: 1px solid var(--line);
   display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sidebar-footer-controls {
+  display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.sidebar-version {
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  font-family:
+    ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  padding: 0 2px;
 }
 
 .theme-btn {

@@ -12,6 +12,7 @@ import { createStore } from "solid-js/store";
 import { createId, LOCAL_VALUES, TABLES, nowIso } from "@b3-chat/domain";
 import Markdown from "../components/Markdown";
 import { authClient } from "../lib/auth-client";
+import { BUILD_INFO } from "../lib/build-info";
 import { isAllowedFile, isImageMime, uploadFile } from "../lib/upload";
 import { syncClient } from "../lib/sync-client";
 
@@ -29,21 +30,6 @@ type ModelsPayload = {
 };
 
 type Theme = "clean" | "night" | "warm";
-
-function formatRelativeTime(iso: string): string {
-  const date = new Date(iso);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMin = Math.floor(diffMs / 60_000);
-  const diffHr = Math.floor(diffMs / 3_600_000);
-  const diffDay = Math.floor(diffMs / 86_400_000);
-
-  if (diffMin < 1) return "just now";
-  if (diffMin < 60) return `${diffMin}m ago`;
-  if (diffHr < 24) return `${diffHr}h ago`;
-  if (diffDay < 7) return `${diffDay}d ago`;
-  return date.toLocaleDateString();
-}
 
 function getDateGroup(iso: string): string {
   const date = new Date(iso);
@@ -357,12 +343,32 @@ export default function Home() {
     }
     return ids;
   });
-  const searchResults = createMemo(() => {
-    const byMessage = new Map<string, any[]>();
+  const searchRuns = createMemo(() => {
+    const resultsByRun = new Map<string, any[]>();
     for (const row of Object.values<any>(tables()?.[TABLES.searchResults] ?? {})) {
-      const list = byMessage.get(row.messageId) ?? [];
+      const list = resultsByRun.get(row.searchRunId) ?? [];
       list.push(row);
+      resultsByRun.set(row.searchRunId, list);
+    }
+
+    const byMessage = new Map<
+      string,
+      Array<{
+        [key: string]: any;
+        results: any[];
+      }>
+    >();
+    for (const row of Object.values<any>(tables()?.[TABLES.searchRuns] ?? {})) {
+      const list = byMessage.get(row.messageId) ?? [];
+      list.push({
+        ...row,
+        results: resultsByRun.get(row.id) ?? [],
+      });
       byMessage.set(row.messageId, list);
+    }
+
+    for (const list of byMessage.values()) {
+      list.sort((a, b) => a.step - b.step);
     }
     return byMessage;
   });
@@ -493,6 +499,9 @@ export default function Home() {
             <p class="eyebrow">Personal deployment</p>
             <h1>b3 chat</h1>
             <p>Sign in with Google to continue.</p>
+            <p class="app-version" title={BUILD_INFO.tooltip}>
+              {BUILD_INFO.label}
+            </p>
             <button class="btn btn-primary" onClick={signIn}>
               Continue with Google
             </button>
@@ -646,26 +655,31 @@ export default function Home() {
           </div>
 
           <div class="sidebar-footer">
-            <For each={THEMES}>
-              {(t) => (
-                <button
-                  classList={{ "theme-btn": true, active: theme() === t.id }}
-                  onClick={() => setTheme(t.id)}
-                >
-                  {t.label}
-                </button>
-              )}
-            </For>
-            <button
-              classList={{ "theme-btn": true, active: settingsOpen() }}
-              onClick={() => {
-                setSettingsOpen(!settingsOpen());
-                setSidebarOpen(false);
-              }}
-              title="Settings"
-            >
-              ⚙
-            </button>
+            <div class="sidebar-footer-controls">
+              <For each={THEMES}>
+                {(t) => (
+                  <button
+                    classList={{ "theme-btn": true, active: theme() === t.id }}
+                    onClick={() => setTheme(t.id)}
+                  >
+                    {t.label}
+                  </button>
+                )}
+              </For>
+              <button
+                classList={{ "theme-btn": true, active: settingsOpen() }}
+                onClick={() => {
+                  setSettingsOpen(!settingsOpen());
+                  setSidebarOpen(false);
+                }}
+                title="Settings"
+              >
+                ⚙
+              </button>
+            </div>
+            <div class="sidebar-version" title={BUILD_INFO.tooltip}>
+              {BUILD_INFO.label}
+            </div>
           </div>
         </aside>
 
@@ -783,14 +797,28 @@ export default function Home() {
                         <span class="streaming-cursor" />
                       </Show>
                     </Show>
-                    <Show when={searchResults().get(message.id)?.length}>
+                    <Show when={searchRuns().get(message.id)?.length}>
                       <div class="search-results">
-                        <span class="sr-label">Web results</span>
-                        <For each={searchResults().get(message.id)}>
-                          {(result) => (
-                            <a href={result.url} target="_blank" rel="noreferrer">
-                              {result.title}
-                            </a>
+                        <span class="sr-label">Web search</span>
+                        <For each={searchRuns().get(message.id)}>
+                          {(run) => (
+                            <div>
+                              <span class="sr-label">
+                                #{run.step} {run.query}
+                              </span>
+                              <Show
+                                when={run.results.length > 0}
+                                fallback={<p>{run.previewText || run.status}</p>}
+                              >
+                                <For each={run.results}>
+                                  {(result) => (
+                                    <a href={result.url} target="_blank" rel="noreferrer">
+                                      {result.title}
+                                    </a>
+                                  )}
+                                </For>
+                              </Show>
+                            </div>
                           )}
                         </For>
                       </div>

@@ -1,14 +1,11 @@
 import {
   TABLES,
-  buildSearchPlanningContext,
-  buildSearchContext,
   createId,
   createMessagePart,
   createThread,
   createWorkspace,
   decodeAttachmentRow,
   decodeMessageRow,
-  decodeSearchResultRow,
   decodeThreadRow,
   decodeWorkspaceRow,
   mergeAttachmentLink,
@@ -16,6 +13,7 @@ import {
   type Attachment,
   type CreateUserMessagePayload,
   type Message,
+  type SearchRun,
   type SearchResult,
   type SyncClientEnvelope,
   type SyncClientHello,
@@ -32,16 +30,13 @@ import {
 } from "@b3-chat/domain";
 import {
   completeTextAttachment,
-  exaMcpSearchContext,
-  exaSearch,
   getDefaultModelId,
   getSignedAttachmentUrl,
   isImageAttachment,
   isInlineTextAttachment,
-  planSearch,
-  type SearchPlan,
   type AppEnv,
 } from "@b3-chat/server";
+import { prepareAssistantSearch } from "./search";
 type SyncCommandResult = {
   ack?: SyncServerAck;
   events: SyncServerEvent[];
@@ -68,6 +63,16 @@ function syncLog(message: string, details?: Record<string, unknown>) {
     return;
   }
   console.log(`[sync-do] ${message}`);
+}
+
+function previewText(value: string, limit = 160) {
+  return value.replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+function looksLikeMissingRealtimeAccess(text: string) {
+  return /don'?t have access to real[- ]?time|can'?t tell you the (exact )?current time|don'?t have access to the current date|don'?t have access to current information/i.test(
+    text,
+  );
 }
 
 export class SyncEngineDurableObject {
@@ -199,6 +204,11 @@ export class SyncEngineDurableObject {
         updated_at TEXT NOT NULL,
         row_json TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS search_runs (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        row_json TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS search_results (
         id TEXT PRIMARY KEY,
         message_id TEXT NOT NULL,
@@ -210,6 +220,7 @@ export class SyncEngineDurableObject {
       CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
       CREATE INDEX IF NOT EXISTS idx_parts_message_seq ON message_parts(message_id, seq);
       CREATE INDEX IF NOT EXISTS idx_attachments_thread ON attachments(thread_id);
+      CREATE INDEX IF NOT EXISTS idx_search_runs_message ON search_runs(message_id);
       CREATE INDEX IF NOT EXISTS idx_search_results_message ON search_results(message_id);
     `);
   }
@@ -570,80 +581,44 @@ export class SyncEngineDurableObject {
     if (!workspace) return;
     const modelId = payload.modelId || workspace.defaultModelId || getDefaultModelId(this.env);
 
-    let searchRows: SearchResult[] = [];
-    let searchContext = "";
-    if (payload.search && payload.promptText.trim()) {
-      const threadMessages = this.getThreadMessages(snapshot, thread.id);
-      const planningContext = buildSearchPlanningContext({
-        promptText: payload.promptText,
-        messages: threadMessages,
-      });
-      let searchPlan: SearchPlan;
-      try {
-        searchPlan = await planSearch(this.env, {
-          modelId,
-          planningContext,
-        });
-      } catch (error) {
-        syncLog("assistant_turn_search_plan_error", {
-          assistantMessageId: payload.assistantMessage.id,
-          error: String(error),
-        });
-        searchPlan = {
-          needsSearch: false,
-          summary: "",
-          query: "",
-          numResults: 0,
-        };
-      }
-      syncLog("assistant_turn_search_plan", {
-        assistantMessageId: payload.assistantMessage.id,
-        needsSearch: searchPlan.needsSearch,
-        summary: searchPlan.summary,
-        query: searchPlan.query,
-        numResults: searchPlan.numResults,
-      });
-      if (searchPlan.needsSearch && searchPlan.query) {
-        try {
-          if (this.env.EXA_API_KEY) {
-            searchRows = (await exaSearch(this.env, searchPlan.query, searchPlan.numResults)).map(
-              (row) =>
-                decodeSearchResultRow({
-                  ...row,
-                  id: createId("src"),
-                  messageId: payload.assistantMessage.id,
-                }),
-            );
-            searchContext = buildSearchContext({
-              query: searchPlan.query,
-              rows: searchRows,
-            });
-          } else {
-            searchContext = await exaMcpSearchContext(searchPlan.query, searchPlan.numResults);
-          }
-        } catch (error) {
-          syncLog("assistant_turn_exa_error", {
-            assistantMessageId: payload.assistantMessage.id,
-            error: String(error),
-          });
-          if (searchRows.length === 0) {
-            try {
-              searchContext = await exaMcpSearchContext(searchPlan.query, searchPlan.numResults);
-            } catch (mcpError) {
-              syncLog("assistant_turn_exa_mcp_fallback_error", {
-                assistantMessageId: payload.assistantMessage.id,
-                error: String(mcpError),
-              });
-            }
-          }
-        }
-      }
-    }
+    const threadMessages = this.getThreadMessages(snapshot, thread.id);
+    const preparedSearch = await prepareAssistantSearch({
+      env: this.env,
+      assistantMessageId: payload.assistantMessage.id,
+      modelId,
+      promptText: payload.promptText,
+      messages: threadMessages,
+      systemPrompt: workspace.systemPrompt,
+      enabled: payload.search,
+      log: syncLog,
+    });
+    const searchRuns = preparedSearch.searchRuns;
+    const searchRows = preparedSearch.searchResults;
+    const searchContext = preparedSearch.searchContext;
     syncLog("assistant_turn_context_ready", {
       assistantMessageId: payload.assistantMessage.id,
+      searchRuns: searchRuns.length,
       searchResults: searchRows.length,
       hasSearchContext: Boolean(searchContext),
     });
+    syncLog("assistant_turn_search_summary", {
+      assistantMessageId: payload.assistantMessage.id,
+      searchRuns: searchRuns.map((run) => ({
+        step: run.step,
+        query: run.query,
+        status: run.status,
+        resultCount: run.resultCount,
+      })),
+      groundingChars: searchContext.length,
+    });
+
+    if (searchRuns.length > 0) {
+      const searchRunEvent = await this.appendServerEvent(null, "search_runs_replaced", {
+        messageId: payload.assistantMessage.id,
+        rows: searchRuns,
+      });
+      this.broadcast(searchRunEvent);
+    }
 
     if (searchRows.length > 0) {
       const searchEvent = await this.appendServerEvent(null, "search_results_replaced", {
@@ -783,6 +758,16 @@ export class SyncEngineDurableObject {
         chunkCount,
         deltaCount,
         totalChars: accumulated.length,
+        preview: previewText(accumulated),
+        searchRunCount: searchRuns.length,
+        searchGroundingChars: searchContext.length,
+      });
+      syncLog("assistant_turn_answer_sanity", {
+        assistantMessageId: payload.assistantMessage.id,
+        searched: searchRuns.length > 0,
+        likelyIgnoredGrounding:
+          searchRuns.length > 0 && looksLikeMissingRealtimeAccess(accumulated),
+        answerPreview: previewText(accumulated),
       });
     } catch (error) {
       const failed = await this.appendServerEvent(null, "message_failed", {
@@ -1082,6 +1067,20 @@ export class SyncEngineDurableObject {
         this.exec(`DELETE FROM attachments WHERE id = ?`, event.id);
         break;
       }
+      case "search_runs_replaced": {
+        const event = payload as SyncEventPayloadMap["search_runs_replaced"];
+        this.exec(`DELETE FROM search_runs WHERE message_id = ?`, event.messageId);
+        for (const row of event.rows) {
+          this.exec(
+            `INSERT OR REPLACE INTO search_runs (id, message_id, row_json)
+             VALUES (?, ?, ?)`,
+            row.id,
+            row.messageId,
+            json(row),
+          );
+        }
+        break;
+      }
       case "search_results_replaced": {
         const event = payload as SyncEventPayloadMap["search_results_replaced"];
         this.exec(`DELETE FROM search_results WHERE message_id = ?`, event.messageId);
@@ -1112,6 +1111,7 @@ export class SyncEngineDurableObject {
       "messages",
       "message_parts",
       "attachments",
+      "search_runs",
       "search_results",
     ]) {
       this.exec(`DELETE FROM ${tableName}`);
@@ -1130,6 +1130,15 @@ export class SyncEngineDurableObject {
     }
     for (const row of Object.values<Attachment>(tables[TABLES.attachments] ?? {})) {
       this.applyEventToMaterializedState("attachment_upserted", { row });
+    }
+    const runsByMessage = new Map<string, SearchRun[]>();
+    for (const row of Object.values<SearchRun>(tables[TABLES.searchRuns] ?? {})) {
+      const list = runsByMessage.get(row.messageId) ?? [];
+      list.push(row);
+      runsByMessage.set(row.messageId, list);
+    }
+    for (const [messageId, rows] of runsByMessage) {
+      this.applyEventToMaterializedState("search_runs_replaced", { messageId, rows });
     }
     const resultsByMessage = new Map<string, SearchResult[]>();
     for (const row of Object.values<SearchResult>(tables[TABLES.searchResults] ?? {})) {
@@ -1215,6 +1224,7 @@ export class SyncEngineDurableObject {
         [TABLES.messages]: this.readTable("messages"),
         [TABLES.messageParts]: this.readTable("message_parts"),
         [TABLES.attachments]: this.readTable("attachments"),
+        [TABLES.searchRuns]: this.readTable("search_runs"),
         [TABLES.searchResults]: this.readTable("search_results"),
       },
     };

@@ -6,6 +6,7 @@ import { handleSync } from "./api/sync";
 import { handleUploadPresign } from "./api/uploads-presign";
 import { handleUploadBlobGet, handleUploadBlobPut } from "./api/uploads-blob";
 import { handleUploadComplete } from "./api/uploads-complete";
+import { BUILD_INFO } from "./lib/build-info";
 
 // Re-export Durable Object class so Cloudflare can discover it
 export { SyncEngineDurableObject } from "./server/sync-engine";
@@ -19,6 +20,12 @@ export default {
     // Make env available to getRuntimeEnv() used throughout @b3-chat/server
     globalThis.__env__ = env;
 
+    const withVersionHeader = (response: Response) => {
+      const next = new Response(response.body, response);
+      next.headers.set("x-b3-version", BUILD_INFO.version);
+      return next;
+    };
+
     const url = new URL(request.url);
     const { pathname } = url;
     const method = request.method;
@@ -31,39 +38,43 @@ export default {
       if (pathname.startsWith("/api/")) {
         if (pathname.startsWith("/api/auth/")) {
           console.log(`[worker] routing to handleAuth: ${method} ${pathname}`);
-          return await handleAuth(request);
+          return withVersionHeader(await handleAuth(request));
         }
 
-        if (pathname === "/api/session" && method === "GET") return await handleSession(request);
+        if (pathname === "/api/session" && method === "GET")
+          return withVersionHeader(await handleSession(request));
 
-        if (pathname === "/api/models" && method === "GET") return await handleModels(request);
+        if (pathname === "/api/models" && method === "GET")
+          return withVersionHeader(await handleModels(request));
 
-        if (pathname.startsWith("/api/sync/")) return await handleSync(request);
+        if (pathname.startsWith("/api/sync/")) return withVersionHeader(await handleSync(request));
 
         if (pathname === "/api/uploads/presign" && method === "POST")
-          return await handleUploadPresign(request);
+          return withVersionHeader(await handleUploadPresign(request));
 
         if (pathname.startsWith("/api/uploads/blob/")) {
-          if (method === "PUT") return await handleUploadBlobPut(request);
-          if (method === "GET") return await handleUploadBlobGet(request);
+          if (method === "PUT") return withVersionHeader(await handleUploadBlobPut(request));
+          if (method === "GET") return withVersionHeader(await handleUploadBlobGet(request));
         }
 
         if (pathname === "/api/uploads/complete" && method === "POST")
-          return await handleUploadComplete(request);
+          return withVersionHeader(await handleUploadComplete(request));
 
-        return new Response("Not found", { status: 404 });
+        return withVersionHeader(new Response("Not found", { status: 404 }));
       }
 
       // Serve static assets, with SPA fallback to index.html
       const assetResponse = await env.ASSETS.fetch(request);
       if (assetResponse.status === 404) {
-        return env.ASSETS.fetch(new Request(new URL("/index.html", url.origin)));
+        return withVersionHeader(
+          await env.ASSETS.fetch(new Request(new URL("/index.html", url.origin))),
+        );
       }
-      return assetResponse;
+      return withVersionHeader(assetResponse);
     } catch (error) {
-      if (error instanceof Response) return error;
+      if (error instanceof Response) return withVersionHeader(error);
       console.error("Unhandled error:", error);
-      return new Response("Internal Server Error", { status: 500 });
+      return withVersionHeader(new Response("Internal Server Error", { status: 500 }));
     }
   },
 } satisfies ExportedHandler<Env>;

@@ -1,6 +1,8 @@
 import {
+  buildMultiSearchContext,
   buildSearchPlanningContext,
   buildSearchContext,
+  createSearchRun,
   createAttachment,
   createWorkspace,
   mergeAttachmentLink,
@@ -17,6 +19,7 @@ import {
   normalizeEmail,
   parseExaMcpTextResponse,
   parseSearchPlan,
+  parseSearchStepDecision,
   verifyUploadToken,
 } from "@b3-chat/server";
 import { describe, expect, it } from "vite-plus/test";
@@ -81,9 +84,49 @@ describe("domain helpers", () => {
     expect(context).toContain("https://example.com");
   });
 
+  it("builds grounded context blocks for multiple searches", () => {
+    const context = buildMultiSearchContext({
+      runs: [
+        {
+          query: "time in jakarta right now",
+          rows: [
+            {
+              title: "Clock",
+              url: "https://example.com/clock",
+              snippet: "09:00",
+            },
+          ],
+        },
+        {
+          query: "jakarta timezone",
+          rawText: "Source 1\nhttps://example.com/tz\nUTC+7",
+        },
+      ],
+    });
+
+    expect(context).toContain("One or more web search tools have already been executed");
+    expect(context).toContain("Search run 1");
+    expect(context).toContain("Search run 2");
+    expect(context).toContain("Search query: time in jakarta right now");
+    expect(context).toContain("Search query: jakarta timezone");
+    expect(context).toContain("https://example.com/tz");
+  });
+
   it("builds bounded planning context from recent conversation", () => {
     const query = buildSearchPlanningContext({
       promptText: "what about now?",
+      systemPrompt: "Answer crisply.",
+      priorSearches: [
+        createSearchRun({
+          messageId: "msg_1",
+          query: "current date and time",
+          status: "completed",
+          step: 1,
+          numResults: 5,
+          resultCount: 3,
+          previewText: "Clock result",
+        }),
+      ],
       messages: [
         {
           role: "user",
@@ -144,12 +187,16 @@ describe("domain helpers", () => {
     });
 
     expect(query).toContain("Today's date is ");
+    expect(query).toContain("Workspace system prompt:");
+    expect(query).toContain("Answer crisply.");
     expect(query).toContain("Latest user request:\nwhat about now?");
     expect(query).toContain("Recent conversation:");
+    expect(query).toContain("Searches already attempted this turn:");
+    expect(query).toContain("current date and time");
     expect(query).toContain("user: what day is it?");
     expect(query).toContain("assistant: I don't have access to the current date.");
     expect(query).toContain("Task:");
-    expect(query).toContain("Decide whether web search is needed.");
+    expect(query).toContain("Decide whether to answer now or perform another web search.");
     expect(query).not.toContain("user: what about now?");
     expect(query).not.toContain("message 0 should be dropped");
     expect(query).not.toContain("message 1 should be dropped");
@@ -267,6 +314,32 @@ describe("server helpers", () => {
     expect(plan.summary).toBe("User wants the current date and time.");
     expect(plan.query).toBe("current date and time right now");
     expect(plan.numResults).toBe(8);
+  });
+
+  it("parses a search-step response into a normalized decision", () => {
+    const decision = parseSearchStepDecision(
+      '{"action":"search","summary":"User needs the current time.","query":"current time in jakarta","numResults":9}',
+    );
+
+    expect(decision).toEqual({
+      action: "search",
+      summary: "User needs the current time.",
+      query: "current time in jakarta",
+      numResults: 8,
+    });
+  });
+
+  it("parses an answer-now search-step response", () => {
+    const decision = parseSearchStepDecision(
+      '{"action":"answer","summary":"","query":"","numResults":0}',
+    );
+
+    expect(decision).toEqual({
+      action: "answer",
+      summary: "",
+      query: "",
+      numResults: 0,
+    });
   });
 
   it("parses a no-search planner response", () => {
