@@ -1,5 +1,6 @@
 import {
   For,
+  Index,
   Show,
   createEffect,
   createMemo,
@@ -9,7 +10,7 @@ import {
   onMount,
 } from "solid-js";
 import { createStore } from "solid-js/store";
-import { createId, LOCAL_VALUES, TABLES, nowIso } from "@b3-chat/domain";
+import { createId, LOCAL_VALUES, TABLES, nowIso, sortConversationMessages } from "@b3-chat/domain";
 import Markdown from "../components/Markdown";
 import { authClient } from "../lib/auth-client";
 import { BUILD_INFO } from "../lib/build-info";
@@ -37,6 +38,14 @@ type AssistantActivity = {
   query: string | null;
   detail: string | null;
 };
+
+function uiLog(message: string, details?: unknown) {
+  if (details) {
+    console.log(`[ui] ${message}`, details);
+    return;
+  }
+  console.log(`[ui] ${message}`);
+}
 
 function getDateGroup(iso: string): string {
   const date = new Date(iso);
@@ -246,6 +255,7 @@ export default function Home() {
   // Settings state
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [systemPromptDraft, setSystemPromptDraft] = createSignal("");
+  let lastTimelineDebugSnapshot = "";
 
   // biome-ignore lint: assigned via ref attribute
   // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref
@@ -398,7 +408,7 @@ export default function Home() {
 
   // Auto-scroll only when user is already near the bottom
   createEffect(() => {
-    const _msgs = messages();
+    const _messageIds = messageIds();
     const _activities = assistantActivities();
     if (timelineRef && isNearBottom()) {
       requestAnimationFrame(() => {
@@ -429,11 +439,14 @@ export default function Home() {
   const activeThread = createMemo(
     () => threads().find((thread) => thread.id === activeThreadId()) ?? threads()[0],
   );
-  const messages = createMemo(() =>
-    Object.values<any>(tables()?.[TABLES.messages] ?? {})
-      .filter((message) => message.threadId === activeThread()?.id)
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+  const messageIds = createMemo(() =>
+    sortConversationMessages(
+      Object.values<any>(tables()?.[TABLES.messages] ?? {}).filter(
+        (message) => message.threadId === activeThread()?.id,
+      ),
+    ).map((message) => message.id),
   );
+  const messageById = (messageId: string) => tables()?.[TABLES.messages]?.[messageId] as any;
   const streamingThreadIds = createMemo(() => {
     const ids = new Set<string>();
     for (const msg of Object.values<any>(tables()?.[TABLES.messages] ?? {})) {
@@ -557,7 +570,9 @@ export default function Home() {
   };
 
   createEffect(() => {
-    for (const message of messages()) {
+    for (const messageId of messageIds()) {
+      const message = messageById(messageId);
+      if (!message) continue;
       if (
         message.role !== "assistant" ||
         !hasAssistantPrelude(message) ||
@@ -582,6 +597,247 @@ export default function Home() {
     userAttachments(messageId).filter((attachment) => isImageMime(attachment.mimeType));
   const userFileAttachments = (messageId: string) =>
     userAttachments(messageId).filter((attachment) => !isImageMime(attachment.mimeType));
+
+  const renderMessage = (messageId: string) => {
+    const message = () => messageById(messageId);
+
+    return (
+      <Show when={message()}>
+        {(message) => (
+          <article
+            classList={{
+              msg: true,
+              assistant: message().role === "assistant",
+              user: message().role === "user",
+            }}
+          >
+            <div class="msg-meta">
+              <span class="msg-role">{message().role === "assistant" ? "AI" : "You"}</span>
+              <Show when={message().status && message().status !== "done"}>
+                <span class="msg-status">{message().status}</span>
+              </Show>
+            </div>
+            <Show
+              when={message().role === "assistant"}
+              fallback={
+                <div class="msg-user-stack">
+                  <Show when={userImageAttachments(message().id).length > 0}>
+                    <div class="msg-attachment-gallery">
+                      <For each={userImageAttachments(message().id)}>
+                        {(att: any) => (
+                          <a
+                            class="msg-attachment-card"
+                            href={`/api/uploads/blob/${att.objectKey}`}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <img
+                              class="msg-attachment-img"
+                              src={`/api/uploads/blob/${att.objectKey}`}
+                              alt={att.fileName}
+                              loading="lazy"
+                            />
+                          </a>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                  <Show when={message().text?.trim()}>
+                    <div class="msg-user-body">
+                      <p>{message().text}</p>
+                    </div>
+                  </Show>
+                  <Show when={userFileAttachments(message().id).length > 0}>
+                    <div class="msg-attachments msg-attachments-files">
+                      <For each={userFileAttachments(message().id)}>
+                        {(att: any) => <span class="msg-attachment-file">{att.fileName}</span>}
+                      </For>
+                    </div>
+                  </Show>
+                </div>
+              }
+            >
+              <Show when={hasAssistantPrelude(message())}>
+                <div class="assistant-progress-shell">
+                  <button
+                    type="button"
+                    class="assistant-progress-toggle"
+                    aria-expanded={!isAssistantPreludeCollapsed(message().id)}
+                    aria-controls={`assistant-progress-${message().id}`}
+                    onClick={() => toggleAssistantPrelude(message().id)}
+                  >
+                    <span class="assistant-progress-toggle-copy">
+                      <span class="assistant-progress-toggle-label">Model activity</span>
+                      <span class="assistant-progress-toggle-meta">
+                        {assistantPreludeSummary(message())}
+                      </span>
+                    </span>
+                    <span
+                      classList={{
+                        "assistant-progress-toggle-chevron": true,
+                        "is-collapsed": isAssistantPreludeCollapsed(message().id),
+                      }}
+                      aria-hidden="true"
+                    >
+                      ▾
+                    </span>
+                  </button>
+                  <Show when={!isAssistantPreludeCollapsed(message().id)}>
+                    <div class="assistant-progress-stack" id={`assistant-progress-${message().id}`}>
+                      <Show when={activitiesForMessage(message().id).length > 0}>
+                        <div class="assistant-progress">
+                          <Index each={activitiesForMessage(message().id)}>
+                            {(activity) => (
+                              <div
+                                classList={{
+                                  "assistant-progress-item": true,
+                                  "is-active": activity().state === "active",
+                                  "is-failed": activity().state === "failed",
+                                }}
+                              >
+                                <span class="assistant-progress-marker" aria-hidden="true" />
+                                <span>{activity().label}</span>
+                              </div>
+                            )}
+                          </Index>
+                        </div>
+                      </Show>
+                      <Show
+                        when={
+                          isWaitingForVisibleAnswer(message()) ||
+                          thinkingTokens(message().id) != null
+                        }
+                      >
+                        <div
+                          classList={{
+                            "thinking-indicator": true,
+                            "is-complete":
+                              !isWaitingForVisibleAnswer(message()) &&
+                              thinkingTokens(message().id) != null,
+                          }}
+                        >
+                          <Show
+                            when={isWaitingForVisibleAnswer(message())}
+                            fallback={
+                              <span
+                                class="assistant-progress-marker thinking-indicator-marker"
+                                aria-hidden="true"
+                              />
+                            }
+                          >
+                            <span class="thinking-spinner" />
+                          </Show>
+                          <span>{thinkingLabel(message().id)}</span>
+                        </div>
+                      </Show>
+                    </div>
+                  </Show>
+                </div>
+              </Show>
+              <Show when={hasAssistantAnswerCard(message())}>
+                <div class="assistant-answer-card">
+                  <Show when={message().text?.trim()}>
+                    <Show
+                      when={message().status === "streaming"}
+                      fallback={<Markdown text={message().text} />}
+                    >
+                      <div class="assistant-streaming-text">
+                        <span>{message().text}</span>
+                        <span class="streaming-cursor" />
+                      </div>
+                    </Show>
+                  </Show>
+                  <Show when={searchRuns().get(message().id)?.length}>
+                    <div class="search-results">
+                      <span class="sr-label">Web search</span>
+                      <Index each={searchRuns().get(message().id) ?? []}>
+                        {(run) => (
+                          <div>
+                            <span class="sr-label">
+                              #{run().step} {run().query}
+                            </span>
+                            <Show
+                              when={run().results.length > 0}
+                              fallback={<p>{run().previewText || run().status}</p>}
+                            >
+                              <Index each={run().results}>
+                                {(result) => (
+                                  <a href={result().url} target="_blank" rel="noreferrer">
+                                    {result().title}
+                                  </a>
+                                )}
+                              </Index>
+                            </Show>
+                          </div>
+                        )}
+                      </Index>
+                    </div>
+                  </Show>
+                  <Show when={hasAssistantStats(message())}>
+                    <div class="msg-stats">
+                      <Show when={thinkingTokens(message().id)}>
+                        <span>
+                          {formatTokenCount(thinkingTokens(message().id)!)} thinking tokens
+                        </span>
+                      </Show>
+                      <Show when={getTotalTokens(message()) != null}>
+                        <span>{formatTokenCount(getTotalTokens(message())!)} total tokens</span>
+                      </Show>
+                      <Show when={message().promptTokens != null}>
+                        <span>{formatTokenCount(message().promptTokens)} prompt</span>
+                      </Show>
+                      <Show when={message().completionTokens != null}>
+                        <span>{formatTokenCount(message().completionTokens)} output</span>
+                      </Show>
+                      <Show when={message().ttftMs != null}>
+                        <span>TTFT {message().ttftMs}ms</span>
+                      </Show>
+                      <Show when={message().durationMs != null}>
+                        <span>{formatDuration(message().durationMs)}</span>
+                      </Show>
+                      <Show
+                        when={
+                          message().completionTokens != null &&
+                          message().durationMs != null &&
+                          message().durationMs > 0
+                        }
+                      >
+                        <span>
+                          {((message().completionTokens / message().durationMs) * 1000).toFixed(1)}{" "}
+                          tok/s
+                        </span>
+                      </Show>
+                    </div>
+                  </Show>
+                </div>
+              </Show>
+            </Show>
+          </article>
+        )}
+      </Show>
+    );
+  };
+
+  createEffect(() => {
+    const snapshot = JSON.stringify(
+      messageIds().map((messageId) => {
+        const message = messageById(messageId);
+        return {
+          id: messageId,
+          role: message?.role ?? null,
+          status: message?.status ?? null,
+          textLength: message?.text?.length ?? 0,
+          activityCount: activitiesForMessage(messageId).length,
+          searchRunCount: searchRuns().get(messageId)?.length ?? 0,
+          thinkingTokens: thinkingTokens(messageId),
+        };
+      }),
+    );
+
+    if (snapshot === lastTimelineDebugSnapshot) return;
+    lastTimelineDebugSnapshot = snapshot;
+    uiLog("timeline_snapshot", JSON.parse(snapshot));
+  });
 
   const signIn = async () => {
     await authClient.signIn.social({
@@ -968,226 +1224,7 @@ export default function Home() {
             </header>
 
             <section class="timeline" ref={timelineRef} onScroll={handleTimelineScroll}>
-              <For each={messages()}>
-                {(message) => (
-                  <article
-                    classList={{
-                      msg: true,
-                      assistant: message.role === "assistant",
-                      user: message.role === "user",
-                    }}
-                  >
-                    <div class="msg-meta">
-                      <span class="msg-role">{message.role === "assistant" ? "AI" : "You"}</span>
-                      <Show when={message.status && message.status !== "done"}>
-                        <span class="msg-status">{message.status}</span>
-                      </Show>
-                    </div>
-                    <Show
-                      when={message.role === "assistant"}
-                      fallback={
-                        <div class="msg-user-stack">
-                          <Show when={userImageAttachments(message.id).length > 0}>
-                            <div class="msg-attachment-gallery">
-                              <For each={userImageAttachments(message.id)}>
-                                {(att: any) => (
-                                  <a
-                                    class="msg-attachment-card"
-                                    href={`/api/uploads/blob/${att.objectKey}`}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                  >
-                                    <img
-                                      class="msg-attachment-img"
-                                      src={`/api/uploads/blob/${att.objectKey}`}
-                                      alt={att.fileName}
-                                      loading="lazy"
-                                    />
-                                  </a>
-                                )}
-                              </For>
-                            </div>
-                          </Show>
-                          <Show when={message.text?.trim()}>
-                            <div class="msg-user-body">
-                              <p>{message.text}</p>
-                            </div>
-                          </Show>
-                          <Show when={userFileAttachments(message.id).length > 0}>
-                            <div class="msg-attachments msg-attachments-files">
-                              <For each={userFileAttachments(message.id)}>
-                                {(att: any) => (
-                                  <span class="msg-attachment-file">{att.fileName}</span>
-                                )}
-                              </For>
-                            </div>
-                          </Show>
-                        </div>
-                      }
-                    >
-                      <Show when={hasAssistantPrelude(message)}>
-                        <div class="assistant-progress-shell">
-                          <button
-                            type="button"
-                            class="assistant-progress-toggle"
-                            aria-expanded={!isAssistantPreludeCollapsed(message.id)}
-                            aria-controls={`assistant-progress-${message.id}`}
-                            onClick={() => toggleAssistantPrelude(message.id)}
-                          >
-                            <span class="assistant-progress-toggle-copy">
-                              <span class="assistant-progress-toggle-label">Model activity</span>
-                              <span class="assistant-progress-toggle-meta">
-                                {assistantPreludeSummary(message)}
-                              </span>
-                            </span>
-                            <span
-                              classList={{
-                                "assistant-progress-toggle-chevron": true,
-                                "is-collapsed": isAssistantPreludeCollapsed(message.id),
-                              }}
-                              aria-hidden="true"
-                            >
-                              ▾
-                            </span>
-                          </button>
-                          <Show when={!isAssistantPreludeCollapsed(message.id)}>
-                            <div
-                              class="assistant-progress-stack"
-                              id={`assistant-progress-${message.id}`}
-                            >
-                              <Show when={activitiesForMessage(message.id).length > 0}>
-                                <div class="assistant-progress">
-                                  <For each={activitiesForMessage(message.id)}>
-                                    {(activity) => (
-                                      <div
-                                        classList={{
-                                          "assistant-progress-item": true,
-                                          "is-active": activity.state === "active",
-                                          "is-failed": activity.state === "failed",
-                                        }}
-                                      >
-                                        <span
-                                          class="assistant-progress-marker"
-                                          aria-hidden="true"
-                                        />
-                                        <span>{activity.label}</span>
-                                      </div>
-                                    )}
-                                  </For>
-                                </div>
-                              </Show>
-                              <Show
-                                when={
-                                  isWaitingForVisibleAnswer(message) ||
-                                  thinkingTokens(message.id) != null
-                                }
-                              >
-                                <div
-                                  classList={{
-                                    "thinking-indicator": true,
-                                    "is-complete":
-                                      !isWaitingForVisibleAnswer(message) &&
-                                      thinkingTokens(message.id) != null,
-                                  }}
-                                >
-                                  <Show
-                                    when={isWaitingForVisibleAnswer(message)}
-                                    fallback={
-                                      <span
-                                        class="assistant-progress-marker thinking-indicator-marker"
-                                        aria-hidden="true"
-                                      />
-                                    }
-                                  >
-                                    <span class="thinking-spinner" />
-                                  </Show>
-                                  <span>{thinkingLabel(message.id)}</span>
-                                </div>
-                              </Show>
-                            </div>
-                          </Show>
-                        </div>
-                      </Show>
-                      <Show when={hasAssistantAnswerCard(message)}>
-                        <div class="assistant-answer-card">
-                          <Show when={message.text?.trim()}>
-                            <Markdown text={message.text} />
-                          </Show>
-                          <Show when={message.status === "streaming" && message.text?.trim()}>
-                            <span class="streaming-cursor" />
-                          </Show>
-                          <Show when={searchRuns().get(message.id)?.length}>
-                            <div class="search-results">
-                              <span class="sr-label">Web search</span>
-                              <For each={searchRuns().get(message.id)}>
-                                {(run) => (
-                                  <div>
-                                    <span class="sr-label">
-                                      #{run.step} {run.query}
-                                    </span>
-                                    <Show
-                                      when={run.results.length > 0}
-                                      fallback={<p>{run.previewText || run.status}</p>}
-                                    >
-                                      <For each={run.results}>
-                                        {(result) => (
-                                          <a href={result.url} target="_blank" rel="noreferrer">
-                                            {result.title}
-                                          </a>
-                                        )}
-                                      </For>
-                                    </Show>
-                                  </div>
-                                )}
-                              </For>
-                            </div>
-                          </Show>
-                          <Show when={hasAssistantStats(message)}>
-                            <div class="msg-stats">
-                              <Show when={thinkingTokens(message.id)}>
-                                <span>
-                                  {formatTokenCount(thinkingTokens(message.id)!)} thinking tokens
-                                </span>
-                              </Show>
-                              <Show when={getTotalTokens(message) != null}>
-                                <span>
-                                  {formatTokenCount(getTotalTokens(message)!)} total tokens
-                                </span>
-                              </Show>
-                              <Show when={message.promptTokens != null}>
-                                <span>{formatTokenCount(message.promptTokens)} prompt</span>
-                              </Show>
-                              <Show when={message.completionTokens != null}>
-                                <span>{formatTokenCount(message.completionTokens)} output</span>
-                              </Show>
-                              <Show when={message.ttftMs != null}>
-                                <span>TTFT {message.ttftMs}ms</span>
-                              </Show>
-                              <Show when={message.durationMs != null}>
-                                <span>{formatDuration(message.durationMs)}</span>
-                              </Show>
-                              <Show
-                                when={
-                                  message.completionTokens != null &&
-                                  message.durationMs != null &&
-                                  message.durationMs > 0
-                                }
-                              >
-                                <span>
-                                  {((message.completionTokens / message.durationMs) * 1000).toFixed(
-                                    1,
-                                  )}{" "}
-                                  tok/s
-                                </span>
-                              </Show>
-                            </div>
-                          </Show>
-                        </div>
-                      </Show>
-                    </Show>
-                  </article>
-                )}
-              </For>
+              <For each={messageIds()}>{renderMessage}</For>
             </section>
 
             <Show when={showScrollBtn()}>

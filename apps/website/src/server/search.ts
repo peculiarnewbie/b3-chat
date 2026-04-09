@@ -81,11 +81,34 @@ function isAmbiguousRealtimeFollowUp(promptText: string) {
   ].some((pattern) => pattern.test(normalized));
 }
 
+function isContextualSearchFollowUp(promptText: string) {
+  const normalized = normalizePromptText(promptText);
+  if (!normalized) return false;
+
+  return [
+    /^(please\s+)?use\s+(your\s+)?(web\s+)?search(\s+for)?\s+(this|that|it)\??$/,
+    /^(please\s+)?use\s+(the\s+)?web\s+for\s+(this|that|it)\??$/,
+    /^(now\s+)?you\s+can\s+(look up|search( for)?|check( online)?|find out|google|browse)\s+(this|that|it)\??$/,
+    /^(please\s+)?(look up|search( for)?|check( online)?|find out|google|browse)\s+(this|that|it)\??$/,
+    /^(please\s+)?look\s+(this|that|it)\s+up\??$/,
+    /^(please\s+)?(look it up|search for it|search it|check it|find out|google it|browse it)\??$/,
+    /^(can|could|would|will)\s+you\s+(look up|search( for)?|check( online)?|find out|google|browse)\s+(this|that|it)\??$/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function isBareYearFollowUp(promptText: string) {
+  const normalized = normalizePromptText(promptText);
+  return /^(19|20)\d{2}$/.test(normalized);
+}
+
 export function inferContextualFollowUpSearchQuery(
   promptText: string,
   messages: Array<Pick<Message, "role" | "text" | "status">>,
 ) {
-  if (!isAmbiguousRealtimeFollowUp(promptText)) return null;
+  const isRealtimeFollowUp = isAmbiguousRealtimeFollowUp(promptText);
+  const isSearchFollowUp = isContextualSearchFollowUp(promptText);
+  const isYearFollowUp = isBareYearFollowUp(promptText);
+  if (!isRealtimeFollowUp && !isSearchFollowUp && !isYearFollowUp) return null;
 
   const normalizedPrompt = normalizePromptText(promptText);
   const priorUsers = messages
@@ -97,8 +120,18 @@ export function inferContextualFollowUpSearchQuery(
   if (priorUsers.at(-1) === normalizedPrompt) priorUsers.pop();
 
   for (const priorPrompt of priorUsers.reverse()) {
+    if (
+      isSearchCapabilityQuestion(priorPrompt) ||
+      isContextualSearchFollowUp(priorPrompt) ||
+      isAmbiguousRealtimeFollowUp(priorPrompt)
+    ) {
+      continue;
+    }
     const query = inferForcedSearchQuery(priorPrompt);
+    if (query && isYearFollowUp) return `${query} ${normalizedPrompt}`.trim();
     if (query) return query;
+    if (isSearchFollowUp) return priorPrompt;
+    if (isYearFollowUp) return `${priorPrompt} ${normalizedPrompt}`.trim();
   }
 
   return null;
@@ -163,6 +196,20 @@ export async function prepareAssistantSearch(input: {
     input.promptText,
     input.messages,
   );
+  input.log?.("assistant_turn_search_context", {
+    assistantMessageId: input.assistantMessageId,
+    promptText: input.promptText,
+    enabled: input.enabled,
+    messageCount: input.messages.length,
+    contextualFollowUpQuery,
+    recentUserMessages: input.messages
+      .filter((message) => message.role === "user")
+      .slice(-6)
+      .map((message) => ({
+        text: (message.text ?? "").slice(0, 160),
+        status: message.status,
+      })),
+  });
 
   for (let step = 1; step <= MAX_SEARCH_STEPS; step += 1) {
     await input.onProgress?.({
@@ -212,6 +259,15 @@ export async function prepareAssistantSearch(input: {
       Boolean(contextualFollowUpQuery) &&
       decision.action === "search" &&
       stableQueryKey(decision.query) === stableQueryKey(input.promptText);
+    input.log?.("assistant_turn_search_step_pre_force", {
+      assistantMessageId: input.assistantMessageId,
+      step,
+      plannerAction: decision.action,
+      plannerQuery: decision.query,
+      plannerSummary: decision.summary,
+      contextualFollowUpQuery,
+      shouldRewriteAmbiguousEcho,
+    });
     if (forcedDecision && (decision.action !== "search" || shouldRewriteAmbiguousEcho)) {
       input.log?.("assistant_turn_search_forced", {
         assistantMessageId: input.assistantMessageId,

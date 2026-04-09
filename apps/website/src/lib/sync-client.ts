@@ -60,6 +60,8 @@ class SyncClient {
   reconnectAttempt = 0;
   reconnectTimer?: number;
   handshakeComplete = false;
+  incomingEnvelopes: SyncServerEnvelope[] = [];
+  incomingFlushScheduled = false;
   clientId = readJson(CLIENT_ID_KEY, createId("client"));
   lastServerSeq = readJson(LAST_SERVER_SEQ_KEY, 0);
   pendingOps = new Map<string, PendingSyncOp>(
@@ -141,7 +143,7 @@ class SyncClient {
         type: envelope.type,
         eventType: envelope.type === "event" ? envelope.eventType : undefined,
       });
-      void this.handleServerEnvelope(envelope);
+      this.enqueueIncomingEnvelope(envelope);
     });
 
     socket.addEventListener("close", () => {
@@ -165,7 +167,95 @@ class SyncClient {
     this.reconnectTimer = window.setTimeout(() => this.connect(), delay);
   }
 
-  private async handleServerEnvelope(envelope: SyncServerEnvelope) {
+  private enqueueIncomingEnvelope(envelope: SyncServerEnvelope) {
+    this.incomingEnvelopes.push(envelope);
+    if (this.incomingFlushScheduled) return;
+    this.incomingFlushScheduled = true;
+
+    if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => void this.flushIncomingEnvelopes());
+      return;
+    }
+
+    queueMicrotask(() => void this.flushIncomingEnvelopes());
+  }
+
+  private coalesceEventEnvelopes(envelopes: Array<Extract<SyncServerEnvelope, { type: "event" }>>) {
+    const merged: Array<Extract<SyncServerEnvelope, { type: "event" }>> = [];
+    let mergedDeltaCount = 0;
+
+    for (const envelope of envelopes) {
+      const previous = merged.at(-1);
+      if (
+        previous?.eventType === "message_delta" &&
+        envelope.eventType === "message_delta" &&
+        (previous.payload as SyncEventPayloadMap["message_delta"]).messageId ===
+          (envelope.payload as SyncEventPayloadMap["message_delta"]).messageId
+      ) {
+        const previousPayload = previous.payload as SyncEventPayloadMap["message_delta"];
+        const nextPayload = envelope.payload as SyncEventPayloadMap["message_delta"];
+        previous.serverSeq = envelope.serverSeq;
+        previous.eventId = envelope.eventId;
+        previous.causedByOpId = envelope.causedByOpId;
+        previous.payload = {
+          ...previousPayload,
+          delta: `${previousPayload.delta}${nextPayload.delta}`,
+          updatedAt: nextPayload.updatedAt,
+        } as SyncEventPayloadMap[typeof previous.eventType];
+        mergedDeltaCount += 1;
+        continue;
+      }
+
+      merged.push(envelope);
+    }
+
+    syncLog("coalesce_events", {
+      received: envelopes.length,
+      emitted: merged.length,
+      mergedDeltaCount,
+      eventTypes: merged.map((event) => event.eventType),
+    });
+    return merged;
+  }
+
+  private async flushIncomingEnvelopes() {
+    this.incomingFlushScheduled = false;
+    if (this.incomingEnvelopes.length === 0) return;
+
+    const queue = this.incomingEnvelopes.splice(0);
+    let index = 0;
+
+    while (index < queue.length) {
+      const envelope = queue[index]!;
+      if (envelope.type === "event") {
+        const events: Array<Extract<SyncServerEnvelope, { type: "event" }>> = [];
+        while (queue[index]?.type === "event") {
+          events.push(queue[index] as Extract<SyncServerEnvelope, { type: "event" }>);
+          index += 1;
+        }
+        syncLog("flush_event_batch", {
+          batchSize: events.length,
+          firstSeq: events[0]?.serverSeq,
+          lastSeq: events.at(-1)?.serverSeq,
+          eventTypes: events.map((event) => event.eventType),
+        });
+        this.lastServerSeq = events.at(-1)!.serverSeq;
+        this.persistLastServerSeq();
+        this.applyEvents(this.coalesceEventEnvelopes(events));
+        continue;
+      }
+
+      await this.handleServerEnvelope(envelope);
+      index += 1;
+    }
+
+    if (this.incomingEnvelopes.length > 0 && !this.incomingFlushScheduled) {
+      this.incomingFlushScheduled = true;
+      queueMicrotask(() => void this.flushIncomingEnvelopes());
+    }
+  }
+
+  private async handleServerEnvelope(envelope: Exclude<SyncServerEnvelope, { type: "event" }>) {
     switch (envelope.type) {
       case "hello_ack":
         this.handshakeComplete = true;
@@ -184,11 +274,6 @@ class SyncClient {
         this.rollbackOp(envelope.opId);
         this.pendingOps.delete(envelope.opId);
         this.persistPendingOps();
-        return;
-      case "event":
-        this.lastServerSeq = envelope.serverSeq;
-        this.persistLastServerSeq();
-        this.applyEvent(envelope.eventType, envelope.payload as any);
         return;
       case "sync_reset":
         syncLog("sync_reset", { reason: envelope.reason });
@@ -429,148 +514,157 @@ class SyncClient {
     this.ensureActiveSelection();
   }
 
-  private applyEvent<T extends SyncEventType>(eventType: T, payload: SyncEventPayloadMap[T]) {
+  private applyEvents(envelopes: Array<Extract<SyncServerEnvelope, { type: "event" }>>) {
+    syncLog("apply_events", {
+      count: envelopes.length,
+      eventTypes: envelopes.map((envelope) => envelope.eventType),
+    });
     this.store.transaction(() => {
-      switch (eventType) {
-        case "workspace_upserted": {
-          const event = payload as SyncEventPayloadMap["workspace_upserted"];
-          this.store.setRow(TABLES.workspaces, event.row.id, event.row as any);
-          break;
-        }
-        case "workspace_archived": {
-          const event = payload as SyncEventPayloadMap["workspace_archived"];
-          const row = this.store.getRow(TABLES.workspaces, event.id) as any;
-          if (row)
-            this.store.setRow(TABLES.workspaces, event.id, {
-              ...row,
-              archivedAt: event.archivedAt,
-              updatedAt: event.updatedAt,
-            });
-          break;
-        }
-        case "thread_upserted": {
-          const event = payload as SyncEventPayloadMap["thread_upserted"];
-          this.store.setRow(TABLES.threads, event.row.id, event.row as any);
-          break;
-        }
-        case "thread_archived": {
-          const event = payload as SyncEventPayloadMap["thread_archived"];
-          const row = this.store.getRow(TABLES.threads, event.id) as any;
-          if (row)
-            this.store.setRow(TABLES.threads, event.id, {
-              ...row,
-              archivedAt: event.archivedAt,
-              updatedAt: event.updatedAt,
-            });
-          break;
-        }
-        case "message_upserted": {
-          const event = payload as SyncEventPayloadMap["message_upserted"];
-          this.store.setRow(TABLES.messages, event.row.id, event.row as any);
-          break;
-        }
-        case "message_delta": {
-          const event = payload as SyncEventPayloadMap["message_delta"];
-          const row = this.store.getRow(TABLES.messages, event.messageId) as any;
-          if (row) {
-            this.store.setRow(TABLES.messages, event.messageId, {
-              ...row,
-              text: `${row.text}${event.delta}`,
-              status: "streaming",
-              updatedAt: event.updatedAt,
-              optimistic: false,
-            });
-          }
-          break;
-        }
-        case "message_part_appended": {
-          const event = payload as SyncEventPayloadMap["message_part_appended"];
-          // Text is streamed through `message_delta`; storing duplicate text parts causes
-          // unnecessary UI transactions and makes the streaming UI feel unstable.
-          if (event.row.kind === "text") break;
-          this.store.setRow(TABLES.messageParts, event.row.id, event.row as any);
-          break;
-        }
-        case "message_completed": {
-          const event = payload as SyncEventPayloadMap["message_completed"];
-          const row = this.store.getRow(TABLES.messages, event.messageId) as any;
-          if (row) {
-            this.store.setRow(TABLES.messages, event.messageId, {
-              ...row,
-              text: event.text,
-              status: "completed",
-              updatedAt: event.updatedAt,
-              durationMs: event.durationMs ?? null,
-              ttftMs: event.ttftMs ?? null,
-              promptTokens: event.promptTokens ?? null,
-              completionTokens: event.completionTokens ?? null,
-              optimistic: false,
-            });
-          }
-          break;
-        }
-        case "message_failed": {
-          const event = payload as SyncEventPayloadMap["message_failed"];
-          const row = this.store.getRow(TABLES.messages, event.messageId) as any;
-          if (row) {
-            this.store.setRow(TABLES.messages, event.messageId, {
-              ...row,
-              status: "failed",
-              errorCode: event.errorCode,
-              errorMessage: event.errorMessage,
-              updatedAt: event.updatedAt,
-              optimistic: false,
-            });
-          }
-          break;
-        }
-        case "attachment_upserted": {
-          const event = payload as SyncEventPayloadMap["attachment_upserted"];
-          const existing = this.store.getRow(TABLES.attachments, event.row.id) as Attachment | null;
-          this.store.setRow(
-            TABLES.attachments,
-            event.row.id,
-            mergeAttachmentLink(existing, event.row) as any,
-          );
-          break;
-        }
-        case "attachment_deleted": {
-          const event = payload as SyncEventPayloadMap["attachment_deleted"];
-          this.store.delRow(TABLES.attachments, event.id);
-          break;
-        }
-        case "search_runs_replaced": {
-          const event = payload as SyncEventPayloadMap["search_runs_replaced"];
-          for (const existingId of this.store.getRowIds(TABLES.searchRuns)) {
-            const row = this.store.getRow(TABLES.searchRuns, existingId) as any;
-            if (row?.messageId === event.messageId)
-              this.store.delRow(TABLES.searchRuns, existingId);
-          }
-          for (const row of event.rows) {
-            this.store.setRow(TABLES.searchRuns, row.id, row as any);
-          }
-          break;
-        }
-        case "search_results_replaced": {
-          const event = payload as SyncEventPayloadMap["search_results_replaced"];
-          for (const existingId of this.store.getRowIds(TABLES.searchResults)) {
-            const row = this.store.getRow(TABLES.searchResults, existingId) as any;
-            if (row?.messageId === event.messageId)
-              this.store.delRow(TABLES.searchResults, existingId);
-          }
-          for (const row of event.rows) {
-            this.store.setRow(TABLES.searchResults, row.id, row as any);
-          }
-          break;
-        }
-        case "server_state_rebased": {
-          const event = payload as SyncEventPayloadMap["server_state_rebased"];
-          this.store.setTables(event.snapshot.tables as any);
-          break;
-        }
+      for (const envelope of envelopes) {
+        this.applyEvent(envelope.eventType, envelope.payload as any);
       }
     });
     this.ensureActiveSelection();
+  }
+
+  private applyEvent<T extends SyncEventType>(eventType: T, payload: SyncEventPayloadMap[T]) {
+    switch (eventType) {
+      case "workspace_upserted": {
+        const event = payload as SyncEventPayloadMap["workspace_upserted"];
+        this.store.setRow(TABLES.workspaces, event.row.id, event.row as any);
+        break;
+      }
+      case "workspace_archived": {
+        const event = payload as SyncEventPayloadMap["workspace_archived"];
+        const row = this.store.getRow(TABLES.workspaces, event.id) as any;
+        if (row)
+          this.store.setRow(TABLES.workspaces, event.id, {
+            ...row,
+            archivedAt: event.archivedAt,
+            updatedAt: event.updatedAt,
+          });
+        break;
+      }
+      case "thread_upserted": {
+        const event = payload as SyncEventPayloadMap["thread_upserted"];
+        this.store.setRow(TABLES.threads, event.row.id, event.row as any);
+        break;
+      }
+      case "thread_archived": {
+        const event = payload as SyncEventPayloadMap["thread_archived"];
+        const row = this.store.getRow(TABLES.threads, event.id) as any;
+        if (row)
+          this.store.setRow(TABLES.threads, event.id, {
+            ...row,
+            archivedAt: event.archivedAt,
+            updatedAt: event.updatedAt,
+          });
+        break;
+      }
+      case "message_upserted": {
+        const event = payload as SyncEventPayloadMap["message_upserted"];
+        this.store.setRow(TABLES.messages, event.row.id, event.row as any);
+        break;
+      }
+      case "message_delta": {
+        const event = payload as SyncEventPayloadMap["message_delta"];
+        const row = this.store.getRow(TABLES.messages, event.messageId) as any;
+        if (row) {
+          this.store.setRow(TABLES.messages, event.messageId, {
+            ...row,
+            text: `${row.text}${event.delta}`,
+            status: "streaming",
+            updatedAt: event.updatedAt,
+            optimistic: false,
+          });
+        }
+        break;
+      }
+      case "message_part_appended": {
+        const event = payload as SyncEventPayloadMap["message_part_appended"];
+        // Text is streamed through `message_delta`; storing duplicate text parts causes
+        // unnecessary UI transactions and makes the streaming UI feel unstable.
+        if (event.row.kind === "text") break;
+        this.store.setRow(TABLES.messageParts, event.row.id, event.row as any);
+        break;
+      }
+      case "message_completed": {
+        const event = payload as SyncEventPayloadMap["message_completed"];
+        const row = this.store.getRow(TABLES.messages, event.messageId) as any;
+        if (row) {
+          this.store.setRow(TABLES.messages, event.messageId, {
+            ...row,
+            text: event.text,
+            status: "completed",
+            updatedAt: event.updatedAt,
+            durationMs: event.durationMs ?? null,
+            ttftMs: event.ttftMs ?? null,
+            promptTokens: event.promptTokens ?? null,
+            completionTokens: event.completionTokens ?? null,
+            optimistic: false,
+          });
+        }
+        break;
+      }
+      case "message_failed": {
+        const event = payload as SyncEventPayloadMap["message_failed"];
+        const row = this.store.getRow(TABLES.messages, event.messageId) as any;
+        if (row) {
+          this.store.setRow(TABLES.messages, event.messageId, {
+            ...row,
+            status: "failed",
+            errorCode: event.errorCode,
+            errorMessage: event.errorMessage,
+            updatedAt: event.updatedAt,
+            optimistic: false,
+          });
+        }
+        break;
+      }
+      case "attachment_upserted": {
+        const event = payload as SyncEventPayloadMap["attachment_upserted"];
+        const existing = this.store.getRow(TABLES.attachments, event.row.id) as Attachment | null;
+        this.store.setRow(
+          TABLES.attachments,
+          event.row.id,
+          mergeAttachmentLink(existing, event.row) as any,
+        );
+        break;
+      }
+      case "attachment_deleted": {
+        const event = payload as SyncEventPayloadMap["attachment_deleted"];
+        this.store.delRow(TABLES.attachments, event.id);
+        break;
+      }
+      case "search_runs_replaced": {
+        const event = payload as SyncEventPayloadMap["search_runs_replaced"];
+        for (const existingId of this.store.getRowIds(TABLES.searchRuns)) {
+          const row = this.store.getRow(TABLES.searchRuns, existingId) as any;
+          if (row?.messageId === event.messageId) this.store.delRow(TABLES.searchRuns, existingId);
+        }
+        for (const row of event.rows) {
+          this.store.setRow(TABLES.searchRuns, row.id, row as any);
+        }
+        break;
+      }
+      case "search_results_replaced": {
+        const event = payload as SyncEventPayloadMap["search_results_replaced"];
+        for (const existingId of this.store.getRowIds(TABLES.searchResults)) {
+          const row = this.store.getRow(TABLES.searchResults, existingId) as any;
+          if (row?.messageId === event.messageId)
+            this.store.delRow(TABLES.searchResults, existingId);
+        }
+        for (const row of event.rows) {
+          this.store.setRow(TABLES.searchResults, row.id, row as any);
+        }
+        break;
+      }
+      case "server_state_rebased": {
+        const event = payload as SyncEventPayloadMap["server_state_rebased"];
+        this.store.setTables(event.snapshot.tables as any);
+        break;
+      }
+    }
   }
 
   private ensureActiveSelection() {

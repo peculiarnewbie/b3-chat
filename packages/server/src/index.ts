@@ -145,10 +145,25 @@ function isSearchCapabilityQuestion(text: string) {
   ].some((pattern) => pattern.test(normalized));
 }
 
+function isDeicticLookupPrompt(text: string) {
+  const normalized = normalizeSearchPrompt(text).toLowerCase().replace(/[?]+$/g, "");
+  if (!normalized) return false;
+
+  return [
+    /^(please\s+)?use\s+(your\s+)?(web\s+)?search(\s+for)?\s+(this|that|it)$/,
+    /^(now\s+)?you\s+can\s+(search( for)?|look up|check( online)?|find out|google|browse)\s+(this|that|it)$/,
+    /^(please\s+)?(search( for)?|look up|check( online)?|find out|google|browse)\s+(this|that|it)$/,
+    /^(please\s+)?look\s+(this|that|it)\s+up$/,
+    /^(please\s+)?(look it up|search for it|search it|check it|find out|google it|browse it)$/,
+    /^(now\s+)?(you\s+can\s+)?(this|that|it)$/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
 export function inferForcedSearchQuery(promptText: string) {
   const normalized = normalizeSearchPrompt(promptText).toLowerCase();
   if (!normalized) return null;
   if (isSearchCapabilityQuestion(promptText)) return null;
+  if (isDeicticLookupPrompt(promptText)) return null;
 
   const asksForLookup =
     /\b(look up|lookup|search( for)?|google|browse|check online|find online|find out|verify online)\b/.test(
@@ -186,6 +201,8 @@ export function inferForcedSearchQuery(promptText: string) {
       )
       .replace(/[?]+$/g, ""),
   );
+
+  if (isDeicticLookupPrompt(stripped)) return null;
 
   return stripped || normalizeSearchPrompt(promptText);
 }
@@ -646,11 +663,13 @@ export async function decideSearchStep(
             '{"action":"answer"|"search","summary":string,"query":string,"numResults":number}',
             "Use recent conversation, workspace instructions, and prior searches to resolve references and follow-ups.",
             'If the latest message is an ambiguous follow-up like "what about now?", resolve it against the most recent relevant user request instead of searching the literal phrase.',
+            'If the latest message is a deictic search follow-up like "use your search for this", "look it up", or "search that", resolve "this/that/it" against the most recent relevant user request instead of searching the literal phrase.',
             "Choose action=answer when the user can be answered directly from existing context or prior search results.",
             "Choose action=search only when current or external web information is still needed or clearly useful.",
             "If the user is only asking whether search is available or supported, choose action=answer.",
             'If the user explicitly asks to "look up", "search", "check", or "find out" external facts, prefer action=search unless prior search results already answer it.',
             "If the question depends on current time, date, weather, scores, winners, prices, or latest/current facts, prefer action=search.",
+            "If the user asks for a forecast, prediction, or likely outcome about an ongoing or future real-world event, prefer action=search when current external context would materially improve the answer.",
             "If search is needed, summary must briefly describe the real information need for logs/debugging.",
             "If search is needed, query must be a high-quality search-engine query that preserves the user's actual information need with the important entities, dates, locations, and constraints intact.",
             "Prefer specific natural-language queries over stripped keyword bags.",

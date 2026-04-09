@@ -27,6 +27,7 @@ import {
   type SyncSnapshot,
   type Thread,
   type Workspace,
+  sortConversationMessages,
 } from "@b3-chat/domain";
 import {
   completeTextAttachment,
@@ -68,6 +69,24 @@ function syncLog(message: string, details?: Record<string, unknown>) {
 
 function previewText(value: string, limit = 160) {
   return value.replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+function previewMessageContent(content: unknown) {
+  if (typeof content === "string") return previewText(content);
+  if (!Array.isArray(content)) return content == null ? "" : JSON.stringify(content);
+
+  return previewText(
+    content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object" && "type" in part) {
+          const typedPart = part as { type?: string };
+          if (typedPart.type === "image_url") return "[image]";
+        }
+        return JSON.stringify(part);
+      })
+      .join(" "),
+  );
 }
 
 function looksLikeMissingRealtimeAccess(text: string) {
@@ -611,7 +630,10 @@ export class SyncEngineDurableObject {
       });
     };
 
-    const threadMessages = this.getThreadMessages(snapshot, thread.id);
+    const threadMessages = this.getThreadMessages(snapshot, thread.id, [
+      payload.userMessage,
+      payload.assistantMessage,
+    ]);
     if (payload.search) {
       await reportActivity({
         label: "Checking whether web search is needed",
@@ -665,7 +687,16 @@ export class SyncEngineDurableObject {
       this.broadcast(searchEvent);
     }
 
-    const messages = await this.buildOpenAiMessages(snapshot, thread.id, workspace.id);
+    const messages = await this.buildOpenAiMessages(snapshot, workspace.id, threadMessages);
+    syncLog("assistant_turn_upstream_messages", {
+      assistantMessageId: payload.assistantMessage.id,
+      messageCount: messages.length,
+      messages: messages.map((message, index) => ({
+        index,
+        role: typeof message.role === "string" ? message.role : JSON.stringify(message.role),
+        preview: previewMessageContent(message.content),
+      })),
+    });
     if (searchContext) {
       messages.push({
         role: "system",
@@ -876,15 +907,30 @@ export class SyncEngineDurableObject {
     }
   }
 
-  private getThreadMessages(snapshot: SyncSnapshot, threadId: string) {
-    return Object.values<any>(snapshot.tables?.[TABLES.messages] ?? {})
-      .filter((message) => message.threadId === threadId)
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  private getThreadMessages(
+    snapshot: SyncSnapshot,
+    threadId: string,
+    additionalMessages: Message[] = [],
+  ) {
+    const byId = new Map<string, Message>();
+    for (const message of Object.values<any>(snapshot.tables?.[TABLES.messages] ?? {})) {
+      if (message.threadId !== threadId) continue;
+      byId.set(message.id, message);
+    }
+    for (const message of additionalMessages) {
+      if (message.threadId !== threadId) continue;
+      byId.set(message.id, message);
+    }
+    return sortConversationMessages([...byId.values()]);
   }
 
-  private async buildOpenAiMessages(snapshot: SyncSnapshot, threadId: string, workspaceId: string) {
+  private async buildOpenAiMessages(
+    snapshot: SyncSnapshot,
+    workspaceId: string,
+    threadMessages: Message[],
+  ) {
     const workspace = snapshot.tables?.[TABLES.workspaces]?.[workspaceId];
-    const messages = this.getThreadMessages(snapshot, threadId);
+    const threadId = threadMessages[0]?.threadId;
     const attachments = Object.values<any>(snapshot.tables?.[TABLES.attachments] ?? {}).filter(
       (attachment) => attachment.threadId === threadId && attachment.status === "ready",
     );
@@ -897,7 +943,7 @@ export class SyncEngineDurableObject {
       });
     }
 
-    for (const message of messages) {
+    for (const message of threadMessages) {
       if (message.status === "failed" || message.status === "cancelled") continue;
       const inlineParts: Array<Record<string, unknown> | string> = [];
       if (message.text?.trim()) inlineParts.push(message.text);

@@ -392,6 +392,33 @@ export const nowIso = () => new Date().toISOString();
 export const createId = (prefix: string) =>
   `${prefix}_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
 
+function conversationRoleSortOrder(role: string) {
+  switch (role) {
+    case "system":
+      return 0;
+    case "user":
+      return 1;
+    case "assistant":
+      return 2;
+    default:
+      return 3;
+  }
+}
+
+export function sortConversationMessages<T extends { id: string; createdAt: string; role: string }>(
+  messages: readonly T[],
+) {
+  return [...messages].sort((a, b) => {
+    const createdAtOrder = a.createdAt.localeCompare(b.createdAt);
+    if (createdAtOrder !== 0) return createdAtOrder;
+
+    const roleOrder = conversationRoleSortOrder(a.role) - conversationRoleSortOrder(b.role);
+    if (roleOrder !== 0) return roleOrder;
+
+    return a.id.localeCompare(b.id);
+  });
+}
+
 export function slugify(value: string) {
   return value
     .toLowerCase()
@@ -667,6 +694,7 @@ export function buildSearchPlanningContext(input: {
     "If needed, summarize the real information need into a concise search-engine query.",
     "Use conversation only to resolve references and follow-ups.",
     'If the latest message is an ambiguous follow-up like "what about now?", resolve it against the most recent relevant user request instead of searching the literal phrase.',
+    'If the latest message is a deictic search follow-up like "use your search for this", "look it up", or "search that", resolve "this/that/it" against the most recent relevant user request instead of searching the literal phrase.',
     "Use prior searches to avoid repeating the same weak query when refinement is possible.",
     "If the user is only asking whether search is available or supported, answer directly and do not search.",
     "Do not search for assistant self-identity, casual chat, rewriting, coding based on repo context, or questions answerable without the web.",

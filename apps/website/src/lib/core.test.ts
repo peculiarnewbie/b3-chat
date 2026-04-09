@@ -6,6 +6,7 @@ import {
   createAttachment,
   createWorkspace,
   mergeAttachmentLink,
+  sortConversationMessages,
   slugify,
 } from "@b3-chat/domain";
 import {
@@ -206,6 +207,24 @@ describe("domain helpers", () => {
     expect(query).not.toContain("message 1 should be dropped");
     expect(query).not.toContain("x".repeat(501));
   });
+
+  it("sorts same-timestamp turns deterministically with the user before the assistant", () => {
+    const createdAt = "2026-04-09T12:00:00.000Z";
+    const sorted = sortConversationMessages([
+      {
+        id: "msg_assistant",
+        role: "assistant",
+        createdAt,
+      },
+      {
+        id: "msg_user",
+        role: "user",
+        createdAt,
+      },
+    ]);
+
+    expect(sorted.map((message) => message.id)).toEqual(["msg_user", "msg_assistant"]);
+  });
 });
 
 describe("server helpers", () => {
@@ -378,6 +397,7 @@ describe("server helpers", () => {
     expect(inferForcedSearchQuery("rewrite this paragraph")).toBe(null);
     expect(inferForcedSearchQuery("can you do search?")).toBe(null);
     expect(inferForcedSearchQuery("what about now?")).toBe(null);
+    expect(inferForcedSearchQuery("now you can search for it")).toBe(null);
   });
 
   it("rewrites ambiguous realtime follow-ups from recent user context", () => {
@@ -432,6 +452,72 @@ describe("server helpers", () => {
     ]);
 
     expect(query).toBe(null);
+  });
+
+  it("rewrites generic search follow-ups against the prior user request", () => {
+    const query = inferContextualFollowUpSearchQuery("use your search for this", [
+      {
+        role: "user",
+        text: "who is going to win the 2026 f1 wdc you think?",
+        status: "completed",
+      },
+      {
+        role: "assistant",
+        text: "Here is a speculative answer without live data.",
+        status: "completed",
+      },
+      {
+        role: "user",
+        text: "use your search for this",
+        status: "completed",
+      },
+    ]);
+
+    expect(query).toBe("who is going to win the 2026 f1 wdc you think?");
+  });
+
+  it("rewrites conversational search follow-ups with extra lead-in words", () => {
+    const query = inferContextualFollowUpSearchQuery("now you can search for it", [
+      {
+        role: "user",
+        text: "who currently leads the f1 wdc?",
+        status: "completed",
+      },
+      {
+        role: "assistant",
+        text: "I answered from stale context.",
+        status: "completed",
+      },
+      {
+        role: "user",
+        text: "now you can search for it",
+        status: "completed",
+      },
+    ]);
+
+    expect(query).toBe("who currently leads the f1 wdc");
+  });
+
+  it("expands bare year follow-ups using the prior user request", () => {
+    const query = inferContextualFollowUpSearchQuery("2026", [
+      {
+        role: "user",
+        text: "who currently leads the f1 wdc?",
+        status: "completed",
+      },
+      {
+        role: "assistant",
+        text: "Max Verstappen leads as of older context.",
+        status: "completed",
+      },
+      {
+        role: "user",
+        text: "2026",
+        status: "completed",
+      },
+    ]);
+
+    expect(query).toBe("who currently leads the f1 wdc 2026");
   });
 
   it("parses a no-search planner response", () => {

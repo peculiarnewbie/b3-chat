@@ -714,6 +714,11 @@ a {
   word-break: break-word;
 }
 
+.assistant-streaming-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .md-content h1,
 .md-content h2,
 .md-content h3,
