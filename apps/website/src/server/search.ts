@@ -47,6 +47,55 @@ function stableQueryKey(query: string) {
   return query.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+function normalizePromptText(text: string) {
+  return text.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function isSearchCapabilityQuestion(promptText: string) {
+  const normalized = normalizePromptText(promptText);
+  if (!normalized) return false;
+
+  return [
+    /^(can|could|would|will)\s+you\s+(do\s+)?(a\s+)?(web\s+)?(search|searches|browse|look up)(\s+the\s+web)?(\s+for\s+me)?\??$/,
+    /^(do|does)\s+you\s+(have|support|use)\s+(web\s+)?(search|searches|browsing)(\s+capabilit(?:y|ies))?\??$/,
+    /^are\s+you\s+(able|capable)\s+to\s+(search|browse|look up)(\s+the\s+web)?\??$/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function isAmbiguousRealtimeFollowUp(promptText: string) {
+  const normalized = normalizePromptText(promptText);
+  if (!normalized) return false;
+
+  return [
+    /^(what|how)\s+about\s+(right\s+now|now|today|currently|the\s+latest)\??$/,
+    /^and\s+(right\s+)?now\??$/,
+    /^(now|right\s+now)\??$/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+export function inferContextualFollowUpSearchQuery(
+  promptText: string,
+  messages: Array<Pick<Message, "role" | "text" | "status">>,
+) {
+  if (!isAmbiguousRealtimeFollowUp(promptText)) return null;
+
+  const normalizedPrompt = normalizePromptText(promptText);
+  const priorUsers = messages
+    .filter((message) => message.role === "user")
+    .filter((message) => message.status !== "failed" && message.status !== "cancelled")
+    .map((message) => normalizePromptText(message.text ?? ""))
+    .filter(Boolean);
+
+  if (priorUsers.at(-1) === normalizedPrompt) priorUsers.pop();
+
+  for (const priorPrompt of priorUsers.reverse()) {
+    const query = inferForcedSearchQuery(priorPrompt);
+    if (query) return query;
+  }
+
+  return null;
+}
+
 function noSearchDecision(): SearchStepDecision {
   return {
     action: "answer",
@@ -85,10 +134,26 @@ export async function prepareAssistantSearch(input: {
     };
   }
 
+  if (isSearchCapabilityQuestion(input.promptText)) {
+    input.log?.("assistant_turn_search_skipped_capability_question", {
+      assistantMessageId: input.assistantMessageId,
+      promptText: input.promptText,
+    });
+    return {
+      searchRuns: [],
+      searchResults: [],
+      searchContext: "",
+    };
+  }
+
   const searchRuns: SearchRun[] = [];
   const searchResults: SearchResult[] = [];
   const groundingRuns: SearchGroundingRun[] = [];
   const attemptedQueries = new Set<string>();
+  const contextualFollowUpQuery = inferContextualFollowUpSearchQuery(
+    input.promptText,
+    input.messages,
+  );
 
   for (let step = 1; step <= MAX_SEARCH_STEPS; step += 1) {
     const planningContext = buildSearchPlanningContext({
@@ -118,14 +183,29 @@ export async function prepareAssistantSearch(input: {
       decision = noSearchDecision();
     }
 
-    const forcedDecision = searchRuns.length === 0 ? forcedSearchDecision(input.promptText) : null;
-    if (forcedDecision && decision.action !== "search") {
+    const forcedDecision =
+      searchRuns.length === 0
+        ? contextualFollowUpQuery
+          ? {
+              action: "search" as const,
+              summary: "Ambiguous follow-up resolved from prior realtime request",
+              query: contextualFollowUpQuery,
+              numResults: 5,
+            }
+          : forcedSearchDecision(input.promptText)
+        : null;
+    const shouldRewriteAmbiguousEcho =
+      Boolean(contextualFollowUpQuery) &&
+      decision.action === "search" &&
+      stableQueryKey(decision.query) === stableQueryKey(input.promptText);
+    if (forcedDecision && (decision.action !== "search" || shouldRewriteAmbiguousEcho)) {
       input.log?.("assistant_turn_search_forced", {
         assistantMessageId: input.assistantMessageId,
         step,
         originalAction: decision.action,
         originalQuery: decision.query,
         forcedQuery: forcedDecision.query,
+        reason: contextualFollowUpQuery ? "contextual_follow_up" : "explicit_or_realtime",
       });
       decision = forcedDecision;
     }

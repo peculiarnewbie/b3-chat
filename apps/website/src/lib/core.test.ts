@@ -23,6 +23,7 @@ import {
   parseSearchStepDecision,
   verifyUploadToken,
 } from "@b3-chat/server";
+import { inferContextualFollowUpSearchQuery } from "../server/search";
 import { describe, expect, it } from "vite-plus/test";
 
 describe("domain helpers", () => {
@@ -349,6 +350,62 @@ describe("server helpers", () => {
     );
     expect(inferForcedSearchQuery("what time is it?")).toBe("current local time now");
     expect(inferForcedSearchQuery("rewrite this paragraph")).toBe(null);
+    expect(inferForcedSearchQuery("can you do search?")).toBe(null);
+    expect(inferForcedSearchQuery("what about now?")).toBe(null);
+  });
+
+  it("rewrites ambiguous realtime follow-ups from recent user context", () => {
+    const query = inferContextualFollowUpSearchQuery("what about now?", [
+      {
+        role: "user",
+        text: "what model are you?",
+        status: "completed",
+      },
+      {
+        role: "assistant",
+        text: "I'm an AI assistant.",
+        status: "completed",
+      },
+      {
+        role: "user",
+        text: "what time is it?",
+        status: "completed",
+      },
+      {
+        role: "assistant",
+        text: "I don't have access to the current time.",
+        status: "completed",
+      },
+      {
+        role: "user",
+        text: "what about now?",
+        status: "completed",
+      },
+    ]);
+
+    expect(query).toBe("current local time now");
+  });
+
+  it("does not invent context for ambiguous follow-ups without a prior realtime ask", () => {
+    const query = inferContextualFollowUpSearchQuery("what about now?", [
+      {
+        role: "user",
+        text: "what model are you?",
+        status: "completed",
+      },
+      {
+        role: "assistant",
+        text: "I'm an AI assistant.",
+        status: "completed",
+      },
+      {
+        role: "user",
+        text: "what about now?",
+        status: "completed",
+      },
+    ]);
+
+    expect(query).toBe(null);
   });
 
   it("parses a no-search planner response", () => {

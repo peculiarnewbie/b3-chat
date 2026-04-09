@@ -133,9 +133,21 @@ function normalizeSearchPrompt(text: string) {
   return text.trim().replace(/\s+/g, " ");
 }
 
+function isSearchCapabilityQuestion(text: string) {
+  const normalized = normalizeSearchPrompt(text).toLowerCase();
+  if (!normalized) return false;
+
+  return [
+    /^(can|could|would|will)\s+you\s+(do\s+)?(a\s+)?(web\s+)?(search|searches|browse|look up)(\s+the\s+web)?(\s+for\s+me)?\??$/,
+    /^(do|does)\s+you\s+(have|support|use)\s+(web\s+)?(search|searches|browsing)(\s+capabilit(?:y|ies))?\??$/,
+    /^are\s+you\s+(able|capable)\s+to\s+(search|browse|look up)(\s+the\s+web)?\??$/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
 export function inferForcedSearchQuery(promptText: string) {
   const normalized = normalizeSearchPrompt(promptText).toLowerCase();
   if (!normalized) return null;
+  if (isSearchCapabilityQuestion(promptText)) return null;
 
   const asksForLookup =
     /\b(look up|lookup|search( for)?|google|browse|check online|find online|find out|verify online)\b/.test(
@@ -146,7 +158,7 @@ export function inferForcedSearchQuery(promptText: string) {
     /\bwhat time is it\b/.test(normalized) ||
     /\bwhat('?s| is) (the )?date\b/.test(normalized) ||
     /\btoday'?s date\b/.test(normalized) ||
-    /\b(current|latest|today|tonight|right now|now|currently|recent|live|real[- ]?time)\b/.test(
+    /\b(current|latest|today|tonight|right now|currently|recent|live|real[- ]?time)\b/.test(
       normalized,
     ) ||
     /\b(weather|forecast|score|scores|standings|price|stock price|exchange rate|who won|winner|results?)\b/.test(
@@ -581,8 +593,10 @@ export async function decideSearchStep(
             "Return JSON only with this exact shape:",
             '{"action":"answer"|"search","summary":string,"query":string,"numResults":number}',
             "Use recent conversation, workspace instructions, and prior searches to resolve references and follow-ups.",
+            'If the latest message is an ambiguous follow-up like "what about now?", resolve it against the most recent relevant user request instead of searching the literal phrase.',
             "Choose action=answer when the user can be answered directly from existing context or prior search results.",
             "Choose action=search only when current or external web information is still needed or clearly useful.",
+            "If the user is only asking whether search is available or supported, choose action=answer.",
             'If the user explicitly asks to "look up", "search", "check", or "find out" external facts, prefer action=search unless prior search results already answer it.',
             "If the question depends on current time, date, weather, scores, winners, prices, or latest/current facts, prefer action=search.",
             "If search is needed, summary must briefly describe the real information need for logs/debugging.",

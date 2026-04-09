@@ -666,7 +666,9 @@ export function buildSearchPlanningContext(input: {
     "Decide whether to answer now or perform another web search.",
     "If needed, summarize the real information need into a concise search-engine query.",
     "Use conversation only to resolve references and follow-ups.",
+    'If the latest message is an ambiguous follow-up like "what about now?", resolve it against the most recent relevant user request instead of searching the literal phrase.',
     "Use prior searches to avoid repeating the same weak query when refinement is possible.",
+    "If the user is only asking whether search is available or supported, answer directly and do not search.",
     "Do not search for assistant self-identity, casual chat, rewriting, coding based on repo context, or questions answerable without the web.",
   ].join("\n");
 }
