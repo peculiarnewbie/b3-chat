@@ -61,6 +61,34 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+function formatTokenCount(tokens: number): string {
+  return new Intl.NumberFormat().format(tokens);
+}
+
+function parseThinkingTokens(part: { kind?: string; text?: string; json?: string | null }) {
+  if (part.kind !== "thinking_tokens") return null;
+
+  const fromText =
+    typeof part.text === "string" && part.text.trim() ? Number(part.text.trim()) : NaN;
+  if (Number.isFinite(fromText) && fromText > 0) return Math.round(fromText);
+
+  if (typeof part.json !== "string" || !part.json.trim()) return null;
+  try {
+    const parsed = JSON.parse(part.json) as { tokens?: unknown };
+    const tokens =
+      typeof parsed.tokens === "number"
+        ? parsed.tokens
+        : typeof parsed.tokens === "string" && parsed.tokens.trim()
+          ? Number(parsed.tokens)
+          : NaN;
+    if (Number.isFinite(tokens) && tokens > 0) return Math.round(tokens);
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 const THEMES: { id: Theme; label: string }[] = [
   { id: "clean", label: "Clean" },
   { id: "night", label: "Night" },
@@ -372,6 +400,32 @@ export default function Home() {
     }
     return byMessage;
   });
+  const thinkingTokensByMessage = createMemo(() => {
+    const byMessage = new Map<string, { seq: number; tokens: number }>();
+    for (const row of Object.values<any>(tables()?.[TABLES.messageParts] ?? {})) {
+      const tokens = parseThinkingTokens(row);
+      if (tokens == null) continue;
+      const current = byMessage.get(row.messageId);
+      if (!current || row.seq > current.seq) {
+        byMessage.set(row.messageId, { seq: row.seq, tokens });
+      }
+    }
+    return new Map(
+      Array.from(byMessage.entries()).map(([messageId, value]) => [messageId, value.tokens]),
+    );
+  });
+
+  const thinkingTokens = (messageId: string) => thinkingTokensByMessage().get(messageId) ?? null;
+  const isWaitingForVisibleAnswer = (message: any) =>
+    message.role === "assistant" &&
+    (message.status === "queued" ||
+      message.status === "pending" ||
+      message.status === "streaming") &&
+    !message.text?.trim();
+  const thinkingLabel = (messageId: string) => {
+    const tokens = thinkingTokens(messageId);
+    return tokens != null ? `${formatTokenCount(tokens)} thinking tokens` : "Thinking…";
+  };
 
   const userAttachments = (messageId: string) => {
     const allAttachments = tables()?.[TABLES.attachments] ?? {};
@@ -792,8 +846,20 @@ export default function Home() {
                         </div>
                       }
                     >
-                      <Markdown text={message.text || "…"} />
-                      <Show when={message.status === "streaming"}>
+                      <Show
+                        when={message.text?.trim()}
+                        fallback={
+                          <Show when={isWaitingForVisibleAnswer(message)} fallback={<p>…</p>}>
+                            <div class="thinking-indicator">
+                              <span class="thinking-spinner" />
+                              <span>{thinkingLabel(message.id)}</span>
+                            </div>
+                          </Show>
+                        }
+                      >
+                        <Markdown text={message.text} />
+                      </Show>
+                      <Show when={message.status === "streaming" && message.text?.trim()}>
                         <span class="streaming-cursor" />
                       </Show>
                     </Show>
@@ -826,15 +892,24 @@ export default function Home() {
                     <Show
                       when={
                         message.role === "assistant" &&
-                        message.status === "completed" &&
-                        message.durationMs
+                        (thinkingTokens(message.id) != null ||
+                          message.ttftMs != null ||
+                          message.durationMs ||
+                          message.completionTokens != null)
                       }
                     >
                       <div class="msg-stats">
+                        <Show when={thinkingTokens(message.id)}>
+                          <span>
+                            {formatTokenCount(thinkingTokens(message.id)!)} thinking tokens
+                          </span>
+                        </Show>
                         <Show when={message.ttftMs != null}>
                           <span>TTFT {message.ttftMs}ms</span>
                         </Show>
-                        <span>{formatDuration(message.durationMs)}</span>
+                        <Show when={message.durationMs}>
+                          <span>{formatDuration(message.durationMs)}</span>
+                        </Show>
                         <Show when={message.completionTokens != null}>
                           <span>{message.completionTokens} tokens</span>
                         </Show>

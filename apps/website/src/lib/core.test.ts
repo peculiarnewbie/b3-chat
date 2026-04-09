@@ -11,6 +11,7 @@ import {
 import {
   allowedEmail,
   clampExaResults,
+  extractReasoningTokens,
   extractChatCompletionText,
   filterModelsCatalog,
   getSignedAttachmentUrl,
@@ -305,6 +306,26 @@ describe("server helpers", () => {
     ]);
 
     expect(text).toBe("what time is it right now");
+  });
+
+  it("extracts reasoning token counts from nested usage payloads", () => {
+    expect(
+      extractReasoningTokens({
+        completion_tokens_details: {
+          reasoning_tokens: 128,
+        },
+      }),
+    ).toBe(128);
+
+    expect(
+      extractReasoningTokens({
+        outputTokensDetails: {
+          reasoningTokens: "64",
+        },
+      }),
+    ).toBe(64);
+
+    expect(extractReasoningTokens({ completion_tokens: 42 })).toBe(null);
   });
 
   it("parses a planner response into a normalized search plan", () => {

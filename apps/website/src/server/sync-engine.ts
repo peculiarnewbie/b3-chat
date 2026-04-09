@@ -30,6 +30,7 @@ import {
 } from "@b3-chat/domain";
 import {
   completeTextAttachment,
+  extractReasoningTokens,
   getDefaultModelId,
   getSignedAttachmentUrl,
   isImageAttachment,
@@ -74,6 +75,8 @@ function looksLikeMissingRealtimeAccess(text: string) {
     text,
   );
 }
+
+const THINKING_TOKEN_REPORT_INTERVAL = 32;
 
 export class SyncEngineDurableObject {
   private initialized = false;
@@ -681,6 +684,8 @@ export class SyncEngineDurableObject {
     let firstTokenAt: number | null = null;
     let promptTokens: number | null = null;
     let completionTokens: number | null = null;
+    let reasoningTokens: number | null = null;
+    let lastReportedReasoningTokens: number | null = null;
 
     const flushDelta = async () => {
       if (!pendingDelta) return;
@@ -709,6 +714,27 @@ export class SyncEngineDurableObject {
       pendingDelta = "";
     };
 
+    const flushThinkingTokens = async (tokens: number) => {
+      if (lastReportedReasoningTokens != null && tokens <= lastReportedReasoningTokens) {
+        return;
+      }
+      lastReportedReasoningTokens = tokens;
+      const part = createMessagePart({
+        messageId: payload.assistantMessage.id,
+        seq: seq++,
+        kind: "thinking_tokens",
+        text: String(tokens),
+        json: json({ tokens }),
+      });
+      const partEvent = await this.appendServerEvent(null, "message_part_appended", { row: part });
+      this.broadcast(partEvent);
+      syncLog("assistant_turn_thinking_tokens", {
+        assistantMessageId: payload.assistantMessage.id,
+        seq: part.seq,
+        thinkingTokens: tokens,
+      });
+    };
+
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -730,6 +756,16 @@ export class SyncEngineDurableObject {
           if (parsed.usage) {
             promptTokens = parsed.usage.prompt_tokens ?? null;
             completionTokens = parsed.usage.completion_tokens ?? null;
+            const nextReasoningTokens = extractReasoningTokens(parsed.usage);
+            if (nextReasoningTokens != null) {
+              reasoningTokens = nextReasoningTokens;
+              if (
+                lastReportedReasoningTokens === null ||
+                nextReasoningTokens - lastReportedReasoningTokens >= THINKING_TOKEN_REPORT_INTERVAL
+              ) {
+                await flushThinkingTokens(nextReasoningTokens);
+              }
+            }
           }
           const delta = parsed.choices?.[0]?.delta?.content ?? "";
           if (!delta) continue;
@@ -741,6 +777,9 @@ export class SyncEngineDurableObject {
         }
       }
       await flushDelta();
+      if (reasoningTokens != null && reasoningTokens !== lastReportedReasoningTokens) {
+        await flushThinkingTokens(reasoningTokens);
+      }
       const durationMs = Date.now() - streamStartedAt;
       const ttftMs = firstTokenAt !== null ? firstTokenAt - streamStartedAt : null;
       const completed = await this.appendServerEvent(null, "message_completed", {

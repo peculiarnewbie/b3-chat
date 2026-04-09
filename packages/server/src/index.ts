@@ -419,6 +419,49 @@ export function extractChatCompletionText(
     .trim();
 }
 
+function coerceTokenCount(value: unknown) {
+  const tokens =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim()
+        ? Number(value)
+        : NaN;
+  if (!Number.isFinite(tokens)) return null;
+  return Math.max(0, Math.round(tokens));
+}
+
+export function extractReasoningTokens(usage: unknown) {
+  if (!usage || typeof usage !== "object") return null;
+
+  const queue: Record<string, unknown>[] = [usage as Record<string, unknown>];
+  const seen = new Set<Record<string, unknown>>();
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (seen.has(current)) continue;
+    seen.add(current);
+
+    const direct = coerceTokenCount(current.reasoning_tokens ?? current.reasoningTokens);
+    if (direct != null) return direct;
+
+    for (const key of [
+      "completion_tokens_details",
+      "completionTokensDetails",
+      "output_tokens_details",
+      "outputTokensDetails",
+      "details",
+      "usage",
+    ]) {
+      const nested = current[key];
+      if (nested && typeof nested === "object") {
+        queue.push(nested as Record<string, unknown>);
+      }
+    }
+  }
+
+  return null;
+}
+
 function noSearchPlan(): SearchPlan {
   return {
     needsSearch: false,
