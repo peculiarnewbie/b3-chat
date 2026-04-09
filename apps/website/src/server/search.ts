@@ -11,6 +11,7 @@ import {
   decideSearchStep,
   exaMcpSearchRawText,
   exaSearch,
+  inferForcedSearchQuery,
   type AppEnv,
   type SearchStepDecision,
 } from "@b3-chat/server";
@@ -52,6 +53,17 @@ function noSearchDecision(): SearchStepDecision {
     summary: "",
     query: "",
     numResults: 0,
+  };
+}
+
+function forcedSearchDecision(promptText: string): SearchStepDecision | null {
+  const query = inferForcedSearchQuery(promptText);
+  if (!query) return null;
+  return {
+    action: "search",
+    summary: "Explicit lookup or current external information request",
+    query,
+    numResults: 5,
   };
 }
 
@@ -104,6 +116,18 @@ export async function prepareAssistantSearch(input: {
         error: String(error),
       });
       decision = noSearchDecision();
+    }
+
+    const forcedDecision = searchRuns.length === 0 ? forcedSearchDecision(input.promptText) : null;
+    if (forcedDecision && decision.action !== "search") {
+      input.log?.("assistant_turn_search_forced", {
+        assistantMessageId: input.assistantMessageId,
+        step,
+        originalAction: decision.action,
+        originalQuery: decision.query,
+        forcedQuery: forcedDecision.query,
+      });
+      decision = forcedDecision;
     }
 
     input.log?.("assistant_turn_search_step", {

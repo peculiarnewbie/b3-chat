@@ -59,6 +59,7 @@ class SyncClient {
   started = false;
   reconnectAttempt = 0;
   reconnectTimer?: number;
+  handshakeComplete = false;
   clientId = readJson(CLIENT_ID_KEY, createId("client"));
   lastServerSeq = readJson(LAST_SERVER_SEQ_KEY, 0);
   pendingOps = new Map<string, PendingSyncOp>(
@@ -121,6 +122,7 @@ class SyncClient {
     syncLog("connect", { clientId: this.clientId, lastServerSeq: this.lastServerSeq });
     const socket = new WebSocket(`${protocol}//${location.host}/api/sync/ws`);
     this.socket = socket;
+    this.handshakeComplete = false;
 
     socket.addEventListener("open", () => {
       this.reconnectAttempt = 0;
@@ -131,7 +133,6 @@ class SyncClient {
         lastServerSeq: this.lastServerSeq,
         unackedOpIds: [...this.pendingOps.keys()],
       });
-      this.flushPendingOps();
     });
 
     socket.addEventListener("message", ({ data }) => {
@@ -145,12 +146,14 @@ class SyncClient {
 
     socket.addEventListener("close", () => {
       syncLog("close");
+      this.handshakeComplete = false;
       this.store.setValue(LOCAL_VALUES.connectionStatus, "offline");
       this.scheduleReconnect();
     });
 
     socket.addEventListener("error", () => {
       syncLog("error");
+      this.handshakeComplete = false;
       this.store.setValue(LOCAL_VALUES.connectionStatus, "degraded");
     });
   }
@@ -165,11 +168,13 @@ class SyncClient {
   private async handleServerEnvelope(envelope: SyncServerEnvelope) {
     switch (envelope.type) {
       case "hello_ack":
+        this.handshakeComplete = true;
         this.store.setValue(LOCAL_VALUES.connectionStatus, "connected");
         if (envelope.lastServerSeq > this.lastServerSeq) {
           this.lastServerSeq = envelope.lastServerSeq;
           this.persistLastServerSeq();
         }
+        this.flushPendingOps();
         return;
       case "ack":
         this.pendingOps.delete(envelope.opId);
@@ -202,10 +207,36 @@ class SyncClient {
   }
 
   private send(message: object) {
+    const payload =
+      "payload" in (message as Record<string, unknown>)
+        ? ((message as { payload?: Record<string, unknown> }).payload ?? null)
+        : null;
+    const opId =
+      typeof (message as { opId?: string }).opId === "string"
+        ? (message as { opId?: string }).opId
+        : undefined;
+    const search = typeof payload?.search === "boolean" ? payload.search : undefined;
+    const promptText =
+      typeof payload?.promptText === "string" ? payload.promptText.slice(0, 120) : undefined;
+    if (
+      (message as { type?: string }).type === "command" &&
+      !this.handshakeComplete &&
+      this.pendingOps.size > 0
+    ) {
+      syncLog("defer_command_until_hello_ack", {
+        commandType: (message as { commandType?: string }).commandType,
+        opId,
+        search,
+      });
+      return;
+    }
     if (this.socket?.readyState === WebSocket.OPEN) {
       syncLog("send", {
         type: (message as { type?: string }).type,
         commandType: (message as { commandType?: string }).commandType,
+        opId,
+        search,
+        promptText,
       });
       this.socket.send(JSON.stringify(message));
     }
@@ -246,7 +277,16 @@ class SyncClient {
       commandType,
       payload,
     };
-    syncLog("enqueue", { opId: op.opId, commandType });
+    const createUserMessagePayload =
+      commandType === "create_user_message"
+        ? (payload as SyncCommandPayloadMap["create_user_message"])
+        : null;
+    syncLog("enqueue", {
+      opId: op.opId,
+      commandType,
+      search: createUserMessagePayload?.search,
+      promptText: createUserMessagePayload?.promptText?.slice(0, 120),
+    });
     this.applyOptimistic(op);
     this.pendingOps.set(op.opId, op);
     this.persistPendingOps();

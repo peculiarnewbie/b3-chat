@@ -14,6 +14,7 @@ import {
   extractChatCompletionText,
   filterModelsCatalog,
   getSignedAttachmentUrl,
+  inferForcedSearchQuery,
   isImageAttachment,
   isInlineTextAttachment,
   normalizeEmail,
@@ -340,6 +341,14 @@ describe("server helpers", () => {
       query: "",
       numResults: 0,
     });
+  });
+
+  it("infers forced search queries for explicit lookup and realtime prompts", () => {
+    expect(inferForcedSearchQuery("can you look up who won f1 suzuka race in 2026?")).toBe(
+      "who won f1 suzuka race in 2026",
+    );
+    expect(inferForcedSearchQuery("what time is it?")).toBe("current local time now");
+    expect(inferForcedSearchQuery("rewrite this paragraph")).toBe(null);
   });
 
   it("parses a no-search planner response", () => {
