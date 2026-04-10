@@ -182,7 +182,6 @@ class SyncClient {
 
   private coalesceEventEnvelopes(envelopes: Array<Extract<SyncServerEnvelope, { type: "event" }>>) {
     const merged: Array<Extract<SyncServerEnvelope, { type: "event" }>> = [];
-    let mergedDeltaCount = 0;
 
     for (const envelope of envelopes) {
       const previous = merged.at(-1);
@@ -202,19 +201,12 @@ class SyncClient {
           delta: `${previousPayload.delta}${nextPayload.delta}`,
           updatedAt: nextPayload.updatedAt,
         } as SyncEventPayloadMap[typeof previous.eventType];
-        mergedDeltaCount += 1;
         continue;
       }
 
       merged.push(envelope);
     }
 
-    syncLog("coalesce_events", {
-      received: envelopes.length,
-      emitted: merged.length,
-      mergedDeltaCount,
-      eventTypes: merged.map((event) => event.eventType),
-    });
     return merged;
   }
 
@@ -233,12 +225,6 @@ class SyncClient {
           events.push(queue[index] as Extract<SyncServerEnvelope, { type: "event" }>);
           index += 1;
         }
-        syncLog("flush_event_batch", {
-          batchSize: events.length,
-          firstSeq: events[0]?.serverSeq,
-          lastSeq: events.at(-1)?.serverSeq,
-          eventTypes: events.map((event) => event.eventType),
-        });
         this.lastServerSeq = events.at(-1)!.serverSeq;
         this.persistLastServerSeq();
         this.applyEvents(this.coalesceEventEnvelopes(events));
@@ -515,10 +501,6 @@ class SyncClient {
   }
 
   private applyEvents(envelopes: Array<Extract<SyncServerEnvelope, { type: "event" }>>) {
-    syncLog("apply_events", {
-      count: envelopes.length,
-      eventTypes: envelopes.map((envelope) => envelope.eventType),
-    });
     this.store.transaction(() => {
       for (const envelope of envelopes) {
         this.applyEvent(envelope.eventType, envelope.payload as any);

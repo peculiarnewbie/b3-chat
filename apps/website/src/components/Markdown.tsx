@@ -50,7 +50,10 @@ const Markdown: Component<{ text: string }> = (props) => {
   const html = createMemo(() => {
     const raw = props.text || "";
     const rendered = marked.parse(raw, { async: false }) as string;
-    return DOMPurify.sanitize(rendered, { ADD_ATTR: ["data-code"] });
+    const sanitized = DOMPurify.sanitize(rendered, { ADD_ATTR: ["data-code"] });
+    return sanitized
+      .replace(/<table>/g, '<div class="table-wrap"><table>')
+      .replace(/<\/table>/g, "</table></div>");
   });
 
   const handleClick = (e: MouseEvent) => {

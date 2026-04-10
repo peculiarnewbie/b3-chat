@@ -71,24 +71,6 @@ function previewText(value: string, limit = 160) {
   return value.replace(/\s+/g, " ").trim().slice(0, limit);
 }
 
-function previewMessageContent(content: unknown) {
-  if (typeof content === "string") return previewText(content);
-  if (!Array.isArray(content)) return content == null ? "" : JSON.stringify(content);
-
-  return previewText(
-    content
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (part && typeof part === "object" && "type" in part) {
-          const typedPart = part as { type?: string };
-          if (typedPart.type === "image_url") return "[image]";
-        }
-        return JSON.stringify(part);
-      })
-      .join(" "),
-  );
-}
-
 function looksLikeMissingRealtimeAccess(text: string) {
   return /don'?t have access to real[- ]?time|can'?t tell you the (exact )?current time|don'?t have access to the current date|don'?t have access to current information/i.test(
     text,
@@ -688,15 +670,6 @@ export class SyncEngineDurableObject {
     }
 
     const messages = await this.buildOpenAiMessages(snapshot, workspace.id, threadMessages);
-    syncLog("assistant_turn_upstream_messages", {
-      assistantMessageId: payload.assistantMessage.id,
-      messageCount: messages.length,
-      messages: messages.map((message, index) => ({
-        index,
-        role: typeof message.role === "string" ? message.role : JSON.stringify(message.role),
-        preview: previewMessageContent(message.content),
-      })),
-    });
     if (searchContext) {
       messages.push({
         role: "system",

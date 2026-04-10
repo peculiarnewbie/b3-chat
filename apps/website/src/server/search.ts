@@ -99,19 +99,6 @@ export async function prepareAssistantSearch(input: {
   const searchRuns: SearchRun[] = [];
   const searchResults: SearchResult[] = [];
   const groundingRuns: SearchGroundingRun[] = [];
-  input.log?.("assistant_turn_search_context", {
-    assistantMessageId: input.assistantMessageId,
-    promptText: input.promptText,
-    enabled: input.enabled,
-    messageCount: input.messages.length,
-    recentUserMessages: input.messages
-      .filter((message) => message.role === "user")
-      .slice(-6)
-      .map((message) => ({
-        text: (message.text ?? "").slice(0, 160),
-        status: message.status,
-      })),
-  });
   await input.onProgress?.({
     label: "Planning search query",
     state: "active",
@@ -140,12 +127,6 @@ export async function prepareAssistantSearch(input: {
       query: fallbackQuery ?? "",
     };
   }
-
-  input.log?.("assistant_turn_search_decision", {
-    assistantMessageId: input.assistantMessageId,
-    shouldSearch: decision.shouldSearch,
-    query: decision.query,
-  });
 
   if (!decision.shouldSearch || !decision.query.trim()) {
     await input.onProgress?.({

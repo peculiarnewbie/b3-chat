@@ -39,14 +39,6 @@ type AssistantActivity = {
   detail: string | null;
 };
 
-function uiLog(message: string, details?: unknown) {
-  if (details) {
-    console.log(`[ui] ${message}`, details);
-    return;
-  }
-  console.log(`[ui] ${message}`);
-}
-
 function getDateGroup(iso: string): string {
   const date = new Date(iso);
   const now = new Date();
@@ -255,7 +247,6 @@ export default function Home() {
   // Settings state
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [systemPromptDraft, setSystemPromptDraft] = createSignal("");
-  let lastTimelineDebugSnapshot = "";
 
   // biome-ignore lint: assigned via ref attribute
   // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref
@@ -817,27 +808,6 @@ export default function Home() {
       </Show>
     );
   };
-
-  createEffect(() => {
-    const snapshot = JSON.stringify(
-      messageIds().map((messageId) => {
-        const message = messageById(messageId);
-        return {
-          id: messageId,
-          role: message?.role ?? null,
-          status: message?.status ?? null,
-          textLength: message?.text?.length ?? 0,
-          activityCount: activitiesForMessage(messageId).length,
-          searchRunCount: searchRuns().get(messageId)?.length ?? 0,
-          thinkingTokens: thinkingTokens(messageId),
-        };
-      }),
-    );
-
-    if (snapshot === lastTimelineDebugSnapshot) return;
-    lastTimelineDebugSnapshot = snapshot;
-    uiLog("timeline_snapshot", JSON.parse(snapshot));
-  });
 
   const signIn = async () => {
     await authClient.signIn.social({

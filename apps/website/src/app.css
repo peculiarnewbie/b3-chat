@@ -266,15 +266,19 @@ a {
 }
 
 .nav-item-actions {
-  display: none;
+  display: flex;
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
   margin-left: auto;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s;
 }
 
 .nav-item:hover .nav-item-actions {
-  display: flex;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 /* Shared action button style (rename ✎, delete ×) */
@@ -362,7 +366,6 @@ a {
   color: var(--accent);
   border-color: var(--line);
   background: var(--panel-strong);
-  font-weight: 600;
 }
 
 /* ── Buttons ──────────────────────────────────────── */
@@ -828,21 +831,32 @@ a {
   color: var(--text-secondary);
 }
 
+.md-content .table-wrap {
+  overflow-x: auto;
+  margin: 0.5em 0;
+  -webkit-overflow-scrolling: touch;
+}
 .md-content table {
   border-collapse: collapse;
-  margin: 0.5em 0;
   font-size: 0.85em;
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
 }
 .md-content th,
 .md-content td {
   border: 1px solid var(--line);
-  padding: 4px 8px;
+  padding: 6px 12px;
   text-align: left;
+  white-space: nowrap;
+}
+.md-content td {
+  white-space: normal;
+  min-width: 120px;
 }
 .md-content th {
   background: var(--panel-strong);
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .md-content a {
