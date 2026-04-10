@@ -563,6 +563,42 @@ a {
   width: 100%;
 }
 
+.msg-user-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.msg-retry-btn {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-top: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.msg-user-row:hover .msg-retry-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.msg-retry-btn:hover {
+  background: var(--bg-hover, var(--line));
+  color: var(--text);
+}
+
 .msg-user-body {
   max-width: 100%;
   padding: 8px 12px;

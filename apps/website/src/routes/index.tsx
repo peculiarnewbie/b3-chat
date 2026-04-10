@@ -611,40 +611,61 @@ export default function Home() {
             <Show
               when={message().role === "assistant"}
               fallback={
-                <div class="msg-user-stack">
-                  <Show when={userImageAttachments(message().id).length > 0}>
-                    <div class="msg-attachment-gallery">
-                      <For each={userImageAttachments(message().id)}>
-                        {(att: any) => (
-                          <a
-                            class="msg-attachment-card"
-                            href={`/api/uploads/blob/${att.objectKey}`}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            <img
-                              class="msg-attachment-img"
-                              src={`/api/uploads/blob/${att.objectKey}`}
-                              alt={att.fileName}
-                              loading="lazy"
-                            />
-                          </a>
-                        )}
-                      </For>
-                    </div>
-                  </Show>
-                  <Show when={message().text?.trim()}>
-                    <div class="msg-user-body">
-                      <p>{message().text}</p>
-                    </div>
-                  </Show>
-                  <Show when={userFileAttachments(message().id).length > 0}>
-                    <div class="msg-attachments msg-attachments-files">
-                      <For each={userFileAttachments(message().id)}>
-                        {(att: any) => <span class="msg-attachment-file">{att.fileName}</span>}
-                      </For>
-                    </div>
-                  </Show>
+                <div class="msg-user-row">
+                  <button
+                    class="msg-retry-btn"
+                    title="Retry with current model"
+                    onClick={() => retryMessage(message())}
+                  >
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <polyline points="1 4 1 10 7 10" />
+                      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                    </svg>
+                  </button>
+                  <div class="msg-user-stack">
+                    <Show when={userImageAttachments(message().id).length > 0}>
+                      <div class="msg-attachment-gallery">
+                        <For each={userImageAttachments(message().id)}>
+                          {(att: any) => (
+                            <a
+                              class="msg-attachment-card"
+                              href={`/api/uploads/blob/${att.objectKey}`}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              <img
+                                class="msg-attachment-img"
+                                src={`/api/uploads/blob/${att.objectKey}`}
+                                alt={att.fileName}
+                                loading="lazy"
+                              />
+                            </a>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
+                    <Show when={message().text?.trim()}>
+                      <div class="msg-user-body">
+                        <p>{message().text}</p>
+                      </div>
+                    </Show>
+                    <Show when={userFileAttachments(message().id).length > 0}>
+                      <div class="msg-attachments msg-attachments-files">
+                        <For each={userFileAttachments(message().id)}>
+                          {(att: any) => <span class="msg-attachment-file">{att.fileName}</span>}
+                        </For>
+                      </div>
+                    </Show>
+                  </div>
                 </div>
               }
             >
@@ -892,6 +913,18 @@ export default function Home() {
       updatedAt: nowIso(),
     });
     setSettingsOpen(false);
+  };
+
+  const retryMessage = (msg: any) => {
+    if (!activeThread() || !msg.text?.trim()) return;
+    const modelId =
+      composer.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto";
+    syncClient.sendMessage({
+      thread: activeThread()!,
+      text: msg.text.trim(),
+      modelId,
+      search: composer.search,
+    });
   };
 
   const sendMessage = async () => {
