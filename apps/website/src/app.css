@@ -75,7 +75,7 @@ html {
 }
 
 body {
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 button,
@@ -93,7 +93,7 @@ a {
 /* ── Auth ─────────────────────────────────────────── */
 
 .auth-shell {
-  min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
   place-items: center;
   padding: 20px;
@@ -140,7 +140,7 @@ a {
 /* ── Shell layout ─────────────────────────────────── */
 
 .shell {
-  height: 100vh;
+  height: 100dvh;
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
 }
@@ -1498,5 +1498,8 @@ a {
   }
   .msg {
     max-width: 90%;
+  }
+  .msg.assistant {
+    max-width: 100%;
   }
 }

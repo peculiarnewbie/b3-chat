@@ -567,7 +567,6 @@ export default function Home() {
       if (
         message.role !== "assistant" ||
         !hasAssistantPrelude(message) ||
-        message.status !== "completed" ||
         !message.text?.trim() ||
         didAutoCollapseProgressByMessage[message.id]
       ) {
