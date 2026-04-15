@@ -42,7 +42,7 @@ import {
   updateWorkspaceAction,
   deleteAttachmentAction,
   sendMessageAction,
-  resetLocalSync,
+  resetAllData,
 } from "../lib/actions";
 import {
   activeWorkspaceId,
@@ -1265,12 +1265,19 @@ export default function Home() {
                   </div>
 
                   <div class="settings-section settings-danger">
-                    <label class="settings-label">Troubleshooting</label>
+                    <label class="settings-label">Danger Zone</label>
                     <p class="settings-hint">
-                      If sync is broken, reset local state and re-download from server.
+                      Wipe all data on server and locally. Start completely fresh.
                     </p>
-                    <button class="btn btn-danger" onClick={resetLocalSync}>
-                      Reset Local Sync
+                    <button
+                      class="btn btn-danger"
+                      onClick={() => {
+                        if (confirm("Delete ALL data? This cannot be undone.")) {
+                          resetAllData();
+                        }
+                      }}
+                    >
+                      Reset All Data
                     </button>
                   </div>
                 </div>

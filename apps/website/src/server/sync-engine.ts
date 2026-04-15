@@ -549,6 +549,8 @@ export class SyncEngineDurableObject {
           this.exec(`DELETE FROM search_results`);
           this.exec(`DELETE FROM events`);
           this.exec(`DELETE FROM commands`);
+          // Reset autoincrement sequences
+          this.exec(`DELETE FROM sqlite_sequence`);
           // Bootstrap a fresh workspace
           const workspace = {
             ...createWorkspace({
