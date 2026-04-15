@@ -13,6 +13,7 @@ import {
   type Attachment,
   type CreateUserMessagePayload,
   type Message,
+  type ReasoningLevel,
   type SearchRun,
   type SearchResult,
   type SyncClientEnvelope,
@@ -41,6 +42,7 @@ import {
   type ModelMessage,
 } from "@b3-chat/server";
 import { createExaSearchTool, type SearchProgressEvent } from "./search";
+import { normalizeAssistantError } from "./error-normalization";
 import { consumeAssistantStream, type StreamConsumerDeps } from "./stream-consumer";
 type SyncCommandResult = {
   ack?: SyncServerAck;
@@ -82,6 +84,73 @@ function looksLikeMissingRealtimeAccess(text: string) {
 
 const SEARCH_TOOL_SYSTEM_PROMPT =
   "You have access to the exa_web_search tool for current or external information. Use it when the answer depends on up-to-date facts, live information, or verification outside the conversation. If the tool is available, do not claim you lack access to current information without trying it when it is relevant.";
+
+function isKimi25Model(modelId: string) {
+  return /(?:^|\/)kimi-k2\.5(?:$|[-/])/i.test(modelId);
+}
+
+function getProviderModelOptions(
+  modelId: string,
+  toolCount: number,
+  reasoningLevel: ReasoningLevel,
+) {
+  const provider = modelId.split("/")[0]?.toLowerCase() ?? "";
+  let effectiveReasoningLevel = reasoningLevel;
+  let overrideReason: string | null = null;
+
+  if (toolCount > 0 && isKimi25Model(modelId)) {
+    effectiveReasoningLevel = "off";
+    if (reasoningLevel !== "off") {
+      overrideReason = "kimi_tool_turn_requires_thinking_disabled";
+    }
+  }
+
+  if (isKimi25Model(modelId)) {
+    return {
+      effectiveReasoningLevel,
+      overrideReason,
+      modelOptions: {
+        thinking: {
+          type: effectiveReasoningLevel === "off" ? ("disabled" as const) : ("enabled" as const),
+        },
+      },
+    };
+  }
+
+  if (provider === "openai") {
+    return {
+      effectiveReasoningLevel,
+      overrideReason,
+      modelOptions: {
+        reasoning: {
+          effort:
+            effectiveReasoningLevel === "off"
+              ? ("none" as const)
+              : (effectiveReasoningLevel as "low" | "medium" | "high"),
+        },
+      },
+    };
+  }
+
+  if (provider === "groq") {
+    return {
+      effectiveReasoningLevel,
+      overrideReason,
+      modelOptions: {
+        reasoning_effort:
+          effectiveReasoningLevel === "off"
+            ? ("none" as const)
+            : (effectiveReasoningLevel as "low" | "medium" | "high"),
+      },
+    };
+  }
+
+  return {
+    effectiveReasoningLevel,
+    overrideReason,
+    modelOptions: undefined,
+  };
+}
 
 export class SyncEngineDurableObject {
   private initialized = false;
@@ -609,7 +678,12 @@ export class SyncEngineDurableObject {
       for (const event of transactionResult.pendingEvents) this.broadcast(event);
     }
     const followUpPromise = followUp?.().catch((error) => {
-      console.error("[sync-do] follow_up_error", error);
+      syncLog("follow_up_error", {
+        opId,
+        commandType,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
     });
     if (followUpPromise) this.ctx.waitUntil(followUpPromise);
     return {
@@ -630,6 +704,7 @@ export class SyncEngineDurableObject {
       threadId: payload.threadId,
       assistantMessageId: payload.assistantMessage.id,
       modelId: payload.modelId,
+      reasoningLevel: payload.reasoningLevel,
       search: payload.search,
     });
     const snapshot = await this.getSnapshot();
@@ -666,98 +741,157 @@ export class SyncEngineDurableObject {
       });
     };
 
-    const threadMessages = this.getThreadMessages(snapshot, thread.id, [
-      payload.userMessage,
-      payload.assistantMessage,
-    ]);
-    const searchTool = payload.search
-      ? createExaSearchTool({
-          env: this.env,
+    try {
+      const threadMessages = this.getThreadMessages(snapshot, thread.id, [
+        payload.userMessage,
+        payload.assistantMessage,
+      ]);
+      const searchTool = payload.search
+        ? createExaSearchTool({
+            env: this.env,
+            assistantMessageId: payload.assistantMessage.id,
+            log: syncLog,
+            onProgress: reportActivity,
+            onSearchStateChange: async (state) => {
+              const searchRunEvent = await this.appendServerEvent(null, "search_runs_replaced", {
+                messageId: payload.assistantMessage.id,
+                rows: state.searchRuns,
+              });
+              this.broadcast(searchRunEvent);
+
+              const searchEvent = await this.appendServerEvent(null, "search_results_replaced", {
+                messageId: payload.assistantMessage.id,
+                rows: state.searchResults,
+              });
+              this.broadcast(searchEvent);
+            },
+          })
+        : null;
+
+      // Build model messages with resolved attachments
+      const { messages: modelMessages, systemPrompts } = await this.buildModelMessages(
+        snapshot,
+        workspace.id,
+        threadMessages,
+      );
+      if (searchTool) {
+        systemPrompts.push(SEARCH_TOOL_SYSTEM_PROMPT);
+      }
+
+      // Create adapter for TanStack AI chat()
+      const adapter = createChatCompletionsAdapter(
+        {
+          baseUrl: this.env.OPENCODE_GO_BASE_URL,
+          apiKey: this.env.OPENCODE_GO_API_KEY,
+        },
+        modelId,
+      );
+      const providerOptions = getProviderModelOptions(
+        modelId,
+        searchTool ? 1 : 0,
+        payload.reasoningLevel,
+      );
+      const modelOptions = providerOptions.modelOptions;
+
+      if (!modelOptions && payload.reasoningLevel !== "off") {
+        syncLog("reasoning_mapping_unavailable", {
           assistantMessageId: payload.assistantMessage.id,
-          log: syncLog,
-          onProgress: reportActivity,
-          onSearchStateChange: async (state) => {
-            const searchRunEvent = await this.appendServerEvent(null, "search_runs_replaced", {
-              messageId: payload.assistantMessage.id,
-              rows: state.searchRuns,
-            });
-            this.broadcast(searchRunEvent);
+          modelId,
+          requestedReasoningLevel: payload.reasoningLevel,
+        });
+      }
 
-            const searchEvent = await this.appendServerEvent(null, "search_results_replaced", {
-              messageId: payload.assistantMessage.id,
-              rows: state.searchResults,
-            });
-            this.broadcast(searchEvent);
-          },
-        })
-      : null;
+      syncLog("assistant_turn_upstream", {
+        assistantMessageId: payload.assistantMessage.id,
+        modelId,
+        messageCount: modelMessages.length,
+        systemPromptCount: systemPrompts.length,
+        toolCount: searchTool ? 1 : 0,
+        requestedReasoningLevel: payload.reasoningLevel,
+        effectiveReasoningLevel: providerOptions.effectiveReasoningLevel,
+        overrideReason: providerOptions.overrideReason,
+        modelOptions,
+      });
 
-    // Build model messages with resolved attachments
-    const { messages: modelMessages, systemPrompts } = await this.buildModelMessages(
-      snapshot,
-      workspace.id,
-      threadMessages,
-    );
-    if (searchTool) {
-      systemPrompts.push(SEARCH_TOOL_SYSTEM_PROMPT);
+      // Create stream consumer dependencies
+      const consumerDeps: StreamConsumerDeps = {
+        appendServerEvent: (opId, eventType, eventPayload) =>
+          this.appendServerEvent(opId, eventType as any, eventPayload as any),
+        broadcast: (envelope) => this.broadcast(envelope as any),
+        appendMessagePart,
+        reportActivity,
+        messageId: payload.assistantMessage.id,
+        log: syncLog,
+      };
+
+      // Stream using TanStack AI's chat() function
+      // Cast messages to work around strict ConstrainedModelMessage type constraints
+      const stream = chat({
+        adapter,
+        messages: modelMessages as any,
+        systemPrompts,
+        ...(modelOptions ? { modelOptions } : {}),
+        ...(searchTool ? { tools: [searchTool.tool] } : {}),
+      });
+
+      const result = await consumeAssistantStream(stream, consumerDeps);
+      const searchRuns = searchTool?.state.searchRuns ?? [];
+
+      // Log completion metrics
+      syncLog("assistant_turn_search_summary", {
+        assistantMessageId: payload.assistantMessage.id,
+        searchRuns: searchRuns.map((run) => ({
+          step: run.step,
+          query: run.query,
+          status: run.status,
+          resultCount: run.resultCount,
+        })),
+      });
+      syncLog("assistant_turn_answer_sanity", {
+        assistantMessageId: payload.assistantMessage.id,
+        searched: searchRuns.length > 0,
+        likelyIgnoredGrounding:
+          searchRuns.length > 0 && looksLikeMissingRealtimeAccess(result.text),
+        answerPreview: previewText(result.text),
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const normalizedError = normalizeAssistantError({
+        errorCode: "assistant_turn_error",
+        errorMessage,
+        modelId,
+      });
+      syncLog("assistant_turn_exception", {
+        assistantMessageId: payload.assistantMessage.id,
+        modelId,
+        search: payload.search,
+        error: errorMessage,
+        normalizedErrorCode: normalizedError.errorCode,
+        providerName: normalizedError.providerName,
+        retryable: normalizedError.retryable,
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+
+      const current = this.getMessage(payload.assistantMessage.id);
+      if (current && current.status !== "completed" && current.status !== "failed") {
+        const failed = await this.appendServerEvent(null, "message_failed", {
+          messageId: payload.assistantMessage.id,
+          errorCode: normalizedError.errorCode,
+          errorMessage: normalizedError.errorMessage,
+          updatedAt: nowIso(),
+        });
+        this.broadcast(failed);
+      }
+
+      await appendMessagePart("activity", {
+        text: "Response failed",
+        json: json({
+          label: "Response failed",
+          state: "failed",
+          detail: normalizedError.errorMessage,
+        } satisfies SearchProgressEvent),
+      });
     }
-
-    // Create adapter for TanStack AI chat()
-    const adapter = createChatCompletionsAdapter(
-      {
-        baseUrl: this.env.OPENCODE_GO_BASE_URL,
-        apiKey: this.env.OPENCODE_GO_API_KEY,
-      },
-      modelId,
-    );
-
-    syncLog("assistant_turn_upstream", {
-      assistantMessageId: payload.assistantMessage.id,
-      modelId,
-      messageCount: modelMessages.length,
-      systemPromptCount: systemPrompts.length,
-      toolCount: searchTool ? 1 : 0,
-    });
-
-    // Create stream consumer dependencies
-    const consumerDeps: StreamConsumerDeps = {
-      appendServerEvent: (opId, eventType, eventPayload) =>
-        this.appendServerEvent(opId, eventType as any, eventPayload as any),
-      broadcast: (envelope) => this.broadcast(envelope as any),
-      appendMessagePart,
-      reportActivity,
-      messageId: payload.assistantMessage.id,
-      log: syncLog,
-    };
-
-    // Stream using TanStack AI's chat() function
-    // Cast messages to work around strict ConstrainedModelMessage type constraints
-    const stream = chat({
-      adapter,
-      messages: modelMessages as any,
-      systemPrompts,
-      ...(searchTool ? { tools: [searchTool.tool] } : {}),
-    });
-
-    const result = await consumeAssistantStream(stream, consumerDeps);
-    const searchRuns = searchTool?.state.searchRuns ?? [];
-
-    // Log completion metrics
-    syncLog("assistant_turn_search_summary", {
-      assistantMessageId: payload.assistantMessage.id,
-      searchRuns: searchRuns.map((run) => ({
-        step: run.step,
-        query: run.query,
-        status: run.status,
-        resultCount: run.resultCount,
-      })),
-    });
-    syncLog("assistant_turn_answer_sanity", {
-      assistantMessageId: payload.assistantMessage.id,
-      searched: searchRuns.length > 0,
-      likelyIgnoredGrounding: searchRuns.length > 0 && looksLikeMissingRealtimeAccess(result.text),
-      answerPreview: previewText(result.text),
-    });
   }
 
   private getThreadMessages(
@@ -854,6 +988,7 @@ export class SyncEngineDurableObject {
   private normalizeWorkspace(row: Workspace, opId: string) {
     return decodeWorkspaceRow({
       ...row,
+      defaultReasoningLevel: row.defaultReasoningLevel ?? "off",
       optimistic: false,
       opId,
       updatedAt: row.updatedAt || nowIso(),
@@ -873,6 +1008,7 @@ export class SyncEngineDurableObject {
   private normalizeMessage(row: Message, opId: string) {
     return decodeMessageRow({
       ...row,
+      reasoningLevel: row.reasoningLevel ?? "off",
       optimistic: false,
       opId,
       updatedAt: row.updatedAt || nowIso(),

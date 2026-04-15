@@ -12,15 +12,17 @@ import { createStore } from "solid-js/store";
 import { useLiveQuery } from "@tanstack/solid-db";
 import { createId, nowIso, sortConversationMessages } from "@b3-chat/domain";
 import type {
-  Workspace,
-  Thread,
+  Attachment,
   Message,
   MessagePart,
-  Attachment,
+  ReasoningLevel,
   SearchRun,
   SearchResult,
+  Thread,
+  Workspace,
 } from "@b3-chat/domain";
 import Markdown from "../components/Markdown";
+import { explainAssistantError } from "../lib/assistant-errors";
 import { authClient } from "../lib/auth-client";
 import { BUILD_INFO } from "../lib/build-info";
 import { isAllowedFile, isImageMime, uploadFile } from "../lib/upload";
@@ -63,6 +65,11 @@ type ModelsPayload = {
   models: Array<{
     id: string;
     name: string;
+    attachment: boolean;
+    reasoning: boolean;
+    family: string;
+    context: number | null;
+    output: number | null;
   }>;
 };
 
@@ -74,6 +81,13 @@ type AssistantActivity = {
   query: string | null;
   detail: string | null;
 };
+
+const REASONING_OPTIONS: Array<{ value: ReasoningLevel; label: string }> = [
+  { value: "off", label: "Off" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+];
 
 function getDateGroup(iso: string): string {
   const date = new Date(iso);
@@ -246,6 +260,7 @@ export default function Home() {
   const [composer, setComposer] = createStore({
     text: "",
     modelId: "",
+    reasoningLevel: "off" as ReasoningLevel,
     search: false,
     sending: false,
     attachments: [] as Array<{
@@ -404,6 +419,7 @@ export default function Home() {
     const workspace = activeWorkspace();
     if (!workspace) return;
     setComposer("modelId", workspace.defaultModelId);
+    setComposer("reasoningLevel", workspace.defaultReasoningLevel ?? "off");
     setComposer("search", workspace.defaultSearchMode);
   });
 
@@ -422,6 +438,20 @@ export default function Home() {
       }
     }
   });
+
+  const selectedModel = createMemo(
+    () => (models()?.models ?? []).find((model) => model.id === composer.modelId) ?? null,
+  );
+  const selectedModelSupportsReasoning = createMemo(() => Boolean(selectedModel()?.reasoning));
+  const effectiveComposerReasoningLevel = createMemo<ReasoningLevel>(() =>
+    selectedModelSupportsReasoning() ? composer.reasoningLevel : "off",
+  );
+  const willDisableReasoningForKimiToolTurn = createMemo(
+    () =>
+      composer.search &&
+      effectiveComposerReasoningLevel() !== "off" &&
+      /(?:^|\/)kimi-k2\.5(?:$|[-/])/i.test(selectedModel()?.id ?? ""),
+  );
 
   // Auto-scroll only when user is already near the bottom
   createEffect(() => {
@@ -551,6 +581,7 @@ export default function Home() {
   const hasAssistantAnswerCard = (message: any) =>
     message.role === "assistant" &&
     (Boolean(message.text?.trim()) ||
+      message.status === "failed" ||
       (searchRunsMemo().get(message.id)?.length ?? 0) > 0 ||
       hasAssistantStats(message));
   const thinkingLabel = (messageId: string) => {
@@ -577,6 +608,21 @@ export default function Home() {
     }
 
     return parts.join(" • ") || "Live model activity";
+  };
+  const assistantError = (message: Message) =>
+    explainAssistantError({
+      errorCode: message.errorCode,
+      errorMessage: message.errorMessage,
+    });
+  const assistantProgressFailureSummary = (message: Message, activity: AssistantActivity) => {
+    if (
+      activity.state !== "failed" ||
+      activity.label !== "Response failed" ||
+      message.status !== "failed"
+    ) {
+      return null;
+    }
+    return assistantError(message).summary;
   };
 
   createEffect(() => {
@@ -631,7 +677,7 @@ export default function Home() {
                 <div class="msg-user-row">
                   <button
                     class="msg-retry-btn"
-                    title="Retry with current model"
+                    title="Retry with original settings"
                     onClick={() => retryMessage(message())}
                   >
                     <svg
@@ -725,7 +771,16 @@ export default function Home() {
                                 }}
                               >
                                 <span class="assistant-progress-marker" aria-hidden="true" />
-                                <span>{activity().label}</span>
+                                <div class="assistant-progress-copy">
+                                  <span>{activity().label}</span>
+                                  <Show
+                                    when={assistantProgressFailureSummary(message(), activity())}
+                                  >
+                                    {(summary) => (
+                                      <span class="assistant-progress-detail">{summary()}</span>
+                                    )}
+                                  </Show>
+                                </div>
                               </div>
                             )}
                           </Index>
@@ -770,10 +825,7 @@ export default function Home() {
                       when={message().status === "streaming"}
                       fallback={<Markdown text={message().text} />}
                     >
-                      <div class="assistant-streaming-text">
-                        <span>{message().text}</span>
-                        <span class="streaming-cursor" />
-                      </div>
+                      <Markdown text={message().text} streaming />
                     </Show>
                   </Show>
                   <Show when={searchRunsMemo().get(message().id)?.length}>
@@ -800,6 +852,19 @@ export default function Home() {
                           </div>
                         )}
                       </Index>
+                    </div>
+                  </Show>
+                  <Show when={message().status === "failed"}>
+                    <div class="assistant-error-card" role="alert">
+                      <div class="assistant-error-title">{assistantError(message()).title}</div>
+                      <div class="assistant-error-summary">{assistantError(message()).summary}</div>
+                      <p class="assistant-error-explanation">
+                        {assistantError(message()).explanation}
+                      </p>
+                      <details class="assistant-error-details">
+                        <summary>Technical details</summary>
+                        <pre>{assistantError(message()).details}</pre>
+                      </details>
                     </div>
                   </Show>
                   <Show when={hasAssistantStats(message())}>
@@ -859,6 +924,7 @@ export default function Home() {
   const createNewWorkspace = async () => {
     createWorkspaceAction(`Workspace ${workspaces().length + 1}`, {
       defaultModelId: composer.modelId || models()?.models?.[0]?.id || "auto",
+      defaultReasoningLevel: composer.reasoningLevel,
       defaultSearchMode: composer.search,
     });
   };
@@ -935,7 +1001,9 @@ export default function Home() {
   };
 
   const updateWorkspacePreferences = (
-    changes: Partial<Pick<Workspace, "defaultModelId" | "defaultSearchMode">>,
+    changes: Partial<
+      Pick<Workspace, "defaultModelId" | "defaultReasoningLevel" | "defaultSearchMode">
+    >,
   ) => {
     const workspace = activeWorkspace();
     if (!workspace) return;
@@ -956,18 +1024,23 @@ export default function Home() {
     updateWorkspacePreferences({ defaultSearchMode: search });
   };
 
+  const handleReasoningChange = (reasoningLevel: ReasoningLevel) => {
+    setComposer("reasoningLevel", reasoningLevel);
+    updateWorkspacePreferences({ defaultReasoningLevel: reasoningLevel });
+  };
+
   const retryMessage = (msg: any) => {
     if (!activeThread() || !msg.text?.trim()) return;
     const attachmentIds = userAttachments(msg.id)
       .filter((attachment) => attachment.status === "ready")
       .map((attachment) => attachment.id);
-    const modelId =
-      composer.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto";
     sendMessageAction({
       thread: activeThread()!,
       text: msg.text.trim(),
-      modelId,
-      search: composer.search,
+      modelId:
+        msg.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto",
+      reasoningLevel: (msg.reasoningLevel ?? "off") as ReasoningLevel,
+      search: Boolean(msg.searchEnabled),
       attachmentIds,
     });
   };
@@ -1008,6 +1081,7 @@ export default function Home() {
           activeWorkspace()?.defaultModelId ||
           models()?.models?.[0]?.id ||
           "auto",
+        reasoningLevel: effectiveComposerReasoningLevel(),
         search: composer.search,
         attachmentIds,
       });
@@ -1399,6 +1473,20 @@ export default function Home() {
                     {(model) => <option value={model.id}>{model.name}</option>}
                   </For>
                 </select>
+                <Show when={selectedModelSupportsReasoning()}>
+                  <select
+                    value={composer.reasoningLevel}
+                    title="Reasoning level"
+                    aria-label="Reasoning level"
+                    onChange={(event) =>
+                      handleReasoningChange(event.currentTarget.value as ReasoningLevel)
+                    }
+                  >
+                    <For each={REASONING_OPTIONS}>
+                      {(option) => <option value={option.value}>{option.label}</option>}
+                    </For>
+                  </select>
+                </Show>
                 <label class="search-toggle">
                   <input
                     type="checkbox"
@@ -1418,6 +1506,12 @@ export default function Home() {
                   {composer.sending ? "Sending…" : "Send"}
                 </button>
               </div>
+              <Show when={willDisableReasoningForKimiToolTurn()}>
+                <p class="composer-note">
+                  Thinking will be disabled for this turn because Kimi K2.5 is incompatible with
+                  tool-enabled turns in this app.
+                </p>
+              </Show>
             </footer>
           </Show>
         </main>

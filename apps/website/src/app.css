@@ -701,9 +701,20 @@ a {
 
 .assistant-progress-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.assistant-progress-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.assistant-progress-detail {
+  font-size: 0.72rem;
   color: var(--text-secondary);
 }
 
@@ -739,6 +750,58 @@ a {
   background: var(--panel);
   border: 1px solid var(--line);
   box-shadow: var(--shadow-sm);
+}
+
+.assistant-error-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(185, 74, 72, 0.18);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--panel) 84%, #b94a48 16%);
+}
+
+.assistant-error-title {
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: #b94a48;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.assistant-error-summary {
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.assistant-error-explanation {
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.assistant-error-details {
+  font-size: 0.76rem;
+}
+
+.assistant-error-details summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.assistant-error-details pre {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.76rem;
+  font-family:
+    ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 @keyframes pulse {
@@ -1068,6 +1131,7 @@ a {
 .composer-bar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -1103,6 +1167,11 @@ a {
   font-size: 0.7rem;
   color: var(--text-secondary);
   margin-left: 4px;
+}
+
+.composer-note {
+  font-size: 0.74rem;
+  color: var(--text-secondary);
 }
 
 /* ── Attach button ────────────────────────────────── */

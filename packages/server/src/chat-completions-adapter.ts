@@ -28,6 +28,48 @@ export type ExtendedStreamChunk = StreamChunk & {
 // Re-export types for consumers
 export type { ModelMessage, ContentPart, StreamChunk };
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+
+function createRequestSignal(input: { externalSignal?: AbortSignal; timeoutMs?: number }) {
+  const controller = new AbortController();
+  const timeoutMs = input.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  let abortListener: (() => void) | null = null;
+
+  const abort = (reason?: unknown) => {
+    if (!controller.signal.aborted) {
+      controller.abort(reason);
+    }
+  };
+
+  if (input.externalSignal) {
+    if (input.externalSignal.aborted) {
+      abort(input.externalSignal.reason);
+    } else {
+      abortListener = () => abort(input.externalSignal?.reason);
+      input.externalSignal.addEventListener("abort", abortListener, { once: true });
+    }
+  }
+
+  if (timeoutMs > 0) {
+    timeoutHandle = setTimeout(() => {
+      abort(new Error(`Upstream chat completion timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup() {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+      if (input.externalSignal && abortListener) {
+        input.externalSignal.removeEventListener("abort", abortListener);
+      }
+    },
+  };
+}
+
 /**
  * Extracts reasoning tokens from a usage object by performing a deep search.
  * Handles multiple naming conventions (snake_case, camelCase) and nested structures.
@@ -110,8 +152,10 @@ function convertToOpenAIMessages(
 
     const convertedMessage: Record<string, unknown> = {
       role: message.role,
-      content,
     };
+    if (content !== null) {
+      convertedMessage.content = content;
+    }
     if (message.role === "assistant" && message.toolCalls?.length) {
       convertedMessage.tool_calls = message.toolCalls.map((toolCall) => ({
         id: toolCall.id,
@@ -270,6 +314,10 @@ export class ChatCompletionsAdapter {
 
     const runId = generateId();
     const messageId = generateId();
+    const request = createRequestSignal({
+      externalSignal: options.abortController?.signal,
+      timeoutMs: this.config.timeout,
+    });
 
     // Emit RUN_STARTED
     yield {
@@ -279,65 +327,65 @@ export class ChatCompletionsAdapter {
       model: this.model,
     } as ExtendedStreamChunk;
 
-    const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.config.apiKey}`,
-        ...this.config.headers,
-      },
-      body: JSON.stringify({
-        model: this.model,
-        stream: true,
-        stream_options: { include_usage: true },
-        messages,
-        ...(tools ? { tools } : {}),
-        ...(options.temperature !== undefined && {
-          temperature: options.temperature,
-        }),
-        ...(options.maxTokens !== undefined && {
-          max_tokens: options.maxTokens,
-        }),
-        ...options.modelOptions,
-      }),
-      signal: options.abortController?.signal,
-    });
-
-    if (!response.ok || !response.body) {
-      const errorText = await response.text().catch(() => "Unknown error");
-      yield {
-        type: "RUN_ERROR",
-        runId,
-        error: {
-          message: `HTTP ${response.status}: ${errorText.slice(0, 500)}`,
-          code: String(response.status),
-        },
-      } as ExtendedStreamChunk;
-      return;
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let messageStarted = false;
-    let usage: ChatCompletionsUsage = {
-      promptTokens: null,
-      completionTokens: null,
-      reasoningTokens: null,
-    };
-    let finishReason: "stop" | "length" | "content_filter" | "tool_calls" | null = "stop";
-    const toolCalls = new Map<
-      number,
-      {
-        toolCallId: string;
-        toolName: string;
-        args: string;
-        started: boolean;
-      }
-    >();
-
     try {
+      const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.config.apiKey}`,
+          ...this.config.headers,
+        },
+        body: JSON.stringify({
+          model: this.model,
+          stream: true,
+          stream_options: { include_usage: true },
+          messages,
+          ...(tools ? { tools } : {}),
+          ...(options.temperature !== undefined && {
+            temperature: options.temperature,
+          }),
+          ...(options.maxTokens !== undefined && {
+            max_tokens: options.maxTokens,
+          }),
+          ...options.modelOptions,
+        }),
+        signal: request.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        const errorText = await response.text().catch(() => "Unknown error");
+        yield {
+          type: "RUN_ERROR",
+          runId,
+          error: {
+            message: `HTTP ${response.status}: ${errorText.slice(0, 500)}`,
+            code: String(response.status),
+          },
+        } as ExtendedStreamChunk;
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let messageStarted = false;
+      let usage: ChatCompletionsUsage = {
+        promptTokens: null,
+        completionTokens: null,
+        reasoningTokens: null,
+      };
+      let finishReason: "stop" | "length" | "content_filter" | "tool_calls" | null = "stop";
+      const toolCalls = new Map<
+        number,
+        {
+          toolCallId: string;
+          toolName: string;
+          args: string;
+          started: boolean;
+        }
+      >();
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -474,6 +522,26 @@ export class ChatCompletionsAdapter {
         } as ExtendedStreamChunk;
       }
 
+      for (const [, toolCall] of toolCalls) {
+        let parsedInput: unknown;
+        if (toolCall.args.trim()) {
+          try {
+            parsedInput = JSON.parse(toolCall.args);
+          } catch {
+            parsedInput = undefined;
+          }
+        }
+
+        yield {
+          type: "TOOL_CALL_END",
+          toolCallId: toolCall.toolCallId,
+          toolName: toolCall.toolName,
+          ...(parsedInput !== undefined ? { input: parsedInput } : {}),
+          timestamp: Date.now(),
+          model: this.model,
+        } as ExtendedStreamChunk;
+      }
+
       // Emit RUN_FINISHED with usage (including custom _reasoningTokens field)
       const finishedEvent: ExtendedStreamChunk = {
         type: "RUN_FINISHED",
@@ -508,6 +576,8 @@ export class ChatCompletionsAdapter {
         timestamp: Date.now(),
         model: this.model,
       } as ExtendedStreamChunk;
+    } finally {
+      request.cleanup();
     }
   }
 
@@ -522,58 +592,66 @@ export class ChatCompletionsAdapter {
       options.chatOptions.messages ?? [],
       options.chatOptions.systemPrompts,
     );
-
-    const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.config.apiKey}`,
-        ...this.config.headers,
-      },
-      body: JSON.stringify({
-        model: this.model,
-        stream: false,
-        messages,
-        ...(options.chatOptions.temperature !== undefined && {
-          temperature: options.chatOptions.temperature,
-        }),
-        ...(options.chatOptions.maxTokens !== undefined && {
-          max_tokens: options.chatOptions.maxTokens,
-        }),
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "structured_output",
-            schema: options.outputSchema,
-            strict: true,
-          },
-        },
-        ...options.chatOptions.modelOptions,
-      }),
-      signal: options.chatOptions.abortController?.signal,
+    const request = createRequestSignal({
+      externalSignal: options.chatOptions.abortController?.signal,
+      timeoutMs: this.config.timeout,
     });
 
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "Unknown error");
-      throw new Error(`HTTP ${response.status}: ${errorText.slice(0, 500)}`);
+    try {
+      const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.config.apiKey}`,
+          ...this.config.headers,
+        },
+        body: JSON.stringify({
+          model: this.model,
+          stream: false,
+          messages,
+          ...(options.chatOptions.temperature !== undefined && {
+            temperature: options.chatOptions.temperature,
+          }),
+          ...(options.chatOptions.maxTokens !== undefined && {
+            max_tokens: options.chatOptions.maxTokens,
+          }),
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "structured_output",
+              schema: options.outputSchema,
+              strict: true,
+            },
+          },
+          ...options.chatOptions.modelOptions,
+        }),
+        signal: request.signal,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "Unknown error");
+        throw new Error(`HTTP ${response.status}: ${errorText.slice(0, 500)}`);
+      }
+
+      const json = (await response.json()) as {
+        choices?: Array<{
+          message?: {
+            content?: string | Array<{ type?: string; text?: string }>;
+          };
+        }>;
+      };
+
+      const rawText = extractChatCompletionText(json.choices?.[0]?.message?.content);
+      const data = JSON.parse(rawText);
+
+      return {
+        data,
+        rawText,
+      };
+    } finally {
+      request.cleanup();
     }
-
-    const json = (await response.json()) as {
-      choices?: Array<{
-        message?: {
-          content?: string | Array<{ type?: string; text?: string }>;
-        };
-      }>;
-    };
-
-    const rawText = extractChatCompletionText(json.choices?.[0]?.message?.content);
-    const data = JSON.parse(rawText);
-
-    return {
-      data,
-      rawText,
-    };
   }
 }
 

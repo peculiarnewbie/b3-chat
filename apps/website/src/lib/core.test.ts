@@ -9,7 +9,9 @@ import {
 } from "@b3-chat/domain";
 import {
   allowedEmail,
+  chat,
   clampExaResults,
+  createChatCompletionsAdapter,
   extractReasoningTokens,
   extractChatCompletionText,
   filterModelsCatalog,
@@ -20,11 +22,14 @@ import {
   parseExaMcpTextResponse,
   verifyUploadToken,
 } from "@b3-chat/server";
-import { beforeEach, describe, expect, it } from "vite-plus/test";
+import { toolDefinition } from "@tanstack/ai";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { explainAssistantError } from "./assistant-errors";
 import { sendMessageAction } from "./actions";
 import { applyLocalInsert, messages, resetCollections, threads, workspaces } from "./collections";
 import { resetPendingOps } from "./pending-ops";
 import { processEnvelopes } from "./sync-adapter";
+import { normalizeAssistantError } from "../server/error-normalization";
 
 beforeEach(() => {
   resetCollections();
@@ -159,6 +164,7 @@ describe("domain helpers", () => {
         thread,
         text: "hello",
         modelId: workspace.defaultModelId,
+        reasoningLevel: "medium",
         search: false,
       }),
     ).not.toThrow();
@@ -172,6 +178,10 @@ describe("domain helpers", () => {
     expect(persistedThread?.title).toBe("hello");
     expect(optimisticMessages).toHaveLength(2);
     expect(optimisticMessages.map((message) => message.role).sort()).toEqual(["assistant", "user"]);
+    expect(optimisticMessages.map((message) => message.reasoningLevel)).toEqual([
+      "medium",
+      "medium",
+    ]);
   });
 
   it("applies authoritative upserts over optimistic rows without duplicate-key errors", () => {
@@ -255,6 +265,8 @@ describe("server helpers", () => {
 
     expect(result.models).toHaveLength(1);
     expect(result.models[0]?.id).toBe("openai/gpt-4.1");
+    expect(result.models[0]?.reasoning).toBe(false);
+    expect(result.models[0]?.family).toBe("unknown");
   });
 
   it("returns all opencode-go models when allowlist is omitted", () => {
@@ -287,11 +299,37 @@ describe("server helpers", () => {
     const workspace = createWorkspace({
       name: "Writing",
       defaultModelId: "openai/gpt-4.1",
+      defaultReasoningLevel: "high",
       defaultSearchMode: true,
     });
 
     expect(workspace.defaultSearchMode).toBe(true);
     expect(workspace.defaultModelId).toBe("openai/gpt-4.1");
+    expect(workspace.defaultReasoningLevel).toBe("high");
+  });
+
+  it("explains Kimi reasoning/tool incompatibility errors for the UI", () => {
+    const explained = explainAssistantError({
+      errorCode: "stream_error",
+      errorMessage:
+        'HTTP 400: {"error":{"message":"thinking is enabled but reasoning_content is missing"}}',
+    });
+
+    expect(explained.summary).toContain("thinking mode is incompatible");
+    expect(explained.explanation).toContain("Kimi K2.5 requires hidden reasoning context");
+  });
+
+  it("normalizes provider reasoning incompatibility on the server", () => {
+    const normalized = normalizeAssistantError({
+      errorCode: "stream_error",
+      errorMessage:
+        'HTTP 400: {"error":{"message":"reasoning_content is missing for continuation"}}',
+      modelId: "moonshot/kimi-k2.5",
+    });
+
+    expect(normalized.errorCode).toBe("provider_reasoning_incompatible");
+    expect(normalized.retryable).toBe(false);
+    expect(normalized.providerName).toBe("moonshot");
   });
 
   it("extracts fallback Exa MCP search text", () => {
@@ -334,6 +372,90 @@ describe("server helpers", () => {
     ).toBe(64);
 
     expect(extractReasoningTokens({ completion_tokens: 42 })).toBe(null);
+  });
+
+  it("completes provider tool calls and omits null assistant content on continuation", async () => {
+    const requests: Array<Record<string, any>> = [];
+    const originalFetch = globalThis.fetch;
+    let callCount = 0;
+    const encoder = new TextEncoder();
+
+    globalThis.fetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const rawBody = typeof init?.body === "string" ? init.body : "";
+      requests.push(JSON.parse(rawBody));
+      callCount += 1;
+
+      const sse =
+        callCount === 1
+          ? [
+              'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exa_web_search","arguments":"{\\"query\\":\\"current f1 standings\\"}"}}]}}]}\n\n',
+              'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":5}}\n\n',
+              "data: [DONE]\n\n",
+            ]
+          : [
+              'data: {"choices":[{"delta":{"content":"Oscar Piastri leads."}}]}\n\n',
+              'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":7}}\n\n',
+              "data: [DONE]\n\n",
+            ];
+
+      const body = new ReadableStream({
+        start(controller) {
+          for (const chunk of sse) {
+            controller.enqueue(encoder.encode(chunk));
+          }
+          controller.close();
+        },
+      });
+
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const adapter = createChatCompletionsAdapter(
+        {
+          baseUrl: "https://api.example.com",
+          apiKey: "test-key",
+        },
+        "openai/gpt-4.1",
+      );
+
+      const searchTool = toolDefinition({
+        name: "exa_web_search",
+        description: "Search the web",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+          },
+          required: ["query"],
+          additionalProperties: false,
+        },
+      }).server(async () => "Search grounding");
+
+      const chunks = [];
+      for await (const chunk of chat({
+        adapter,
+        messages: [{ role: "user", content: "who leads the 2026 f1 wdc?" }],
+        tools: [searchTool],
+      })) {
+        chunks.push(chunk);
+      }
+
+      expect(requests).toHaveLength(2);
+      expect(chunks.some((chunk: any) => chunk.type === "TOOL_CALL_END")).toBe(true);
+
+      const continuationMessages = requests[1]?.messages ?? [];
+      const assistantToolCall = continuationMessages.find(
+        (message: any) => message.role === "assistant" && Array.isArray(message.tool_calls),
+      );
+      expect(assistantToolCall).toBeTruthy();
+      expect("content" in assistantToolCall).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("clamps exa result counts", () => {

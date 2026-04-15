@@ -18,12 +18,15 @@ const OptionalOptimisticRowFields = {
   opId: Schema.optional(NullableString),
 } as const;
 
+export const ReasoningLevel = Schema.Literal("off", "low", "medium", "high");
+
 export const WorkspaceRow = Schema.Struct({
   id: Schema.String,
   name: Schema.String,
   slug: Schema.String,
   systemPrompt: Schema.String,
   defaultModelId: Schema.String,
+  defaultReasoningLevel: ReasoningLevel,
   defaultSearchMode: Schema.Boolean,
   createdAt: Schema.String,
   updatedAt: Schema.String,
@@ -59,6 +62,7 @@ export const MessageRow = Schema.Struct({
   role: Schema.String,
   status: MessageStatus,
   modelId: Schema.String,
+  reasoningLevel: ReasoningLevel,
   text: Schema.String,
   createdAt: Schema.String,
   updatedAt: Schema.String,
@@ -150,6 +154,7 @@ export type MessagePart = Schema.Schema.Type<typeof MessagePartRow>;
 export type Attachment = Schema.Schema.Type<typeof AttachmentRow>;
 export type SearchRun = Schema.Schema.Type<typeof SearchRunRow>;
 export type SearchResult = Schema.Schema.Type<typeof SearchResultRow>;
+export type ReasoningLevel = Schema.Schema.Type<typeof ReasoningLevel>;
 
 export function mergeAttachmentLink(
   existing: Pick<Attachment, "messageId"> | null | undefined,
@@ -205,6 +210,7 @@ export type CreateUserMessagePayload = {
   thread: Thread;
   promptText: string;
   modelId: string;
+  reasoningLevel: ReasoningLevel;
   search: boolean;
   attachmentIds: string[];
 };
@@ -213,6 +219,7 @@ export type StartAssistantTurnPayload = {
   threadId: string;
   assistantMessage: Message;
   modelId: string;
+  reasoningLevel: ReasoningLevel;
   search: boolean;
 };
 
@@ -418,6 +425,7 @@ export function createWorkspace(input: {
   name: string;
   defaultModelId: string;
   systemPrompt?: string;
+  defaultReasoningLevel?: ReasoningLevel;
   defaultSearchMode?: boolean;
 }) {
   const now = nowIso();
@@ -427,6 +435,7 @@ export function createWorkspace(input: {
     slug: slugify(input.name) || createId("space"),
     systemPrompt: input.systemPrompt ?? "",
     defaultModelId: input.defaultModelId,
+    defaultReasoningLevel: input.defaultReasoningLevel ?? "off",
     defaultSearchMode: input.defaultSearchMode ?? false,
     createdAt: now,
     updatedAt: now,
@@ -453,6 +462,7 @@ export function createMessage(input: {
   threadId: string;
   role: "user" | "assistant" | "system";
   modelId: string;
+  reasoningLevel?: ReasoningLevel;
   text?: string;
   status?: "queued" | "pending" | "streaming" | "completed" | "failed" | "cancelled";
   searchEnabled?: boolean;
@@ -464,6 +474,7 @@ export function createMessage(input: {
     role: input.role,
     status: input.status ?? "completed",
     modelId: input.modelId,
+    reasoningLevel: input.reasoningLevel ?? "off",
     text: input.text ?? "",
     createdAt: now,
     updatedAt: now,

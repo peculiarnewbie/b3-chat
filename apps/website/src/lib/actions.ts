@@ -7,8 +7,10 @@ import {
   summarizeThreadTitle,
   toWire,
   type Attachment,
-  type Thread,
   type CreateUserMessagePayload,
+  type ReasoningLevel,
+  type Thread,
+  type Workspace,
 } from "@b3-chat/domain";
 import { dispatch } from "./pending-ops";
 import {
@@ -103,12 +105,17 @@ export function confirmOp(opId: string) {
 
 export function createWorkspaceAction(
   name: string,
-  input: { defaultModelId: string; defaultSearchMode?: boolean },
+  input: {
+    defaultModelId: string;
+    defaultReasoningLevel?: ReasoningLevel;
+    defaultSearchMode?: boolean;
+  },
 ) {
   const opId = createId("op");
   const workspace = createWorkspace({
     name,
     defaultModelId: input.defaultModelId,
+    defaultReasoningLevel: input.defaultReasoningLevel,
     defaultSearchMode: input.defaultSearchMode,
   });
   const initialThread = createThread({ workspaceId: workspace.id });
@@ -187,7 +194,7 @@ export function updateThreadAction(thread: Thread) {
   dispatch("update_thread", { thread: toWire(thread, opId) }, { opId });
 }
 
-export function updateWorkspaceAction(workspace: any) {
+export function updateWorkspaceAction(workspace: Workspace) {
   const opId = createId("op");
   const existing = workspaces.get(workspace.id);
   applyLocalUpdate("workspaces", toLocalSyncRow(workspace, opId));
@@ -201,6 +208,7 @@ export function sendMessageAction(input: {
   thread: Thread;
   text: string;
   modelId: string;
+  reasoningLevel: ReasoningLevel;
   search: boolean;
   attachmentIds?: string[];
 }) {
@@ -218,6 +226,7 @@ export function sendMessageAction(input: {
     threadId: input.thread.id,
     role: "user",
     modelId: input.modelId,
+    reasoningLevel: input.reasoningLevel,
     text: input.text,
     searchEnabled: input.search,
     status: "completed",
@@ -226,6 +235,7 @@ export function sendMessageAction(input: {
     threadId: input.thread.id,
     role: "assistant",
     modelId: input.modelId,
+    reasoningLevel: input.reasoningLevel,
     text: "",
     searchEnabled: input.search,
     status: "pending",
@@ -267,6 +277,7 @@ export function sendMessageAction(input: {
       assistantMessage: toWire(assistantMessage, opId),
       promptText: input.text,
       modelId: input.modelId,
+      reasoningLevel: input.reasoningLevel,
       search: input.search,
       attachmentIds: input.attachmentIds ?? [],
     } satisfies CreateUserMessagePayload,

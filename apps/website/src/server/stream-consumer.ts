@@ -9,6 +9,7 @@
 import type { ExtendedStreamChunk } from "@b3-chat/server";
 import { nowIso, type MessagePart } from "@b3-chat/domain";
 import type { SearchProgressEvent } from "./search";
+import { normalizeAssistantError } from "./error-normalization";
 
 /** Threshold for flushing accumulated deltas to the client */
 const DELTA_FLUSH_THRESHOLD = 96;
@@ -239,13 +240,16 @@ export async function consumeAssistantStream(
 
         case "RUN_ERROR": {
           const errorChunk = chunk as { error?: { message?: string; code?: string } };
-          const errorMessage = errorChunk.error?.message ?? "Unknown error";
+          const normalizedError = normalizeAssistantError({
+            errorCode: errorChunk.error?.code,
+            errorMessage: errorChunk.error?.message ?? "Unknown error",
+          });
 
           // Emit message_failed event
           const failed = await appendServerEvent(null, "message_failed", {
             messageId,
-            errorCode: errorChunk.error?.code ?? "stream_error",
-            errorMessage,
+            errorCode: normalizedError.errorCode,
+            errorMessage: normalizedError.errorMessage,
             updatedAt: nowIso(),
           });
           broadcast(failed);
@@ -253,14 +257,17 @@ export async function consumeAssistantStream(
           await reportActivity({
             label: "Response failed",
             state: "failed",
-            detail: errorMessage,
+            detail: normalizedError.errorMessage,
           });
 
           log?.("assistant_turn_failed", {
             assistantMessageId: messageId,
             chunkCount,
             deltaCount,
-            error: errorMessage,
+            error: normalizedError.errorMessage,
+            normalizedErrorCode: normalizedError.errorCode,
+            providerName: normalizedError.providerName,
+            retryable: normalizedError.retryable,
           });
 
           return {
@@ -271,7 +278,7 @@ export async function consumeAssistantStream(
             completionTokens: sawUsage ? completionTokens : null,
             reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
             success: false,
-            errorMessage,
+            errorMessage: normalizedError.errorMessage,
           };
         }
 
@@ -310,13 +317,16 @@ export async function consumeAssistantStream(
       success: true,
     };
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
+    const normalizedError = normalizeAssistantError({
+      errorCode: "stream_error",
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
 
     // Emit message_failed event
     const failed = await appendServerEvent(null, "message_failed", {
       messageId,
-      errorCode: "stream_error",
-      errorMessage,
+      errorCode: normalizedError.errorCode,
+      errorMessage: normalizedError.errorMessage,
       updatedAt: nowIso(),
     });
     broadcast(failed);
@@ -324,14 +334,17 @@ export async function consumeAssistantStream(
     await reportActivity({
       label: "Response failed",
       state: "failed",
-      detail: errorMessage,
+      detail: normalizedError.errorMessage,
     });
 
     log?.("assistant_turn_failed", {
       assistantMessageId: messageId,
       chunkCount,
       deltaCount,
-      error: errorMessage,
+      error: normalizedError.errorMessage,
+      normalizedErrorCode: normalizedError.errorCode,
+      providerName: normalizedError.providerName,
+      retryable: normalizedError.retryable,
     });
 
     return {
@@ -342,7 +355,7 @@ export async function consumeAssistantStream(
       completionTokens: sawUsage ? completionTokens : null,
       reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
       success: false,
-      errorMessage,
+      errorMessage: normalizedError.errorMessage,
     };
   }
 }

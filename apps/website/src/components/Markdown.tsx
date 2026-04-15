@@ -1,4 +1,4 @@
-import { createMemo, type Component } from "solid-js";
+import { createMemo, Show, type Component } from "solid-js";
 import { Marked, Renderer } from "marked";
 import { markedHighlight } from "marked-highlight";
 import DOMPurify from "dompurify";
@@ -46,7 +46,7 @@ const marked = new Marked(
 );
 marked.use({ renderer });
 
-const Markdown: Component<{ text: string }> = (props) => {
+const Markdown: Component<{ text: string; streaming?: boolean }> = (props) => {
   const html = createMemo(() => {
     const raw = props.text || "";
     const rendered = marked.parse(raw, { async: false }) as string;
@@ -67,7 +67,14 @@ const Markdown: Component<{ text: string }> = (props) => {
     }, 1500);
   };
 
-  return <div class="md-content" innerHTML={html()} onClick={handleClick} />;
+  return (
+    <div classList={{ "assistant-streaming-text": !!props.streaming }}>
+      <div class="md-content" innerHTML={html()} onClick={handleClick} />
+      <Show when={props.streaming}>
+        <span class="streaming-cursor" aria-hidden="true" />
+      </Show>
+    </div>
+  );
 };
 
 export default Markdown;
