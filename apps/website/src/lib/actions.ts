@@ -36,6 +36,14 @@ type CollectionWithRows = {
 
 const optimisticByOp = new Map<string, OptimisticEntry[]>();
 
+function toLocalSyncRow<T extends object>(row: T, opId: string) {
+  return {
+    ...row,
+    optimistic: false as const,
+    opId,
+  };
+}
+
 function trackOptimistic(opId: string, entries: OptimisticEntry[]) {
   optimisticByOp.set(opId, entries);
 }
@@ -106,8 +114,8 @@ export function createWorkspaceAction(
   const initialThread = createThread({ workspaceId: workspace.id });
 
   // Optimistic
-  applyLocalInsert("workspaces", workspace);
-  applyLocalInsert("threads", initialThread);
+  applyLocalInsert("workspaces", toLocalSyncRow(workspace, opId));
+  applyLocalInsert("threads", toLocalSyncRow(initialThread, opId));
   setActiveWorkspaceId(workspace.id);
   setActiveThreadId(initialThread.id);
   trackOptimistic(opId, [
@@ -129,7 +137,7 @@ export function createThreadAction(workspaceId: string) {
   const opId = createId("op");
   const thread = createThread({ workspaceId });
 
-  applyLocalInsert("threads", thread);
+  applyLocalInsert("threads", toLocalSyncRow(thread, opId));
   setActiveThreadId(thread.id);
   trackOptimistic(opId, [deleteRow("threads", thread.id)]);
 
@@ -172,7 +180,7 @@ export function archiveWorkspaceAction(workspaceId: string) {
 export function updateThreadAction(thread: Thread) {
   const opId = createId("op");
   const existing = threads.get(thread.id);
-  applyLocalUpdate("threads", thread);
+  applyLocalUpdate("threads", toLocalSyncRow(thread, opId));
   if (existing) {
     trackOptimistic(opId, [restoreRow("threads", threads, existing)]);
   }
@@ -182,7 +190,7 @@ export function updateThreadAction(thread: Thread) {
 export function updateWorkspaceAction(workspace: any) {
   const opId = createId("op");
   const existing = workspaces.get(workspace.id);
-  applyLocalUpdate("workspaces", workspace);
+  applyLocalUpdate("workspaces", toLocalSyncRow(workspace, opId));
   if (existing) {
     trackOptimistic(opId, [restoreRow("workspaces", workspaces, existing)]);
   }
@@ -224,9 +232,9 @@ export function sendMessageAction(input: {
   });
 
   // Optimistic mutations
-  applyLocalUpdate("threads", threadUpdate);
-  applyLocalInsert("messages", userMessage);
-  applyLocalInsert("messages", assistantMessage);
+  applyLocalUpdate("threads", toLocalSyncRow(threadUpdate, opId));
+  applyLocalInsert("messages", toLocalSyncRow(userMessage, opId));
+  applyLocalInsert("messages", toLocalSyncRow(assistantMessage, opId));
 
   const rollbackEntries: OptimisticEntry[] = [
     restoreRow("threads", threads, input.thread),
@@ -243,6 +251,8 @@ export function sendMessageAction(input: {
       ...existing,
       messageId: userMessage.id,
       status: "ready",
+      optimistic: false,
+      opId,
     });
   }
 

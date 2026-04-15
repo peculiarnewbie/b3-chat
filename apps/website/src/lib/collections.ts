@@ -65,6 +65,7 @@ function createSyncedCollection<T extends object>(id: string, getKey: (item: T) 
     id,
     getKey,
     startSync: true,
+    utils: {},
     sync: {
       sync: ({ begin, write, commit, markReady, truncate }) => {
         channels.set(id, { begin, write, commit, markReady, truncate } as SyncWriter<any, any>);

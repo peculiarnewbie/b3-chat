@@ -6,7 +6,6 @@ import * as pendingOps from "./pending-ops";
 // ---------------------------------------------------------------------------
 
 const CLIENT_ID_KEY = "b3.clientId";
-const LAST_SERVER_SEQ_KEY = "b3.lastServerSeq";
 
 function readJson<T>(key: string, fallback: T): T {
   if (typeof localStorage === "undefined") return fallback;
@@ -24,7 +23,7 @@ if (typeof localStorage !== "undefined") {
   localStorage.setItem(CLIENT_ID_KEY, JSON.stringify(clientId));
 }
 
-let lastServerSeq = readJson(LAST_SERVER_SEQ_KEY, 0);
+let lastServerSeq = 0;
 
 export function getLastServerSeq() {
   return lastServerSeq;
@@ -32,9 +31,6 @@ export function getLastServerSeq() {
 
 export function setLastServerSeq(seq: number) {
   lastServerSeq = seq;
-  if (typeof localStorage !== "undefined") {
-    localStorage.setItem(LAST_SERVER_SEQ_KEY, JSON.stringify(seq));
-  }
 }
 
 // ---------------------------------------------------------------------------
