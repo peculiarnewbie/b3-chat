@@ -455,8 +455,14 @@ export default function Home() {
       (allMessages() as Message[]).filter((message) => message.threadId === activeThread()?.id),
     ).map((message) => message.id),
   );
-  const messageById = (messageId: string) =>
-    messagesCollection.get(messageId) as Message | undefined;
+  const messagesById = createMemo(() => {
+    const byId = new Map<string, Message>();
+    for (const message of allMessages() as Message[]) {
+      byId.set(message.id, message);
+    }
+    return byId;
+  });
+  const messageById = (messageId: string) => messagesById().get(messageId);
   const streamingThreadIds = createMemo(() => {
     const ids = new Set<string>();
     for (const msg of allMessages() as Message[]) {

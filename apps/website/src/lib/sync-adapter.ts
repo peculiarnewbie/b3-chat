@@ -11,6 +11,7 @@ import {
   workspaces,
   threads,
   messages,
+  messageParts,
   attachments,
   searchRuns,
   searchResults,
@@ -56,12 +57,33 @@ function coalesceDeltas(envelopes: EventEnvelope[]): EventEnvelope[] {
 // Helpers to push data through the sync writer (server-authoritative data)
 // ---------------------------------------------------------------------------
 
+function hasRow(collectionId: string, key: string) {
+  switch (collectionId) {
+    case "workspaces":
+      return Boolean(workspaces.get(key));
+    case "threads":
+      return Boolean(threads.get(key));
+    case "messages":
+      return Boolean(messages.get(key));
+    case "messageParts":
+      return Boolean(messageParts.get(key));
+    case "attachments":
+      return Boolean(attachments.get(key));
+    case "searchRuns":
+      return Boolean(searchRuns.get(key));
+    case "searchResults":
+      return Boolean(searchResults.get(key));
+    default:
+      return false;
+  }
+}
+
 function syncUpsert<T extends object>(collectionId: string, _key: string, value: T) {
   const writer = getSyncWriter<T>(collectionId);
   if (!writer) return;
   writer.begin();
   // Key is derived from getKey(value) by the collection; no key field for insert/update
-  writer.write({ type: "insert", value });
+  writer.write({ type: hasRow(collectionId, _key) ? "update" : "insert", value });
   writer.commit();
 }
 

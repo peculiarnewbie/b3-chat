@@ -24,6 +24,7 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 import { sendMessageAction } from "./actions";
 import { applyLocalInsert, messages, resetCollections, threads, workspaces } from "./collections";
 import { resetPendingOps } from "./pending-ops";
+import { processEnvelopes } from "./sync-adapter";
 
 beforeEach(() => {
   resetCollections();
@@ -171,6 +172,46 @@ describe("domain helpers", () => {
     expect(persistedThread?.title).toBe("hello");
     expect(optimisticMessages).toHaveLength(2);
     expect(optimisticMessages.map((message) => message.role).sort()).toEqual(["assistant", "user"]);
+  });
+
+  it("applies authoritative upserts over optimistic rows without duplicate-key errors", () => {
+    const workspace = createWorkspace({
+      name: "Writing",
+      defaultModelId: "openai/gpt-4.1",
+    });
+    const originalThread = createThread({ workspaceId: workspace.id, title: "New Chat" });
+
+    applyLocalInsert("workspaces", workspace);
+    applyLocalInsert("threads", originalThread);
+
+    const updatedThread = {
+      ...originalThread,
+      title: "what time is it?",
+    };
+
+    expect(() =>
+      processEnvelopes([
+        {
+          type: "event",
+          serverSeq: 1,
+          eventId: "evt_workspace",
+          eventType: "workspace_upserted",
+          payload: { row: workspace },
+          causedByOpId: "op_workspace",
+        },
+        {
+          type: "event",
+          serverSeq: 2,
+          eventId: "evt_thread",
+          eventType: "thread_upserted",
+          payload: { row: updatedThread },
+          causedByOpId: "op_thread",
+        },
+      ]),
+    ).not.toThrow();
+
+    expect(workspaces.get(workspace.id)?.id).toBe(workspace.id);
+    expect(threads.get(originalThread.id)?.title).toBe("what time is it?");
   });
 });
 
