@@ -13,6 +13,7 @@
   "dependencies": {
     "@b3-chat/domain": "workspace:*",
     "@better-auth/infra": "catalog:",
+    "@tanstack/ai": "0.10.2",
     "better-auth": "^1.3.14",
     "drizzle-orm": "^0.44.5",
     "effect": "^3.18.4",

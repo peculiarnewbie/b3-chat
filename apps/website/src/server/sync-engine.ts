@@ -31,14 +31,16 @@ import {
 } from "@b3-chat/domain";
 import {
   completeTextAttachment,
-  extractReasoningTokens,
+  createChatCompletionsAdapter,
   getDefaultModelId,
   getSignedAttachmentUrl,
   isImageAttachment,
   isInlineTextAttachment,
   type AppEnv,
+  type SimpleModelMessage,
 } from "@b3-chat/server";
 import { prepareAssistantSearch, type SearchProgressEvent } from "./search";
+import { consumeAssistantStream, type StreamConsumerDeps } from "./stream-consumer";
 type SyncCommandResult = {
   ack?: SyncServerAck;
   events: SyncServerEvent[];
@@ -76,8 +78,6 @@ function looksLikeMissingRealtimeAccess(text: string) {
     text,
   );
 }
-
-const THINKING_TOKEN_REPORT_INTERVAL = 32;
 
 export class SyncEngineDurableObject {
   private initialized = false;
@@ -673,13 +673,6 @@ export class SyncEngineDurableObject {
       this.broadcast(searchEvent);
     }
 
-    const messages = await this.buildOpenAiMessages(snapshot, workspace.id, threadMessages);
-    if (searchContext) {
-      messages.push({
-        role: "system",
-        content: searchContext,
-      });
-    }
     await reportActivity({
       label:
         searchRuns.length > 0 ? "Grounded context ready, generating answer" : "Generating answer",
@@ -690,198 +683,61 @@ export class SyncEngineDurableObject {
           : undefined,
     });
 
-    const upstream = await fetch(
-      `${this.env.OPENCODE_GO_BASE_URL.replace(/\/$/, "")}/chat/completions`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.env.OPENCODE_GO_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: modelId,
-          stream: true,
-          stream_options: { include_usage: true },
-          messages,
-        }),
-      },
+    // Build model messages with resolved attachments
+    const { messages: modelMessages, systemPrompts } = await this.buildModelMessages(
+      snapshot,
+      workspace.id,
+      threadMessages,
+      searchContext,
     );
+
+    // Create adapter for streaming
+    const adapter = createChatCompletionsAdapter(
+      {
+        baseUrl: this.env.OPENCODE_GO_BASE_URL,
+        apiKey: this.env.OPENCODE_GO_API_KEY,
+      },
+      modelId,
+    );
+
     syncLog("assistant_turn_upstream", {
       assistantMessageId: payload.assistantMessage.id,
-      ok: upstream.ok,
-      status: upstream.status,
+      modelId,
+      messageCount: modelMessages.length,
+      systemPromptCount: systemPrompts.length,
     });
 
-    if (!upstream.ok || !upstream.body) {
-      await reportActivity({
-        label: "Failed to start response generation",
-        state: "failed",
-      });
-      const failed = await this.appendServerEvent(null, "message_failed", {
-        messageId: payload.assistantMessage.id,
-        errorCode: String(upstream.status),
-        errorMessage: await upstream.text(),
-        updatedAt: nowIso(),
-      });
-      this.broadcast(failed);
-      return;
-    }
-
-    const reader = upstream.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let accumulated = "";
-    let pendingDelta = "";
-    let chunkCount = 0;
-    let deltaCount = 0;
-    const streamStartedAt = Date.now();
-    let firstTokenAt: number | null = null;
-    let promptTokens: number | null = null;
-    let completionTokens: number | null = null;
-    let reasoningTokens: number | null = null;
-    let lastReportedReasoningTokens: number | null = null;
-    let responseStartedReported = false;
-
-    const flushDelta = async () => {
-      if (!pendingDelta) return;
-      deltaCount += 1;
-      accumulated += pendingDelta;
-      const deltaEvent = await this.appendServerEvent(null, "message_delta", {
-        messageId: payload.assistantMessage.id,
-        delta: pendingDelta,
-        updatedAt: nowIso(),
-      });
-      this.broadcast(deltaEvent);
-      syncLog("assistant_turn_delta", {
-        assistantMessageId: payload.assistantMessage.id,
-        chars: pendingDelta.length,
-        totalChars: accumulated.length,
-      });
-      pendingDelta = "";
+    // Create stream consumer dependencies
+    const consumerDeps: StreamConsumerDeps = {
+      appendServerEvent: (opId, eventType, eventPayload) =>
+        this.appendServerEvent(opId, eventType as any, eventPayload as any),
+      broadcast: (envelope) => this.broadcast(envelope as any),
+      appendMessagePart,
+      reportActivity,
+      messageId: payload.assistantMessage.id,
+      log: syncLog,
     };
 
-    const flushThinkingTokens = async (tokens: number) => {
-      if (lastReportedReasoningTokens != null && tokens <= lastReportedReasoningTokens) {
-        return;
-      }
-      lastReportedReasoningTokens = tokens;
-      const part = await appendMessagePart("thinking_tokens", {
-        text: String(tokens),
-        json: json({ tokens }),
-      });
-      syncLog("assistant_turn_thinking_tokens", {
-        assistantMessageId: payload.assistantMessage.id,
-        seq: part.seq,
-        thinkingTokens: tokens,
-      });
-    };
+    // Stream using TanStack AI adapter
+    const stream = adapter.chatStream({
+      messages: modelMessages,
+      systemPrompts,
+    });
 
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunkCount += 1;
-        buffer += decoder.decode(value, { stream: true });
-        while (buffer.includes("\n\n")) {
-          const idx = buffer.indexOf("\n\n");
-          const block = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 2);
-          const dataLines = block
-            .split("\n")
-            .filter((line) => line.startsWith("data:"))
-            .map((line) => line.slice(5).trim());
-          if (dataLines.length === 0) continue;
-          const payloadJson = dataLines.join("\n");
-          if (payloadJson === "[DONE]") continue;
-          const parsed = JSON.parse(payloadJson);
-          if (parsed.usage) {
-            promptTokens = parsed.usage.prompt_tokens ?? null;
-            completionTokens = parsed.usage.completion_tokens ?? null;
-            const nextReasoningTokens = extractReasoningTokens(parsed.usage);
-            if (nextReasoningTokens != null) {
-              reasoningTokens = nextReasoningTokens;
-              if (
-                lastReportedReasoningTokens === null ||
-                nextReasoningTokens - lastReportedReasoningTokens >= THINKING_TOKEN_REPORT_INTERVAL
-              ) {
-                await flushThinkingTokens(nextReasoningTokens);
-              }
-            }
-          }
-          const delta = parsed.choices?.[0]?.delta?.content ?? "";
-          if (!delta) continue;
-          if (firstTokenAt === null) {
-            firstTokenAt = Date.now();
-          }
-          if (!responseStartedReported) {
-            responseStartedReported = true;
-            await reportActivity({
-              label: "Response streaming",
-              state: "completed",
-            });
-          }
-          pendingDelta += delta;
-          if (pendingDelta.length >= 96 || /\n/.test(pendingDelta)) {
-            await flushDelta();
-          }
-        }
-      }
-      await flushDelta();
-      if (reasoningTokens != null && reasoningTokens !== lastReportedReasoningTokens) {
-        await flushThinkingTokens(reasoningTokens);
-      }
-      const durationMs = Date.now() - streamStartedAt;
-      const ttftMs = firstTokenAt !== null ? firstTokenAt - streamStartedAt : null;
-      const completed = await this.appendServerEvent(null, "message_completed", {
-        messageId: payload.assistantMessage.id,
-        text: accumulated,
-        updatedAt: nowIso(),
-        durationMs,
-        ttftMs,
-        promptTokens,
-        completionTokens,
-      });
-      this.broadcast(completed);
-      await reportActivity({
-        label: "Response complete",
-        state: "completed",
-      });
-      syncLog("assistant_turn_completed", {
-        assistantMessageId: payload.assistantMessage.id,
-        chunkCount,
-        deltaCount,
-        totalChars: accumulated.length,
-        preview: previewText(accumulated),
-        searchRunCount: searchRuns.length,
-        searchGroundingChars: searchContext.length,
-      });
-      syncLog("assistant_turn_answer_sanity", {
-        assistantMessageId: payload.assistantMessage.id,
-        searched: searchRuns.length > 0,
-        likelyIgnoredGrounding:
-          searchRuns.length > 0 && looksLikeMissingRealtimeAccess(accumulated),
-        answerPreview: previewText(accumulated),
-      });
-    } catch (error) {
-      const failed = await this.appendServerEvent(null, "message_failed", {
-        messageId: payload.assistantMessage.id,
-        errorCode: "stream_error",
-        errorMessage: error instanceof Error ? error.message : String(error),
-        updatedAt: nowIso(),
-      });
-      this.broadcast(failed);
-      await reportActivity({
-        label: "Response failed",
-        state: "failed",
-        detail: error instanceof Error ? error.message : String(error),
-      });
-      console.error("[sync-do] assistant_turn_failed", {
-        assistantMessageId: payload.assistantMessage.id,
-        chunkCount,
-        deltaCount,
-        error,
-      });
-    }
+    const result = await consumeAssistantStream(stream, consumerDeps);
+
+    // Log completion metrics
+    syncLog("assistant_turn_search_grounding", {
+      assistantMessageId: payload.assistantMessage.id,
+      searchRunCount: searchRuns.length,
+      searchGroundingChars: searchContext.length,
+    });
+    syncLog("assistant_turn_answer_sanity", {
+      assistantMessageId: payload.assistantMessage.id,
+      searched: searchRuns.length > 0,
+      likelyIgnoredGrounding: searchRuns.length > 0 && looksLikeMissingRealtimeAccess(result.text),
+      answerPreview: previewText(result.text),
+    });
   }
 
   private getThreadMessages(
@@ -901,59 +757,82 @@ export class SyncEngineDurableObject {
     return sortConversationMessages([...byId.values()]);
   }
 
-  private async buildOpenAiMessages(
+  /**
+   * Builds TanStack AI ModelMessage array from thread messages.
+   * Resolves attachments (images → signed URLs, text → inline content).
+   * Returns messages and system prompts separately for the adapter.
+   */
+  private async buildModelMessages(
     snapshot: SyncSnapshot,
     workspaceId: string,
     threadMessages: Message[],
-  ) {
+    searchContext?: string,
+  ): Promise<{ messages: SimpleModelMessage[]; systemPrompts: string[] }> {
     const workspace = snapshot.tables?.[TABLES.workspaces]?.[workspaceId];
     const threadId = threadMessages[0]?.threadId;
     const attachments = Object.values<any>(snapshot.tables?.[TABLES.attachments] ?? {}).filter(
       (attachment) => attachment.threadId === threadId && attachment.status === "ready",
     );
 
-    const result: Array<Record<string, unknown>> = [];
+    const systemPrompts: string[] = [];
     if (workspace?.systemPrompt) {
-      result.push({
-        role: "system",
-        content: workspace.systemPrompt,
-      });
+      systemPrompts.push(workspace.systemPrompt);
     }
+    if (searchContext) {
+      systemPrompts.push(searchContext);
+    }
+
+    const messages: SimpleModelMessage[] = [];
 
     for (const message of threadMessages) {
       if (message.status === "failed" || message.status === "cancelled") continue;
-      const inlineParts: Array<Record<string, unknown> | string> = [];
-      if (message.text?.trim()) inlineParts.push(message.text);
+
+      const contentParts: Array<
+        | string
+        | { type: "text"; content: string }
+        | { type: "image"; source: { type: "url"; value: string } }
+      > = [];
+
+      if (message.text?.trim()) {
+        contentParts.push(message.text);
+      }
+
       if (message.role === "user") {
         for (const attachment of attachments) {
           if (attachment.messageId && attachment.messageId !== message.id) continue;
           if (isImageAttachment(attachment.mimeType)) {
-            inlineParts.push({
-              type: "image_url",
-              image_url: {
-                url: await getSignedAttachmentUrl(this.env, attachment.objectKey),
-              },
+            const signedUrl = await getSignedAttachmentUrl(this.env, attachment.objectKey);
+            contentParts.push({
+              type: "image",
+              source: { type: "url", value: signedUrl },
             });
             continue;
           }
           if (isInlineTextAttachment(attachment.mimeType, attachment.sizeBytes)) {
             const text = await completeTextAttachment(this.env, attachment.objectKey);
-            if (text)
-              inlineParts.push(`Attachment ${attachment.fileName}:\n${text.slice(0, 10_000)}`);
+            if (text) {
+              contentParts.push(`Attachment ${attachment.fileName}:\n${text.slice(0, 10_000)}`);
+            }
           }
         }
       }
-      if (message.role === "assistant" && inlineParts.length === 0) continue;
-      result.push({
-        role: message.role,
-        content:
-          inlineParts.length <= 1 && typeof inlineParts[0] === "string"
-            ? inlineParts[0]
-            : inlineParts,
+
+      // Skip empty assistant messages
+      if (message.role === "assistant" && contentParts.length === 0) continue;
+
+      // Flatten content if only one string part
+      const content =
+        contentParts.length === 1 && typeof contentParts[0] === "string"
+          ? contentParts[0]
+          : contentParts;
+
+      messages.push({
+        role: message.role as "user" | "assistant",
+        content,
       });
     }
 
-    return result;
+    return { messages, systemPrompts };
   }
 
   private normalizeWorkspace(row: Workspace, opId: string) {

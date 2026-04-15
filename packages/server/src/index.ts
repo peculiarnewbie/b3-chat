@@ -1,3 +1,14 @@
+export {
+  ChatCompletionsAdapter,
+  createChatCompletionsAdapter,
+  type ChatCompletionsAdapterConfig,
+  type ChatCompletionsUsage,
+  type SimpleModelMessage,
+  type ContentPart,
+  type SimpleChatOptions,
+  type StreamEvent,
+} from "./chat-completions-adapter.js";
+import { createChatCompletionsAdapter } from "./chat-completions-adapter.js";
 import { betterAuth } from "better-auth";
 import { dash } from "@better-auth/infra";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
@@ -106,14 +117,6 @@ type ExaSearchResult = {
 
 type ExaSearchResponse = {
   results?: ExaSearchResult[];
-};
-
-type ChatCompletionResponse = {
-  choices?: Array<{
-    message?: {
-      content?: string | Array<{ type?: string; text?: string }>;
-    };
-  }>;
 };
 
 export type SearchQueryDecision = {
@@ -509,6 +512,22 @@ export function parseSearchQueryDecision(text: string): SearchQueryDecision {
   };
 }
 
+const searchPlannerSystemPrompt = [
+  "Decide whether the assistant should perform a web search before answering.",
+  `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
+  "Return JSON only with this exact shape:",
+  '{"shouldSearch":boolean,"query":string}',
+  "Read the recent raw conversation and resolve follow-ups, references, dates, and timeframe from that context.",
+  "If the latest user message depends on current or external information, set shouldSearch=true and rewrite it into one clean search query.",
+  'Examples of contextual follow-ups include "what about now?", "now you can search for it", "look it up", "search that", and bare follow-ups like "2026".',
+  'If the user can be answered from conversation alone, set shouldSearch=false and query="".',
+  'If the user is asking whether search is available or supported, set shouldSearch=false and query="".',
+  "Do not search casual chat, rewriting, summarization of provided text, or repo-local coding questions.",
+  "Do not return a literal deictic query containing unresolved words like this, that, it, now, or only a year if the conversation provides the missing referent.",
+  'If search is not needed, return exactly {"shouldSearch":false,"query":""}.',
+  "Return no prose, no markdown, no explanation.",
+].join("\n");
+
 export async function decideSearchQuery(
   env: AppEnv,
   input: {
@@ -516,49 +535,21 @@ export async function decideSearchQuery(
     planningContext: string;
   },
 ) {
-  const response = await fetch(`${env.OPENCODE_GO_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${env.OPENCODE_GO_API_KEY}`,
+  const adapter = createChatCompletionsAdapter(
+    {
+      baseUrl: env.OPENCODE_GO_BASE_URL,
+      apiKey: env.OPENCODE_GO_API_KEY,
     },
-    body: JSON.stringify({
-      model: getSearchPlannerModelId(),
-      stream: false,
-      temperature: 0,
-      max_tokens: 180,
-      messages: [
-        {
-          role: "system",
-          content: [
-            "Decide whether the assistant should perform a web search before answering.",
-            `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
-            "Return JSON only with this exact shape:",
-            '{"shouldSearch":boolean,"query":string}',
-            "Read the recent raw conversation and resolve follow-ups, references, dates, and timeframe from that context.",
-            "If the latest user message depends on current or external information, set shouldSearch=true and rewrite it into one clean search query.",
-            'Examples of contextual follow-ups include "what about now?", "now you can search for it", "look it up", "search that", and bare follow-ups like "2026".',
-            'If the user can be answered from conversation alone, set shouldSearch=false and query="".',
-            'If the user is asking whether search is available or supported, set shouldSearch=false and query="".',
-            "Do not search casual chat, rewriting, summarization of provided text, or repo-local coding questions.",
-            "Do not return a literal deictic query containing unresolved words like this, that, it, now, or only a year if the conversation provides the missing referent.",
-            'If search is not needed, return exactly {"shouldSearch":false,"query":""}.',
-            "Return no prose, no markdown, no explanation.",
-          ].join("\n"),
-        },
-        {
-          role: "user",
-          content: input.planningContext,
-        },
-      ],
-    }),
+    getSearchPlannerModelId(),
+  );
+
+  const rawText = await adapter.text({
+    messages: [{ role: "user", content: input.planningContext }],
+    systemPrompts: [searchPlannerSystemPrompt],
+    temperature: 0,
+    maxTokens: 180,
   });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`Search query planning failed: ${response.status} ${body.slice(0, 200)}`);
-  }
-  const json = (await response.json()) as ChatCompletionResponse;
-  const rawText = extractChatCompletionText(json.choices?.[0]?.message?.content);
+
   const decision = parseSearchQueryDecision(rawText);
   console.log("[decideSearchQuery]", JSON.stringify({ rawText, decision }));
   return decision;
