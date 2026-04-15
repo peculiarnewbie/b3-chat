@@ -6,16 +6,52 @@ import {
   createMemo,
   createResource,
   createSignal,
-  onCleanup,
   onMount,
 } from "solid-js";
 import { createStore } from "solid-js/store";
-import { createId, LOCAL_VALUES, TABLES, nowIso, sortConversationMessages } from "@b3-chat/domain";
+import { useLiveQuery } from "@tanstack/solid-db";
+import { createId, nowIso, sortConversationMessages } from "@b3-chat/domain";
+import type {
+  Workspace,
+  Thread,
+  Message,
+  MessagePart,
+  Attachment,
+  SearchRun,
+  SearchResult,
+} from "@b3-chat/domain";
 import Markdown from "../components/Markdown";
 import { authClient } from "../lib/auth-client";
 import { BUILD_INFO } from "../lib/build-info";
 import { isAllowedFile, isImageMime, uploadFile } from "../lib/upload";
-import { syncClient } from "../lib/sync-client";
+import {
+  workspaces as workspacesCollection,
+  threads as threadsCollection,
+  messages as messagesCollection,
+  messageParts as messagePartsCollection,
+  attachments as attachmentsCollection,
+  searchRuns as searchRunsCollection,
+  searchResults as searchResultsCollection,
+} from "../lib/collections";
+import {
+  createWorkspaceAction,
+  createThreadAction,
+  archiveThreadAction,
+  archiveWorkspaceAction,
+  updateThreadAction,
+  updateWorkspaceAction,
+  sendMessageAction,
+  registerAttachmentAction,
+  completeAttachmentAction,
+} from "../lib/actions";
+import {
+  activeWorkspaceId,
+  setActiveWorkspaceId,
+  activeThreadId,
+  setActiveThreadId,
+} from "../lib/ui-state";
+import { start as startConnection } from "../lib/ws-connection";
+import { init as initSyncAdapter } from "../lib/sync-adapter";
 
 type SessionPayload = {
   user?: {
@@ -195,22 +231,24 @@ const fetchModels = async () => {
   return (await response.json()) as ModelsPayload;
 };
 
-function useStoreVersion() {
-  const [version, setVersion] = createSignal(0);
-  onMount(() => {
-    syncClient.start().catch(console.error);
-    const listener = syncClient.store.addDidFinishTransactionListener(() =>
-      setVersion((v) => v + 1),
-    );
-    onCleanup(() => syncClient.store.delListener(listener));
-  });
-  return version;
-}
-
 export default function Home() {
   const [session] = createResource(fetchSession);
   const [models] = createResource(fetchModels);
-  const version = useStoreVersion();
+
+  // Initialize sync layer
+  onMount(() => {
+    initSyncAdapter();
+    startConnection();
+  });
+
+  // Reactive collection data via TanStack DB live queries
+  const allWorkspaces = useLiveQuery(() => workspacesCollection);
+  const allThreads = useLiveQuery(() => threadsCollection);
+  const allMessages = useLiveQuery(() => messagesCollection);
+  const allMessageParts = useLiveQuery(() => messagePartsCollection);
+  const allAttachments = useLiveQuery(() => attachmentsCollection);
+  const allSearchRuns = useLiveQuery(() => searchRunsCollection);
+  const allSearchResults = useLiveQuery(() => searchResultsCollection);
   const [theme, setTheme] = createSignal<Theme>(getInitialTheme());
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
   const [collapsedProgressByMessage, setCollapsedProgressByMessage] = createStore<
@@ -285,8 +323,8 @@ export default function Home() {
           attachmentId: result.attachment.id,
           status: "ready",
         });
-        syncClient.registerAttachment(result.attachment as any);
-        syncClient.completeAttachment(result.attachment as any);
+        registerAttachmentAction(result.attachment as any);
+        completeAttachmentAction(result.attachment as any);
       } catch (err) {
         console.error("Upload failed:", err);
         setComposer("attachments", (att) => att.localId === localId, "status", "failed");
@@ -377,16 +415,6 @@ export default function Home() {
     }
   });
 
-  const tables = createMemo(() => {
-    version();
-    return syncClient.tables;
-  });
-
-  const values = createMemo(() => {
-    version();
-    return syncClient.values;
-  });
-
   createEffect(() => {
     const modelList = models()?.models ?? [];
     if (!composer.modelId && modelList[0]) setComposer("modelId", modelList[0].id);
@@ -409,60 +437,47 @@ export default function Home() {
   });
 
   const workspaces = createMemo(() =>
-    Object.values<any>(tables()?.[TABLES.workspaces] ?? {})
+    (allWorkspaces() as Workspace[])
       .filter((workspace) => !workspace.archivedAt)
       .sort((a, b) => b.sortKey - a.sortKey),
-  );
-  const activeWorkspaceId = createMemo(
-    () => values()?.[LOCAL_VALUES.activeWorkspaceId] as string | undefined,
   );
   const activeWorkspace = createMemo(
     () => workspaces().find((workspace) => workspace.id === activeWorkspaceId()) ?? workspaces()[0],
   );
   const threads = createMemo(() =>
-    Object.values<any>(tables()?.[TABLES.threads] ?? {})
+    (allThreads() as Thread[])
       .filter((thread) => thread.workspaceId === activeWorkspace()?.id && !thread.archivedAt)
       .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt)),
-  );
-  const activeThreadId = createMemo(
-    () => (values()?.[LOCAL_VALUES.activeThreadId] as string | undefined) ?? threads()[0]?.id,
   );
   const activeThread = createMemo(
     () => threads().find((thread) => thread.id === activeThreadId()) ?? threads()[0],
   );
   const messageIds = createMemo(() =>
     sortConversationMessages(
-      Object.values<any>(tables()?.[TABLES.messages] ?? {}).filter(
-        (message) => message.threadId === activeThread()?.id,
-      ),
+      (allMessages() as Message[]).filter((message) => message.threadId === activeThread()?.id),
     ).map((message) => message.id),
   );
-  const messageById = (messageId: string) => tables()?.[TABLES.messages]?.[messageId] as any;
+  const messageById = (messageId: string) =>
+    messagesCollection.get(messageId) as Message | undefined;
   const streamingThreadIds = createMemo(() => {
     const ids = new Set<string>();
-    for (const msg of Object.values<any>(tables()?.[TABLES.messages] ?? {})) {
+    for (const msg of allMessages() as Message[]) {
       if (msg.status === "streaming" || msg.status === "pending" || msg.status === "queued") {
         ids.add(msg.threadId);
       }
     }
     return ids;
   });
-  const searchRuns = createMemo(() => {
-    const resultsByRun = new Map<string, any[]>();
-    for (const row of Object.values<any>(tables()?.[TABLES.searchResults] ?? {})) {
+  const searchRunsMemo = createMemo(() => {
+    const resultsByRun = new Map<string, SearchResult[]>();
+    for (const row of allSearchResults() as SearchResult[]) {
       const list = resultsByRun.get(row.searchRunId) ?? [];
       list.push(row);
       resultsByRun.set(row.searchRunId, list);
     }
 
-    const byMessage = new Map<
-      string,
-      Array<{
-        [key: string]: any;
-        results: any[];
-      }>
-    >();
-    for (const row of Object.values<any>(tables()?.[TABLES.searchRuns] ?? {})) {
+    const byMessage = new Map<string, Array<SearchRun & { results: SearchResult[] }>>();
+    for (const row of allSearchRuns() as SearchRun[]) {
       const list = byMessage.get(row.messageId) ?? [];
       list.push({
         ...row,
@@ -478,7 +493,7 @@ export default function Home() {
   });
   const thinkingTokensByMessage = createMemo(() => {
     const byMessage = new Map<string, { seq: number; tokens: number }>();
-    for (const row of Object.values<any>(tables()?.[TABLES.messageParts] ?? {})) {
+    for (const row of allMessageParts() as MessagePart[]) {
       const tokens = parseThinkingTokens(row);
       if (tokens == null) continue;
       const current = byMessage.get(row.messageId);
@@ -492,7 +507,7 @@ export default function Home() {
   });
   const assistantActivities = createMemo(() => {
     const byMessage = new Map<string, Array<AssistantActivity & { seq: number }>>();
-    for (const row of Object.values<any>(tables()?.[TABLES.messageParts] ?? {})) {
+    for (const row of allMessageParts() as MessagePart[]) {
       const activity = parseAssistantActivity(row);
       if (!activity) continue;
       const list = byMessage.get(row.messageId) ?? [];
@@ -532,7 +547,7 @@ export default function Home() {
   const hasAssistantAnswerCard = (message: any) =>
     message.role === "assistant" &&
     (Boolean(message.text?.trim()) ||
-      (searchRuns().get(message.id)?.length ?? 0) > 0 ||
+      (searchRunsMemo().get(message.id)?.length ?? 0) > 0 ||
       hasAssistantStats(message));
   const thinkingLabel = (messageId: string) => {
     const tokens = thinkingTokens(messageId);
@@ -578,8 +593,7 @@ export default function Home() {
   });
 
   const userAttachments = (messageId: string) => {
-    const allAttachments = tables()?.[TABLES.attachments] ?? {};
-    return Object.values<any>(allAttachments).filter(
+    return (allAttachments() as Attachment[]).filter(
       (a) => a.messageId === messageId && a.status !== "failed",
     );
   };
@@ -603,7 +617,7 @@ export default function Home() {
           >
             <div class="msg-meta">
               <span class="msg-role">{message().role === "assistant" ? "AI" : "You"}</span>
-              <Show when={message().status && message().status !== "done"}>
+              <Show when={message().status && message().status !== "completed"}>
                 <span class="msg-status">{message().status}</span>
               </Show>
             </div>
@@ -758,10 +772,10 @@ export default function Home() {
                       </div>
                     </Show>
                   </Show>
-                  <Show when={searchRuns().get(message().id)?.length}>
+                  <Show when={searchRunsMemo().get(message().id)?.length}>
                     <div class="search-results">
                       <span class="sr-label">Web search</span>
-                      <Index each={searchRuns().get(message().id) ?? []}>
+                      <Index each={searchRunsMemo().get(message().id) ?? []}>
                         {(run) => (
                           <div>
                             <span class="sr-label">
@@ -795,26 +809,28 @@ export default function Home() {
                         <span>{formatTokenCount(getTotalTokens(message())!)} total tokens</span>
                       </Show>
                       <Show when={message().promptTokens != null}>
-                        <span>{formatTokenCount(message().promptTokens)} prompt</span>
+                        <span>{formatTokenCount(message().promptTokens!)} prompt</span>
                       </Show>
                       <Show when={message().completionTokens != null}>
-                        <span>{formatTokenCount(message().completionTokens)} output</span>
+                        <span>{formatTokenCount(message().completionTokens!)} output</span>
                       </Show>
                       <Show when={message().ttftMs != null}>
                         <span>TTFT {message().ttftMs}ms</span>
                       </Show>
                       <Show when={message().durationMs != null}>
-                        <span>{formatDuration(message().durationMs)}</span>
+                        <span>{formatDuration(message().durationMs!)}</span>
                       </Show>
                       <Show
                         when={
                           message().completionTokens != null &&
                           message().durationMs != null &&
-                          message().durationMs > 0
+                          message().durationMs! > 0
                         }
                       >
                         <span>
-                          {((message().completionTokens / message().durationMs) * 1000).toFixed(1)}{" "}
+                          {((message().completionTokens! / message().durationMs!) * 1000).toFixed(
+                            1,
+                          )}{" "}
                           tok/s
                         </span>
                       </Show>
@@ -837,7 +853,7 @@ export default function Home() {
   };
 
   const createNewWorkspace = async () => {
-    syncClient.createWorkspace(
+    createWorkspaceAction(
       `Workspace ${workspaces().length + 1}`,
       composer.modelId || models()?.models?.[0]?.id || "auto",
     );
@@ -845,11 +861,11 @@ export default function Home() {
 
   const createNewThread = async () => {
     if (!activeWorkspace()) return;
-    syncClient.createThread(activeWorkspace()!.id);
+    createThreadAction(activeWorkspace()!.id);
   };
 
   const deleteThread = async (threadId: string) => {
-    syncClient.archiveThread(threadId);
+    archiveThreadAction(threadId);
   };
 
   const requestWorkspaceDelete = (workspaceId: string, workspaceName: string) => {
@@ -868,7 +884,7 @@ export default function Home() {
       setEditingWorkspaceId(null);
       setEditValue("");
     }
-    syncClient.archiveWorkspace(target.id);
+    archiveWorkspaceAction(target.id);
     setWorkspaceDeleteTarget(null);
   };
 
@@ -882,9 +898,9 @@ export default function Home() {
     const newTitle = editValue().trim();
     setEditingThreadId(null);
     if (!newTitle || newTitle === "") return;
-    const row = syncClient.store.getRow(TABLES.threads, threadId) as any;
+    const row = threadsCollection.get(threadId) as Thread | undefined;
     if (!row || row.title === newTitle) return;
-    syncClient.updateThread({ ...row, title: newTitle, updatedAt: nowIso() });
+    updateThreadAction({ ...row, title: newTitle, updatedAt: nowIso() });
   };
 
   const startEditingWorkspace = (workspaceId: string, currentName: string) => {
@@ -896,17 +912,17 @@ export default function Home() {
     const newName = editValue().trim();
     setEditingWorkspaceId(null);
     if (!newName || newName === "") return;
-    const row = syncClient.store.getRow(TABLES.workspaces, workspaceId) as any;
+    const row = workspacesCollection.get(workspaceId) as Workspace | undefined;
     if (!row || row.name === newName) return;
-    syncClient.updateWorkspace({ ...row, name: newName, updatedAt: nowIso() });
+    updateWorkspaceAction({ ...row, name: newName, updatedAt: nowIso() });
   };
 
   const saveSystemPrompt = () => {
     const workspace = activeWorkspace();
     if (!workspace) return;
-    const row = syncClient.store.getRow(TABLES.workspaces, workspace.id) as any;
+    const row = workspacesCollection.get(workspace.id) as Workspace | undefined;
     if (!row) return;
-    syncClient.updateWorkspace({
+    updateWorkspaceAction({
       ...row,
       systemPrompt: systemPromptDraft(),
       updatedAt: nowIso(),
@@ -918,7 +934,7 @@ export default function Home() {
     if (!activeThread() || !msg.text?.trim()) return;
     const modelId =
       composer.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto";
-    syncClient.sendMessage({
+    sendMessageAction({
       thread: activeThread()!,
       text: msg.text.trim(),
       modelId,
@@ -939,7 +955,7 @@ export default function Home() {
       const attachmentIds = composer.attachments
         .filter((a) => a.status === "ready" && a.attachmentId)
         .map((a) => a.attachmentId!);
-      syncClient.sendMessage({
+      sendMessageAction({
         thread: activeThread()!,
         text,
         modelId:
@@ -1020,12 +1036,12 @@ export default function Home() {
                   }}
                   onClick={() => {
                     if (editingWorkspaceId() === workspace.id) return;
-                    syncClient.setActiveWorkspaceId(workspace.id);
-                    const wsThreads = Object.values<any>(tables()?.[TABLES.threads] ?? {})
+                    setActiveWorkspaceId(workspace.id);
+                    const wsThreads = (allThreads() as Thread[])
                       .filter((t) => t.workspaceId === workspace.id && !t.archivedAt)
                       .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
                     if (wsThreads[0]) {
-                      syncClient.setActiveThreadId(wsThreads[0].id);
+                      setActiveThreadId(wsThreads[0].id);
                     }
                     setSidebarOpen(false);
                   }}
@@ -1088,7 +1104,7 @@ export default function Home() {
                         classList={{ "nav-item": true, active: thread.id === activeThread()?.id }}
                         onClick={() => {
                           if (editingThreadId() === thread.id) return;
-                          syncClient.setActiveThreadId(thread.id);
+                          setActiveThreadId(thread.id);
                           setSidebarOpen(false);
                         }}
                       >

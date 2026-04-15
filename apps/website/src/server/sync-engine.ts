@@ -335,18 +335,22 @@ export class SyncEngineDurableObject {
             "SELECT count(*) as count FROM workspaces",
           );
           if (Number(workspaces?.count ?? 0) === 0) {
-            const workspace = createWorkspace({
-              name: "Default Workspace",
-              defaultModelId: command.defaultModelId,
+            const workspace = {
+              ...createWorkspace({
+                name: "Default Workspace",
+                defaultModelId: command.defaultModelId,
+              }),
               optimistic: false,
               opId,
-            });
-            const thread = createThread({
-              workspaceId: workspace.id,
-              title: "New Chat",
+            };
+            const thread = {
+              ...createThread({
+                workspaceId: workspace.id,
+                title: "New Chat",
+              }),
               optimistic: false,
               opId,
-            });
+            };
             pendingEvents.push(
               this.insertEvent(opId, "workspace_upserted", { row: workspace }),
               this.insertEvent(opId, "thread_upserted", { row: thread }),

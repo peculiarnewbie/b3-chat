@@ -1,5 +1,4 @@
 import * as Schema from "effect/Schema";
-import { createEffectSchematizer } from "tinybase/schematizers/schematizer-effect";
 
 export const TABLES = {
   workspaces: "workspaces",
@@ -11,19 +10,12 @@ export const TABLES = {
   searchResults: "search_results",
 } as const;
 
-export const LOCAL_VALUES = {
-  activeWorkspaceId: "ui.activeWorkspaceId",
-  activeThreadId: "ui.activeThreadId",
-  sidebarQuery: "ui.sidebarQuery",
-  connectionStatus: "ui.connectionStatus",
-} as const;
-
 const NullableString = Schema.NullOr(Schema.String);
 const NullableNumber = Schema.NullOr(Schema.Number);
 
-const OptimisticRowFields = {
-  optimistic: Schema.Boolean,
-  opId: NullableString,
+const OptionalOptimisticRowFields = {
+  optimistic: Schema.optional(Schema.Boolean),
+  opId: Schema.optional(NullableString),
 } as const;
 
 export const WorkspaceRow = Schema.Struct({
@@ -37,7 +29,7 @@ export const WorkspaceRow = Schema.Struct({
   updatedAt: Schema.String,
   archivedAt: NullableString,
   sortKey: Schema.Number,
-  ...OptimisticRowFields,
+  ...OptionalOptimisticRowFields,
 });
 
 export const ThreadRow = Schema.Struct({
@@ -49,7 +41,7 @@ export const ThreadRow = Schema.Struct({
   updatedAt: Schema.String,
   lastMessageAt: Schema.String,
   archivedAt: NullableString,
-  ...OptimisticRowFields,
+  ...OptionalOptimisticRowFields,
 });
 
 export const MessageStatus = Schema.Literal(
@@ -77,7 +69,7 @@ export const MessageRow = Schema.Struct({
   ttftMs: NullableNumber,
   promptTokens: NullableNumber,
   completionTokens: NullableNumber,
-  ...OptimisticRowFields,
+  ...OptionalOptimisticRowFields,
 });
 
 export const MessagePartRow = Schema.Struct({
@@ -105,7 +97,7 @@ export const AttachmentRow = Schema.Struct({
   status: AttachmentStatus,
   createdAt: Schema.String,
   updatedAt: Schema.String,
-  ...OptimisticRowFields,
+  ...OptionalOptimisticRowFields,
 });
 
 export const SearchRunStatus = Schema.Literal("completed", "failed");
@@ -135,22 +127,13 @@ export const SearchResultRow = Schema.Struct({
   score: Schema.Number,
 });
 
-export const tablesSchema = createEffectSchematizer().toTablesSchema({
-  [TABLES.workspaces]: WorkspaceRow,
-  [TABLES.threads]: ThreadRow,
-  [TABLES.messages]: MessageRow,
-  [TABLES.messageParts]: MessagePartRow,
-  [TABLES.attachments]: AttachmentRow,
-  [TABLES.searchRuns]: SearchRunRow,
-  [TABLES.searchResults]: SearchResultRow,
-});
-
-export const localValuesSchema = createEffectSchematizer().toValuesSchema({
-  [LOCAL_VALUES.activeWorkspaceId]: Schema.String,
-  [LOCAL_VALUES.activeThreadId]: Schema.String,
-  [LOCAL_VALUES.sidebarQuery]: Schema.String,
-  [LOCAL_VALUES.connectionStatus]: Schema.String,
-});
+/** Add optimistic wire fields to an entity for command payloads sent to the server. */
+export function toWire<T extends object>(
+  entity: T,
+  opId: string,
+): T & { optimistic: true; opId: string } {
+  return { ...entity, optimistic: true as const, opId };
+}
 
 export const decodeWorkspaceRow = Schema.decodeUnknownSync(WorkspaceRow);
 export const decodeThreadRow = Schema.decodeUnknownSync(ThreadRow);
@@ -433,8 +416,6 @@ export function createWorkspace(input: {
   defaultModelId: string;
   systemPrompt?: string;
   defaultSearchMode?: boolean;
-  optimistic?: boolean;
-  opId?: string | null;
 }) {
   const now = nowIso();
   return decodeWorkspaceRow({
@@ -448,17 +429,10 @@ export function createWorkspace(input: {
     updatedAt: now,
     archivedAt: null,
     sortKey: Date.now(),
-    optimistic: input.optimistic ?? false,
-    opId: input.opId ?? null,
   });
 }
 
-export function createThread(input: {
-  workspaceId: string;
-  title?: string;
-  optimistic?: boolean;
-  opId?: string | null;
-}) {
+export function createThread(input: { workspaceId: string; title?: string }) {
   const now = nowIso();
   return decodeThreadRow({
     id: createId("thd"),
@@ -469,8 +443,6 @@ export function createThread(input: {
     updatedAt: now,
     lastMessageAt: now,
     archivedAt: null,
-    optimistic: input.optimistic ?? false,
-    opId: input.opId ?? null,
   });
 }
 
@@ -481,8 +453,6 @@ export function createMessage(input: {
   text?: string;
   status?: "queued" | "pending" | "streaming" | "completed" | "failed" | "cancelled";
   searchEnabled?: boolean;
-  optimistic?: boolean;
-  opId?: string | null;
 }) {
   const now = nowIso();
   return decodeMessageRow({
@@ -501,8 +471,6 @@ export function createMessage(input: {
     ttftMs: null,
     promptTokens: null,
     completionTokens: null,
-    optimistic: input.optimistic ?? false,
-    opId: input.opId ?? null,
   });
 }
 
@@ -532,8 +500,6 @@ export function createAttachment(input: {
   sizeBytes: number;
   sha256?: string | null;
   status?: "queued" | "uploading" | "ready" | "failed";
-  optimistic?: boolean;
-  opId?: string | null;
 }) {
   const now = nowIso();
   return decodeAttachmentRow({
@@ -550,8 +516,6 @@ export function createAttachment(input: {
     status: input.status ?? "queued",
     createdAt: now,
     updatedAt: now,
-    optimistic: input.optimistic ?? false,
-    opId: input.opId ?? null,
   });
 }
 

@@ -5,6 +5,8 @@ packages:
 
 catalog:
   "@better-auth/infra": ^0.1.13
+  "@tanstack/db": ^0.6.5
+  "@tanstack/solid-db": ^0.2.19
   "@types/dompurify": ^3.2.0
   "@types/node": ^24
   dompurify: ^3.3.3
