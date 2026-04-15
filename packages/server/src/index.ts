@@ -9,8 +9,6 @@ export {
   type ExtendedStreamChunk,
 } from "./chat-completions-adapter.js";
 export { chat } from "@tanstack/ai";
-import { createChatCompletionsAdapter } from "./chat-completions-adapter.js";
-import { chat } from "@tanstack/ai";
 import { betterAuth } from "better-auth";
 import { dash } from "@better-auth/infra";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
@@ -102,7 +100,6 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_EXA_RESULTS = 5;
 const MIN_EXA_RESULTS = 3;
 const MAX_EXA_RESULTS = 8;
-const SEARCH_PLANNER_MODEL_ID = "minimax-m2.5";
 const encoder = new TextEncoder();
 
 type ExaSearchResult = {
@@ -117,88 +114,6 @@ type ExaSearchResult = {
 type ExaSearchResponse = {
   results?: ExaSearchResult[];
 };
-
-export type SearchQueryDecision = {
-  shouldSearch: boolean;
-  query: string;
-};
-
-function normalizeSearchPrompt(text: string) {
-  return text.trim().replace(/\s+/g, " ");
-}
-
-function isSearchCapabilityQuestion(text: string) {
-  const normalized = normalizeSearchPrompt(text).toLowerCase();
-  if (!normalized) return false;
-
-  return [
-    /^(can|could|would|will)\s+you\s+(do\s+)?(a\s+)?(web\s+)?(search|searches|browse|look up)(\s+the\s+web)?(\s+for\s+me)?\??$/,
-    /^(do|does)\s+you\s+(have|support|use)\s+(web\s+)?(search|searches|browsing)(\s+capabilit(?:y|ies))?\??$/,
-    /^are\s+you\s+(able|capable)\s+to\s+(search|browse|look up)(\s+the\s+web)?\??$/,
-  ].some((pattern) => pattern.test(normalized));
-}
-
-function isDeicticLookupPrompt(text: string) {
-  const normalized = normalizeSearchPrompt(text).toLowerCase().replace(/[?]+$/g, "");
-  if (!normalized) return false;
-
-  return [
-    /^(please\s+)?use\s+(your\s+)?(web\s+)?search(\s+for)?\s+(this|that|it)$/,
-    /^(now\s+)?you\s+can\s+(search( for)?|look up|check( online)?|find out|google|browse)\s+(this|that|it)$/,
-    /^(please\s+)?(search( for)?|look up|check( online)?|find out|google|browse)\s+(this|that|it)$/,
-    /^(please\s+)?look\s+(this|that|it)\s+up$/,
-    /^(please\s+)?(look it up|search for it|search it|check it|find out|google it|browse it)$/,
-    /^(now\s+)?(you\s+can\s+)?(this|that|it)$/,
-  ].some((pattern) => pattern.test(normalized));
-}
-
-export function inferForcedSearchQuery(promptText: string) {
-  const normalized = normalizeSearchPrompt(promptText).toLowerCase();
-  if (!normalized) return null;
-  if (isSearchCapabilityQuestion(promptText)) return null;
-  if (isDeicticLookupPrompt(promptText)) return null;
-
-  const asksForLookup =
-    /\b(look up|lookup|search( for)?|google|browse|check online|find online|find out|verify online)\b/.test(
-      normalized,
-    ) || /\bcan you look up\b/.test(normalized);
-  const asksRealtime =
-    /\bwhat('?s| is) (the )?time\b/.test(normalized) ||
-    /\bwhat time is it\b/.test(normalized) ||
-    /\bwhat('?s| is) (the )?date\b/.test(normalized) ||
-    /\btoday'?s date\b/.test(normalized) ||
-    /\b(current|latest|today|tonight|right now|currently|recent|live|real[- ]?time)\b/.test(
-      normalized,
-    ) ||
-    /\b(weather|forecast|score|scores|standings|price|stock price|exchange rate|who won|winner|results?)\b/.test(
-      normalized,
-    );
-
-  if (!asksForLookup && !asksRealtime) return null;
-
-  if (/\bwhat('?s| is) (the )?time\b|\bwhat time is it\b/.test(normalized)) {
-    return "current local time now";
-  }
-
-  if (/\bwhat('?s| is) (the )?date\b|\btoday'?s date\b/.test(normalized)) {
-    return "today's date now";
-  }
-
-  const stripped = normalizeSearchPrompt(
-    promptText
-      .replace(/^\s*(so+|hey|hi|please)\b[:,]?\s*/i, "")
-      .replace(/^\s*(can|could|would|will)\s+you\s+/i, "")
-      .replace(
-        /\b(look up|lookup|search( for)?|google|browse|check online|find online|find out|verify online)\b/gi,
-        "",
-      )
-      .replace(/[?]+$/g, ""),
-  );
-
-  if (isDeicticLookupPrompt(stripped)) return null;
-
-  return stripped || normalizeSearchPrompt(promptText);
-}
 
 type InternalCommandResponse = {
   ok: boolean;
@@ -471,86 +386,6 @@ export function extractReasoningTokens(usage: unknown) {
   }
 
   return null;
-}
-
-function noSearchQueryDecision(): SearchQueryDecision {
-  return {
-    shouldSearch: false,
-    query: "",
-  };
-}
-
-export function parseSearchQueryDecision(text: string): SearchQueryDecision {
-  const jsonSlice = text.trim().match(/\{[\s\S]*\}/)?.[0];
-  if (!jsonSlice) return noSearchQueryDecision();
-
-  let parsed: any;
-  try {
-    parsed = JSON.parse(jsonSlice);
-  } catch {
-    return noSearchQueryDecision();
-  }
-
-  if (typeof parsed?.shouldSearch !== "boolean") {
-    return noSearchQueryDecision();
-  }
-  if (parsed.shouldSearch === false) {
-    return noSearchQueryDecision();
-  }
-
-  const query = typeof parsed?.query === "string" ? parsed.query.trim() : "";
-  if (!query) return noSearchQueryDecision();
-
-  return {
-    shouldSearch: true,
-    query,
-  };
-}
-
-const searchPlannerSystemPrompt = [
-  "Decide whether the assistant should perform a web search before answering.",
-  `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
-  "Return JSON only with this exact shape:",
-  '{"shouldSearch":boolean,"query":string}',
-  "Read the recent raw conversation and resolve follow-ups, references, dates, and timeframe from that context.",
-  "If the latest user message depends on current or external information, set shouldSearch=true and rewrite it into one clean search query.",
-  'Examples of contextual follow-ups include "what about now?", "now you can search for it", "look it up", "search that", and bare follow-ups like "2026".',
-  'If the user can be answered from conversation alone, set shouldSearch=false and query="".',
-  'If the user is asking whether search is available or supported, set shouldSearch=false and query="".',
-  "Do not search casual chat, rewriting, summarization of provided text, or repo-local coding questions.",
-  "Do not return a literal deictic query containing unresolved words like this, that, it, now, or only a year if the conversation provides the missing referent.",
-  'If search is not needed, return exactly {"shouldSearch":false,"query":""}.',
-  "Return no prose, no markdown, no explanation.",
-].join("\n");
-
-export async function decideSearchQuery(
-  env: AppEnv,
-  input: {
-    modelId: string;
-    planningContext: string;
-  },
-) {
-  const adapter = createChatCompletionsAdapter(
-    {
-      baseUrl: env.OPENCODE_GO_BASE_URL,
-      apiKey: env.OPENCODE_GO_API_KEY,
-    },
-    SEARCH_PLANNER_MODEL_ID,
-  );
-
-  // Use TanStack AI's chat() with stream: false for non-streaming text response
-  const rawText = await chat({
-    adapter,
-    messages: [{ role: "user", content: input.planningContext }],
-    systemPrompts: [searchPlannerSystemPrompt],
-    temperature: 0,
-    maxTokens: 180,
-    stream: false,
-  });
-
-  const decision = parseSearchQueryDecision(rawText);
-  console.log("[decideSearchQuery]", JSON.stringify({ rawText, decision }));
-  return decision;
 }
 
 export function parseExaMcpTextResponse(responseText: string) {

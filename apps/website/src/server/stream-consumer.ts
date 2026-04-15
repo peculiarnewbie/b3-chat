@@ -78,9 +78,11 @@ export async function consumeAssistantStream(
   let pendingDelta = "";
   let chunkCount = 0;
   let deltaCount = 0;
-  let promptTokens: number | null = null;
-  let completionTokens: number | null = null;
-  let reasoningTokens: number | null = null;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let reasoningTokens = 0;
+  let sawUsage = false;
+  let sawReasoningTokens = false;
   let lastReportedReasoningTokens: number | null = null;
   let responseStartedReported = false;
 
@@ -163,18 +165,29 @@ export async function consumeAssistantStream(
         case "RUN_FINISHED": {
           // Extract usage from the event
           const finishedChunk = chunk as {
+            finishReason?: string | null;
             usage?: { promptTokens: number; completionTokens: number };
             _reasoningTokens?: number;
           };
 
           if (finishedChunk.usage) {
-            promptTokens = finishedChunk.usage.promptTokens ?? null;
-            completionTokens = finishedChunk.usage.completionTokens ?? null;
+            sawUsage = true;
+            promptTokens += finishedChunk.usage.promptTokens ?? 0;
+            completionTokens += finishedChunk.usage.completionTokens ?? 0;
           }
 
           // Check for custom reasoning tokens field
           if (finishedChunk._reasoningTokens != null) {
-            reasoningTokens = finishedChunk._reasoningTokens;
+            sawReasoningTokens = true;
+            reasoningTokens += finishedChunk._reasoningTokens;
+          }
+
+          if (finishedChunk.finishReason === "tool_calls") {
+            await flushDelta();
+            if (sawReasoningTokens && reasoningTokens !== lastReportedReasoningTokens) {
+              await flushThinkingTokens(reasoningTokens);
+            }
+            break;
           }
 
           // Flush final delta if any
@@ -195,8 +208,8 @@ export async function consumeAssistantStream(
             updatedAt: nowIso(),
             durationMs,
             ttftMs,
-            promptTokens,
-            completionTokens,
+            promptTokens: sawUsage ? promptTokens : null,
+            completionTokens: sawUsage ? completionTokens : null,
           });
           broadcast(completed);
 
@@ -217,9 +230,9 @@ export async function consumeAssistantStream(
             text: accumulated,
             durationMs,
             ttftMs,
-            promptTokens,
-            completionTokens,
-            reasoningTokens,
+            promptTokens: sawUsage ? promptTokens : null,
+            completionTokens: sawUsage ? completionTokens : null,
+            reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
             success: true,
           };
         }
@@ -254,9 +267,9 @@ export async function consumeAssistantStream(
             text: accumulated,
             durationMs: Date.now() - streamStartedAt,
             ttftMs: firstTokenAt !== null ? firstTokenAt - streamStartedAt : null,
-            promptTokens,
-            completionTokens,
-            reasoningTokens,
+            promptTokens: sawUsage ? promptTokens : null,
+            completionTokens: sawUsage ? completionTokens : null,
+            reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
             success: false,
             errorMessage,
           };
@@ -281,8 +294,8 @@ export async function consumeAssistantStream(
         updatedAt: nowIso(),
         durationMs,
         ttftMs,
-        promptTokens,
-        completionTokens,
+        promptTokens: sawUsage ? promptTokens : null,
+        completionTokens: sawUsage ? completionTokens : null,
       });
       broadcast(completed);
     }
@@ -291,9 +304,9 @@ export async function consumeAssistantStream(
       text: accumulated,
       durationMs,
       ttftMs,
-      promptTokens,
-      completionTokens,
-      reasoningTokens,
+      promptTokens: sawUsage ? promptTokens : null,
+      completionTokens: sawUsage ? completionTokens : null,
+      reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
       success: true,
     };
   } catch (error) {
@@ -325,9 +338,9 @@ export async function consumeAssistantStream(
       text: accumulated,
       durationMs: Date.now() - streamStartedAt,
       ttftMs: firstTokenAt !== null ? firstTokenAt - streamStartedAt : null,
-      promptTokens,
-      completionTokens,
-      reasoningTokens,
+      promptTokens: sawUsage ? promptTokens : null,
+      completionTokens: sawUsage ? completionTokens : null,
+      reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
       success: false,
       errorMessage,
     };

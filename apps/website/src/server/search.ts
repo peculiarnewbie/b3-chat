@@ -1,20 +1,13 @@
+import { toolDefinition } from "@tanstack/ai";
 import {
   buildMultiSearchContext,
-  buildSearchPlanningContext,
   createSearchRun,
   decodeSearchResultRow,
-  type Message,
   type SearchResult,
   type SearchRun,
 } from "@b3-chat/domain";
-import {
-  decideSearchQuery,
-  exaMcpSearchRawText,
-  exaSearch,
-  inferForcedSearchQuery,
-  type AppEnv,
-  type SearchQueryDecision,
-} from "@b3-chat/server";
+import { clampExaResults, exaMcpSearchRawText, exaSearch, type AppEnv } from "@b3-chat/server";
+
 const SEARCH_RESULTS_PER_RUN = 5;
 
 type SearchGroundingRun = {
@@ -23,18 +16,17 @@ type SearchGroundingRun = {
   rawText?: string;
 };
 
-export type PreparedAssistantSearch = {
-  searchRuns: SearchRun[];
-  searchResults: SearchResult[];
-  searchContext: string;
-};
-
 export type SearchProgressEvent = {
   label: string;
   state?: "active" | "completed" | "failed";
   step?: number;
   query?: string;
   detail?: string;
+};
+
+type SearchToolState = {
+  searchRuns: SearchRun[];
+  searchResults: SearchResult[];
 };
 
 function summarizeStructuredResults(rows: Array<{ title: string; snippet: string }>) {
@@ -50,220 +42,186 @@ function summarizeRawText(text: string) {
   return text.replace(/\s+/g, " ").trim().slice(0, 240);
 }
 
-function normalizePromptText(text: string) {
-  return text.trim().replace(/\s+/g, " ").toLowerCase();
-}
-
-function isSearchCapabilityQuestion(promptText: string) {
-  const normalized = normalizePromptText(promptText);
-  if (!normalized) return false;
-
-  return [
-    /^(can|could|would|will)\s+you\s+(do\s+)?(a\s+)?(web\s+)?(search|searches|browse|look up)(\s+the\s+web)?(\s+for\s+me)?\??$/,
-    /^(do|does)\s+you\s+(have|support|use)\s+(web\s+)?(search|searches|browsing)(\s+capabilit(?:y|ies))?\??$/,
-    /^are\s+you\s+(able|capable)\s+to\s+(search|browse|look up)(\s+the\s+web)?\??$/,
-  ].some((pattern) => pattern.test(normalized));
-}
-
-export async function prepareAssistantSearch(input: {
+export function createExaSearchTool(input: {
   env: AppEnv;
   assistantMessageId: string;
-  modelId: string;
-  promptText: string;
-  messages: Message[];
-  systemPrompt?: string | null;
-  enabled: boolean;
   log?: (event: string, details?: Record<string, unknown>) => void;
   onProgress?: (event: SearchProgressEvent) => void | Promise<void>;
-}): Promise<PreparedAssistantSearch> {
-  if (!input.enabled || !input.promptText.trim()) {
-    return {
-      searchRuns: [],
-      searchResults: [],
-      searchContext: "",
-    };
-  }
+  onSearchStateChange?: (state: Readonly<SearchToolState>) => void | Promise<void>;
+}) {
+  const state: SearchToolState = {
+    searchRuns: [],
+    searchResults: [],
+  };
 
-  if (isSearchCapabilityQuestion(input.promptText)) {
-    input.log?.("assistant_turn_search_skipped_capability_question", {
-      assistantMessageId: input.assistantMessageId,
-      promptText: input.promptText,
+  const publishState = async () => {
+    await input.onSearchStateChange?.({
+      searchRuns: [...state.searchRuns],
+      searchResults: [...state.searchResults],
     });
-    return {
-      searchRuns: [],
-      searchResults: [],
-      searchContext: "",
-    };
-  }
+  };
 
-  const searchRuns: SearchRun[] = [];
-  const searchResults: SearchResult[] = [];
-  const groundingRuns: SearchGroundingRun[] = [];
-  await input.onProgress?.({
-    label: "Planning search query",
-    state: "active",
-    step: 1,
-  });
-  const planningContext = buildSearchPlanningContext({
-    promptText: input.promptText,
-    messages: input.messages,
-    systemPrompt: input.systemPrompt,
-  });
-
-  let decision: SearchQueryDecision;
-  try {
-    decision = await decideSearchQuery(input.env, {
-      modelId: input.modelId,
-      planningContext,
-    });
-  } catch (error) {
-    input.log?.("assistant_turn_search_planner_error", {
-      assistantMessageId: input.assistantMessageId,
-      error: String(error),
-    });
-    const fallbackQuery = inferForcedSearchQuery(input.promptText);
-    decision = {
-      shouldSearch: Boolean(fallbackQuery),
-      query: fallbackQuery ?? "",
-    };
-  }
-
-  if (!decision.shouldSearch || !decision.query.trim()) {
-    await input.onProgress?.({
-      label: "Answering from current context",
-      state: "completed",
-      step: 1,
-    });
-    return {
-      searchRuns,
-      searchResults,
-      searchContext: "",
-    };
-  }
-
-  const query = decision.query.trim();
-  await input.onProgress?.({
-    label: `Searching the web for "${query}"`,
-    state: "active",
-    step: 1,
-    query,
-  });
-
-  try {
-    if (input.env.EXA_API_KEY) {
-      const runRows = (await exaSearch(input.env, query, SEARCH_RESULTS_PER_RUN)).map((row) =>
-        decodeSearchResultRow({
-          ...row,
-          searchRunId: "",
-          messageId: input.assistantMessageId,
-        }),
-      );
-      const run = createSearchRun({
-        messageId: input.assistantMessageId,
-        query,
-        status: "completed",
-        step: 1,
-        numResults: SEARCH_RESULTS_PER_RUN,
-        resultCount: runRows.length,
-        previewText: summarizeStructuredResults(runRows),
-      });
-      const normalizedRows = runRows.map((row) =>
-        decodeSearchResultRow({
-          ...row,
-          searchRunId: run.id,
-          messageId: input.assistantMessageId,
-        }),
-      );
-
-      searchRuns.push(run);
-      searchResults.push(...normalizedRows);
-      groundingRuns.push({
-        query,
-        rows: normalizedRows.map((row) => ({
-          title: row.title,
-          url: row.url,
-          snippet: row.snippet,
-        })),
-      });
-      input.log?.("assistant_turn_search_execution_success", {
-        assistantMessageId: input.assistantMessageId,
-        step: 1,
-        query,
-        resultCount: normalizedRows.length,
-        mode: "exa_api",
-        previewText: run.previewText,
-      });
-      await input.onProgress?.({
-        label: `Found ${normalizedRows.length} result${normalizedRows.length === 1 ? "" : "s"} for "${query}"`,
-        state: "completed",
-        step: 1,
-        query,
-        detail: run.previewText || undefined,
-      });
-    } else {
-      const rawText = await exaMcpSearchRawText(query, SEARCH_RESULTS_PER_RUN);
-      const run = createSearchRun({
-        messageId: input.assistantMessageId,
-        query,
-        status: "completed",
-        step: 1,
-        numResults: SEARCH_RESULTS_PER_RUN,
-        resultCount: 0,
-        previewText: summarizeRawText(rawText),
-      });
-      searchRuns.push(run);
-      groundingRuns.push({
-        query,
-        rawText,
-      });
-      input.log?.("assistant_turn_search_execution_success", {
-        assistantMessageId: input.assistantMessageId,
-        step: 1,
-        query,
-        resultCount: 0,
-        mode: "exa_mcp",
-        previewText: run.previewText,
-      });
-      await input.onProgress?.({
-        label: `Search finished for "${query}"`,
-        state: "completed",
-        step: 1,
-        query,
-        detail: run.previewText || undefined,
-      });
+  const tool = toolDefinition({
+    name: "exa_web_search",
+    description:
+      "Search the public web for current or external information. Use this when the user asks for recent, live, or verifiable information, or when the answer depends on sources outside the conversation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "A focused web search query rewritten for the information you need to find.",
+        },
+        numResults: {
+          type: "number",
+          description: "Desired number of results to retrieve, between 3 and 8.",
+          minimum: 3,
+          maximum: 8,
+        },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  }).server(async (args: any) => {
+    const query = typeof args?.query === "string" ? args.query.trim() : "";
+    const numResults = clampExaResults(args?.numResults ?? SEARCH_RESULTS_PER_RUN);
+    if (!query) {
+      throw new Error("Search query is required");
     }
-  } catch (error) {
-    input.log?.("assistant_turn_search_execution_error", {
-      assistantMessageId: input.assistantMessageId,
-      step: 1,
-      query,
-      error: String(error),
-    });
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    searchRuns.push(
-      createSearchRun({
-        messageId: input.assistantMessageId,
-        query,
-        status: "failed",
-        step: 1,
-        numResults: SEARCH_RESULTS_PER_RUN,
-        errorMessage,
-      }),
-    );
+
+    const step = state.searchRuns.length + 1;
     await input.onProgress?.({
-      label: `Search failed for "${query}"`,
-      state: "failed",
-      step: 1,
+      label: `Searching the web for "${query}"`,
+      state: "active",
+      step,
       query,
-      detail: errorMessage,
     });
-  }
+
+    try {
+      let groundingRun: SearchGroundingRun;
+
+      if (input.env.EXA_API_KEY) {
+        const runRows = (await exaSearch(input.env, query, numResults)).map((row) =>
+          decodeSearchResultRow({
+            ...row,
+            searchRunId: "",
+            messageId: input.assistantMessageId,
+          }),
+        );
+        const run = createSearchRun({
+          messageId: input.assistantMessageId,
+          query,
+          status: "completed",
+          step,
+          numResults,
+          resultCount: runRows.length,
+          previewText: summarizeStructuredResults(runRows),
+        });
+        const normalizedRows = runRows.map((row) =>
+          decodeSearchResultRow({
+            ...row,
+            searchRunId: run.id,
+            messageId: input.assistantMessageId,
+          }),
+        );
+
+        state.searchRuns.push(run);
+        state.searchResults.push(...normalizedRows);
+        groundingRun = {
+          query,
+          rows: normalizedRows.map((row) => ({
+            title: row.title,
+            url: row.url,
+            snippet: row.snippet,
+          })),
+        };
+
+        input.log?.("assistant_turn_tool_search_success", {
+          assistantMessageId: input.assistantMessageId,
+          step,
+          query,
+          resultCount: normalizedRows.length,
+          mode: "exa_api",
+          previewText: run.previewText,
+        });
+        await input.onProgress?.({
+          label: `Found ${normalizedRows.length} result${normalizedRows.length === 1 ? "" : "s"} for "${query}"`,
+          state: "completed",
+          step,
+          query,
+          detail: run.previewText || undefined,
+        });
+      } else {
+        const rawText = await exaMcpSearchRawText(query, numResults);
+        const run = createSearchRun({
+          messageId: input.assistantMessageId,
+          query,
+          status: "completed",
+          step,
+          numResults,
+          resultCount: 0,
+          previewText: summarizeRawText(rawText),
+        });
+
+        state.searchRuns.push(run);
+        groundingRun = {
+          query,
+          rawText,
+        };
+
+        input.log?.("assistant_turn_tool_search_success", {
+          assistantMessageId: input.assistantMessageId,
+          step,
+          query,
+          resultCount: 0,
+          mode: "exa_mcp",
+          previewText: run.previewText,
+        });
+        await input.onProgress?.({
+          label: `Search finished for "${query}"`,
+          state: "completed",
+          step,
+          query,
+          detail: run.previewText || undefined,
+        });
+      }
+
+      await publishState();
+      return buildMultiSearchContext({
+        runs: [groundingRun],
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      state.searchRuns.push(
+        createSearchRun({
+          messageId: input.assistantMessageId,
+          query,
+          status: "failed",
+          step,
+          numResults,
+          errorMessage,
+        }),
+      );
+      await publishState();
+      input.log?.("assistant_turn_tool_search_error", {
+        assistantMessageId: input.assistantMessageId,
+        step,
+        query,
+        error: errorMessage,
+      });
+      await input.onProgress?.({
+        label: `Search failed for "${query}"`,
+        state: "failed",
+        step,
+        query,
+        detail: errorMessage,
+      });
+      throw error instanceof Error ? error : new Error(errorMessage);
+    }
+  });
 
   return {
-    searchRuns,
-    searchResults,
-    searchContext: buildMultiSearchContext({
-      runs: groundingRuns,
-    }),
+    tool,
+    state,
   };
 }

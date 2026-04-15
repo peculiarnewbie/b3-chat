@@ -566,52 +566,6 @@ export function buildMultiSearchContext(input: {
   ].join("\n\n");
 }
 
-export function buildSearchPlanningContext(input: {
-  promptText: string;
-  messages: Array<{
-    role: string;
-    text?: string | null;
-    status?: string | null;
-  }>;
-  maxContextMessages?: number;
-  systemPrompt?: string | null;
-  priorSearches?: Array<{
-    query: string;
-    resultCount?: number | null;
-    summary?: string | null;
-    status?: string | null;
-  }>;
-}) {
-  const promptText = input.promptText.trim().replace(/\s+/g, " ");
-  if (!promptText) return "";
-
-  const normalizedMessages = input.messages
-    .filter((message) => message.role !== "system")
-    .filter((message) => message.status !== "failed" && message.status !== "cancelled")
-    .map((message) => ({
-      role: message.role,
-      text: (message.text ?? "").trim().replace(/\s+/g, " ").slice(0, 500),
-    }))
-    .filter((message) => message.text.length > 0);
-  const contextMessages = normalizedMessages.slice(-(input.maxContextMessages ?? 12));
-  const systemPrompt = (input.systemPrompt ?? "").trim().replace(/\s+/g, " ").slice(0, 800);
-
-  return [
-    `Today's date is ${new Date().toISOString().slice(0, 10)}.`,
-    "",
-    "Workspace system prompt:",
-    systemPrompt || "(none)",
-    "",
-    "Recent raw conversation:",
-    ...(contextMessages.length > 0
-      ? contextMessages.map((message) => `${message.role}: ${message.text}`)
-      : ["(none)"]),
-    "",
-    "Latest user message:",
-    promptText,
-  ].join("\n");
-}
-
 export function createSearchRun(input: {
   messageId: string;
   query: string;

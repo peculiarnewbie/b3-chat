@@ -1,6 +1,5 @@
 import {
   buildMultiSearchContext,
-  buildSearchPlanningContext,
   createAttachment,
   createWorkspace,
   mergeAttachmentLink,
@@ -14,12 +13,10 @@ import {
   extractChatCompletionText,
   filterModelsCatalog,
   getSignedAttachmentUrl,
-  inferForcedSearchQuery,
   isImageAttachment,
   isInlineTextAttachment,
   normalizeEmail,
   parseExaMcpTextResponse,
-  parseSearchQueryDecision,
   verifyUploadToken,
 } from "@b3-chat/server";
 import { describe, expect, it } from "vite-plus/test";
@@ -114,82 +111,6 @@ describe("domain helpers", () => {
     expect(context).toContain("Search query: time in jakarta right now");
     expect(context).toContain("Search query: jakarta timezone");
     expect(context).toContain("https://example.com/tz");
-  });
-
-  it("builds bounded planning context from recent conversation", () => {
-    const query = buildSearchPlanningContext({
-      promptText: "what about now?",
-      systemPrompt: "Answer crisply.",
-      messages: [
-        {
-          role: "user",
-          text: "message 0 should be dropped once the recent window is applied",
-          status: "completed",
-        },
-        {
-          role: "assistant",
-          text: "message 1 should be dropped once the recent window is applied",
-          status: "completed",
-        },
-        {
-          role: "user",
-          text: "message 2 should be dropped once the recent window is applied",
-          status: "completed",
-        },
-        {
-          role: "assistant",
-          text: "message 3 should be dropped once the recent window is applied",
-          status: "completed",
-        },
-        {
-          role: "user",
-          text: "message 4 should stay inside the recent window",
-          status: "completed",
-        },
-        {
-          role: "assistant",
-          text: "message 5 should stay inside the recent window",
-          status: "completed",
-        },
-        {
-          role: "user",
-          text: "when is your training data cutoff?",
-          status: "completed",
-        },
-        {
-          role: "assistant",
-          text: "My training data runs through June 2025.",
-          status: "completed",
-        },
-        {
-          role: "user",
-          text: "what day is it?",
-          status: "completed",
-        },
-        {
-          role: "assistant",
-          text: `I don't have access to the current date. ${"x".repeat(600)}`,
-          status: "completed",
-        },
-        {
-          role: "user",
-          text: "what about now?",
-          status: "completed",
-        },
-      ],
-    });
-
-    expect(query).toContain("Today's date is ");
-    expect(query).toContain("Workspace system prompt:");
-    expect(query).toContain("Answer crisply.");
-    expect(query).toContain("Latest user message:\nwhat about now?");
-    expect(query).toContain("Recent raw conversation:");
-    expect(query).toContain("user: what day is it?");
-    expect(query).toContain("assistant: I don't have access to the current date.");
-    expect(query).toContain("user: what about now?");
-    expect(query).toContain("message 0 should be dropped");
-    expect(query).toContain("message 1 should be dropped");
-    expect(query).not.toContain("x".repeat(501));
   });
 
   it("sorts same-timestamp turns deterministically with the user before the assistant", () => {
@@ -332,58 +253,10 @@ describe("server helpers", () => {
     expect(extractReasoningTokens({ completion_tokens: 42 })).toBe(null);
   });
 
-  it("parses a planner response into a normalized search decision", () => {
-    const decision = parseSearchQueryDecision(
-      '{"shouldSearch": true, "query": "current date and time right now"}',
-    );
-
-    expect(decision).toEqual({
-      shouldSearch: true,
-      query: "current date and time right now",
-    });
-  });
-
-  it("parses a no-search planner response", () => {
-    const decision = parseSearchQueryDecision('{"shouldSearch": false, "query": ""}');
-    expect(decision).toEqual({
-      shouldSearch: false,
-      query: "",
-    });
-  });
-
-  it("infers forced search queries for explicit lookup and realtime prompts", () => {
-    expect(inferForcedSearchQuery("can you look up who won f1 suzuka race in 2026?")).toBe(
-      "who won f1 suzuka race in 2026",
-    );
-    expect(inferForcedSearchQuery("what time is it?")).toBe("current local time now");
-    expect(inferForcedSearchQuery("rewrite this paragraph")).toBe(null);
-    expect(inferForcedSearchQuery("can you do search?")).toBe(null);
-    expect(inferForcedSearchQuery("what about now?")).toBe(null);
-    expect(inferForcedSearchQuery("now you can search for it")).toBe(null);
-  });
-
-  it("fails closed on malformed planner output", () => {
-    const decision = parseSearchQueryDecision("shouldSearch: true\nquery: current time right now");
-
-    expect(decision).toEqual({
-      shouldSearch: false,
-      query: "",
-    });
-  });
-
   it("clamps exa result counts", () => {
     expect(clampExaResults(1)).toBe(3);
     expect(clampExaResults(5)).toBe(5);
     expect(clampExaResults(99)).toBe(8);
-  });
-
-  it("fails closed when a search decision is missing the rewritten query", () => {
-    const decision = parseSearchQueryDecision('{"shouldSearch": true, "query": ""}');
-
-    expect(decision).toEqual({
-      shouldSearch: false,
-      query: "",
-    });
   });
 
   it("signs attachment URLs for authenticated model fetches", async () => {

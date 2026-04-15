@@ -5,7 +5,7 @@
  * chat() function, speaking the chat/completions SSE protocol.
  */
 
-import type { StreamChunk, TextOptions, ModelMessage, ContentPart } from "@tanstack/ai";
+import type { StreamChunk, TextOptions, ModelMessage, ContentPart, Tool } from "@tanstack/ai";
 
 export type ChatCompletionsAdapterConfig = {
   baseUrl: string;
@@ -95,16 +95,57 @@ function convertToOpenAIMessages(
 
   // Convert each message
   for (const message of messages) {
-    const content = convertMessageContent(message.content);
-    if (content === null) continue;
+    if (message.role === "tool") {
+      const content = convertMessageContent(message.content);
+      result.push({
+        role: "tool",
+        content: typeof content === "string" ? content : JSON.stringify(content ?? ""),
+        tool_call_id: message.toolCallId,
+      });
+      continue;
+    }
 
-    result.push({
+    const content = convertMessageContent(message.content);
+    if (content === null && !(message.role === "assistant" && message.toolCalls?.length)) continue;
+
+    const convertedMessage: Record<string, unknown> = {
       role: message.role,
       content,
-    });
+    };
+    if (message.role === "assistant" && message.toolCalls?.length) {
+      convertedMessage.tool_calls = message.toolCalls.map((toolCall) => ({
+        id: toolCall.id,
+        type: toolCall.type,
+        function: {
+          name: toolCall.function.name,
+          arguments: toolCall.function.arguments,
+        },
+      }));
+    }
+
+    result.push(convertedMessage);
   }
 
   return result;
+}
+
+function convertToOpenAITools(
+  tools: Tool[] | undefined,
+): Array<Record<string, unknown>> | undefined {
+  if (!tools?.length) return undefined;
+
+  return tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.inputSchema ?? {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  }));
 }
 
 /**
@@ -225,6 +266,7 @@ export class ChatCompletionsAdapter {
    */
   async *chatStream(options: TextOptions): AsyncIterable<ExtendedStreamChunk> {
     const messages = convertToOpenAIMessages(options.messages ?? [], options.systemPrompts);
+    const tools = convertToOpenAITools(options.tools);
 
     const runId = generateId();
     const messageId = generateId();
@@ -233,6 +275,8 @@ export class ChatCompletionsAdapter {
     yield {
       type: "RUN_STARTED",
       runId,
+      timestamp: Date.now(),
+      model: this.model,
     } as ExtendedStreamChunk;
 
     const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
@@ -248,6 +292,7 @@ export class ChatCompletionsAdapter {
         stream: true,
         stream_options: { include_usage: true },
         messages,
+        ...(tools ? { tools } : {}),
         ...(options.temperature !== undefined && {
           temperature: options.temperature,
         }),
@@ -281,6 +326,16 @@ export class ChatCompletionsAdapter {
       completionTokens: null,
       reasoningTokens: null,
     };
+    let finishReason: "stop" | "length" | "content_filter" | "tool_calls" | null = "stop";
+    const toolCalls = new Map<
+      number,
+      {
+        toolCallId: string;
+        toolName: string;
+        args: string;
+        started: boolean;
+      }
+    >();
 
     try {
       while (true) {
@@ -323,8 +378,65 @@ export class ChatCompletionsAdapter {
             }
           }
 
+          const choice = parsed.choices?.[0];
+          if (choice?.finish_reason) {
+            finishReason = choice.finish_reason;
+          }
+
+          const toolCallDeltas = Array.isArray(choice?.delta?.tool_calls)
+            ? choice.delta.tool_calls
+            : [];
+          for (const toolCallDelta of toolCallDeltas) {
+            const index = typeof toolCallDelta?.index === "number" ? toolCallDelta.index : 0;
+            const current = toolCalls.get(index) ?? {
+              toolCallId: toolCallDelta?.id || generateId(),
+              toolName: toolCallDelta?.function?.name || `tool_${index}`,
+              args: "",
+              started: false,
+            };
+
+            if (typeof toolCallDelta?.id === "string" && toolCallDelta.id) {
+              current.toolCallId = toolCallDelta.id;
+            }
+            if (typeof toolCallDelta?.function?.name === "string" && toolCallDelta.function.name) {
+              current.toolName = toolCallDelta.function.name;
+            }
+
+            if (!current.started) {
+              current.started = true;
+              yield {
+                type: "TOOL_CALL_START",
+                toolCallId: current.toolCallId,
+                toolName: current.toolName,
+                parentMessageId: messageId,
+                index,
+                timestamp: Date.now(),
+                model: this.model,
+                rawEvent: parsed,
+              } as ExtendedStreamChunk;
+            }
+
+            if (
+              typeof toolCallDelta?.function?.arguments === "string" &&
+              toolCallDelta.function.arguments
+            ) {
+              current.args += toolCallDelta.function.arguments;
+              yield {
+                type: "TOOL_CALL_ARGS",
+                toolCallId: current.toolCallId,
+                delta: toolCallDelta.function.arguments,
+                args: current.args,
+                timestamp: Date.now(),
+                model: this.model,
+                rawEvent: parsed,
+              } as ExtendedStreamChunk;
+            }
+
+            toolCalls.set(index, current);
+          }
+
           // Extract content delta
-          const delta = parsed.choices?.[0]?.delta?.content ?? "";
+          const delta = choice?.delta?.content ?? "";
           if (!delta) continue;
 
           // Emit TEXT_MESSAGE_START on first content
@@ -334,6 +446,9 @@ export class ChatCompletionsAdapter {
               type: "TEXT_MESSAGE_START",
               messageId,
               role: "assistant",
+              timestamp: Date.now(),
+              model: this.model,
+              rawEvent: parsed,
             } as ExtendedStreamChunk;
           }
 
@@ -342,6 +457,9 @@ export class ChatCompletionsAdapter {
             type: "TEXT_MESSAGE_CONTENT",
             messageId,
             delta,
+            timestamp: Date.now(),
+            model: this.model,
+            rawEvent: parsed,
           } as ExtendedStreamChunk;
         }
       }
@@ -351,6 +469,8 @@ export class ChatCompletionsAdapter {
         yield {
           type: "TEXT_MESSAGE_END",
           messageId,
+          timestamp: Date.now(),
+          model: this.model,
         } as ExtendedStreamChunk;
       }
 
@@ -358,7 +478,7 @@ export class ChatCompletionsAdapter {
       const finishedEvent: ExtendedStreamChunk = {
         type: "RUN_FINISHED",
         runId,
-        finishReason: "stop",
+        finishReason,
         usage:
           usage.promptTokens !== null || usage.completionTokens !== null
             ? {
@@ -367,6 +487,8 @@ export class ChatCompletionsAdapter {
                 totalTokens: (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0),
               }
             : undefined,
+        timestamp: Date.now(),
+        model: this.model,
       } as ExtendedStreamChunk;
 
       // Add reasoning tokens as custom field
@@ -383,6 +505,8 @@ export class ChatCompletionsAdapter {
           message: error instanceof Error ? error.message : String(error),
           code: "stream_error",
         },
+        timestamp: Date.now(),
+        model: this.model,
       } as ExtendedStreamChunk;
     }
   }

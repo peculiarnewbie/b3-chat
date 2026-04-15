@@ -40,7 +40,7 @@ import {
   type AppEnv,
   type ModelMessage,
 } from "@b3-chat/server";
-import { prepareAssistantSearch, type SearchProgressEvent } from "./search";
+import { createExaSearchTool, type SearchProgressEvent } from "./search";
 import { consumeAssistantStream, type StreamConsumerDeps } from "./stream-consumer";
 type SyncCommandResult = {
   ack?: SyncServerAck;
@@ -79,6 +79,9 @@ function looksLikeMissingRealtimeAccess(text: string) {
     text,
   );
 }
+
+const SEARCH_TOOL_SYSTEM_PROMPT =
+  "You have access to the exa_web_search tool for current or external information. Use it when the answer depends on up-to-date facts, live information, or verification outside the conversation. If the tool is available, do not claim you lack access to current information without trying it when it is relevant.";
 
 export class SyncEngineDurableObject {
   private initialized = false;
@@ -621,76 +624,37 @@ export class SyncEngineDurableObject {
       payload.userMessage,
       payload.assistantMessage,
     ]);
-    if (payload.search) {
-      await reportActivity({
-        label: "Checking whether web search is needed",
-        state: "active",
-      });
-    }
-    const preparedSearch = await prepareAssistantSearch({
-      env: this.env,
-      assistantMessageId: payload.assistantMessage.id,
-      modelId,
-      promptText: payload.promptText,
-      messages: threadMessages,
-      systemPrompt: workspace.systemPrompt,
-      enabled: payload.search,
-      log: syncLog,
-      onProgress: reportActivity,
-    });
-    const searchRuns = preparedSearch.searchRuns;
-    const searchRows = preparedSearch.searchResults;
-    const searchContext = preparedSearch.searchContext;
-    syncLog("assistant_turn_context_ready", {
-      assistantMessageId: payload.assistantMessage.id,
-      searchRuns: searchRuns.length,
-      searchResults: searchRows.length,
-      hasSearchContext: Boolean(searchContext),
-    });
-    syncLog("assistant_turn_search_summary", {
-      assistantMessageId: payload.assistantMessage.id,
-      searchRuns: searchRuns.map((run) => ({
-        step: run.step,
-        query: run.query,
-        status: run.status,
-        resultCount: run.resultCount,
-      })),
-      groundingChars: searchContext.length,
-    });
+    const searchTool = payload.search
+      ? createExaSearchTool({
+          env: this.env,
+          assistantMessageId: payload.assistantMessage.id,
+          log: syncLog,
+          onProgress: reportActivity,
+          onSearchStateChange: async (state) => {
+            const searchRunEvent = await this.appendServerEvent(null, "search_runs_replaced", {
+              messageId: payload.assistantMessage.id,
+              rows: state.searchRuns,
+            });
+            this.broadcast(searchRunEvent);
 
-    if (searchRuns.length > 0) {
-      const searchRunEvent = await this.appendServerEvent(null, "search_runs_replaced", {
-        messageId: payload.assistantMessage.id,
-        rows: searchRuns,
-      });
-      this.broadcast(searchRunEvent);
-    }
-
-    if (searchRows.length > 0) {
-      const searchEvent = await this.appendServerEvent(null, "search_results_replaced", {
-        messageId: payload.assistantMessage.id,
-        rows: searchRows,
-      });
-      this.broadcast(searchEvent);
-    }
-
-    await reportActivity({
-      label:
-        searchRuns.length > 0 ? "Grounded context ready, generating answer" : "Generating answer",
-      state: "active",
-      detail:
-        searchRuns.length > 0
-          ? `${searchRuns.length} search step${searchRuns.length === 1 ? "" : "s"} completed`
-          : undefined,
-    });
+            const searchEvent = await this.appendServerEvent(null, "search_results_replaced", {
+              messageId: payload.assistantMessage.id,
+              rows: state.searchResults,
+            });
+            this.broadcast(searchEvent);
+          },
+        })
+      : null;
 
     // Build model messages with resolved attachments
     const { messages: modelMessages, systemPrompts } = await this.buildModelMessages(
       snapshot,
       workspace.id,
       threadMessages,
-      searchContext,
     );
+    if (searchTool) {
+      systemPrompts.push(SEARCH_TOOL_SYSTEM_PROMPT);
+    }
 
     // Create adapter for TanStack AI chat()
     const adapter = createChatCompletionsAdapter(
@@ -706,6 +670,7 @@ export class SyncEngineDurableObject {
       modelId,
       messageCount: modelMessages.length,
       systemPromptCount: systemPrompts.length,
+      toolCount: searchTool ? 1 : 0,
     });
 
     // Create stream consumer dependencies
@@ -725,15 +690,21 @@ export class SyncEngineDurableObject {
       adapter,
       messages: modelMessages as any,
       systemPrompts,
+      ...(searchTool ? { tools: [searchTool.tool] } : {}),
     });
 
     const result = await consumeAssistantStream(stream, consumerDeps);
+    const searchRuns = searchTool?.state.searchRuns ?? [];
 
     // Log completion metrics
-    syncLog("assistant_turn_search_grounding", {
+    syncLog("assistant_turn_search_summary", {
       assistantMessageId: payload.assistantMessage.id,
-      searchRunCount: searchRuns.length,
-      searchGroundingChars: searchContext.length,
+      searchRuns: searchRuns.map((run) => ({
+        step: run.step,
+        query: run.query,
+        status: run.status,
+        resultCount: run.resultCount,
+      })),
     });
     syncLog("assistant_turn_answer_sanity", {
       assistantMessageId: payload.assistantMessage.id,
@@ -769,7 +740,6 @@ export class SyncEngineDurableObject {
     snapshot: SyncSnapshot,
     workspaceId: string,
     threadMessages: Message[],
-    searchContext?: string,
   ): Promise<{ messages: ModelMessage[]; systemPrompts: string[] }> {
     const workspace = snapshot.tables?.[TABLES.workspaces]?.[workspaceId];
     const threadId = threadMessages[0]?.threadId;
@@ -780,9 +750,6 @@ export class SyncEngineDurableObject {
     const systemPrompts: string[] = [];
     if (workspace?.systemPrompt) {
       systemPrompts.push(workspace.systemPrompt);
-    }
-    if (searchContext) {
-      systemPrompts.push(searchContext);
     }
 
     const messages: ModelMessage[] = [];
