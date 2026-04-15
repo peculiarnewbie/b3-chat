@@ -802,7 +802,7 @@ export class SyncEngineDurableObject {
 
       if (message.role === "user") {
         for (const attachment of attachments) {
-          if (attachment.messageId && attachment.messageId !== message.id) continue;
+          if (attachment.messageId !== message.id) continue;
           if (isImageAttachment(attachment.mimeType)) {
             const signedUrl = await getSignedAttachmentUrl(this.env, attachment.objectKey);
             contentParts.push({

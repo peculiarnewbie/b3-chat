@@ -71,8 +71,9 @@ function sendOp(op: PendingSyncOp) {
 export function dispatch<T extends SyncCommandType>(
   commandType: T,
   payload: SyncCommandPayloadMap[T],
+  options?: { opId?: string },
 ): { opId: string; promise: Promise<void> } {
-  const opId = createId("op");
+  const opId = options?.opId ?? createId("op");
   const op: PendingSyncOp = {
     opId,
     clientTs: nowIso(),

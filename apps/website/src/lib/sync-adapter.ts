@@ -17,7 +17,7 @@ import {
   getSyncWriter,
   TABLE_TO_COLLECTION,
 } from "./collections";
-import { rollbackOp } from "./actions";
+import { confirmOp, rollbackOp } from "./actions";
 
 // ---------------------------------------------------------------------------
 // Delta coalescing
@@ -304,6 +304,7 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
         break;
 
       case "ack":
+        confirmOp(envelope.opId);
         pendingOps.resolve(envelope.opId);
         break;
 

@@ -40,9 +40,8 @@ import {
   archiveWorkspaceAction,
   updateThreadAction,
   updateWorkspaceAction,
+  deleteAttachmentAction,
   sendMessageAction,
-  registerAttachmentAction,
-  completeAttachmentAction,
 } from "../lib/actions";
 import {
   activeWorkspaceId,
@@ -295,6 +294,7 @@ export default function Home() {
   // Drag-and-drop state
   const [isDragging, setIsDragging] = createSignal(false);
   let dragCounter = 0;
+  const removedUploadLocalIds = new Set<string>();
 
   // File upload handlers
   const handleFileSelect = async (files: FileList | null) => {
@@ -319,13 +319,18 @@ export default function Home() {
 
       try {
         const result = await uploadFile(file, activeThread()!.id);
+        if (removedUploadLocalIds.delete(localId)) {
+          deleteAttachmentAction(result.attachment.id);
+          continue;
+        }
         setComposer("attachments", (att) => att.localId === localId, {
           attachmentId: result.attachment.id,
           status: "ready",
         });
-        registerAttachmentAction(result.attachment as any);
-        completeAttachmentAction(result.attachment as any);
       } catch (err) {
+        if (removedUploadLocalIds.delete(localId)) {
+          continue;
+        }
         console.error("Upload failed:", err);
         setComposer("attachments", (att) => att.localId === localId, "status", "failed");
       }
@@ -336,6 +341,11 @@ export default function Home() {
   const removeAttachment = (localId: string) => {
     const att = composer.attachments.find((a) => a.localId === localId);
     if (att?.previewUrl) URL.revokeObjectURL(att.previewUrl);
+    if (att?.attachmentId) {
+      deleteAttachmentAction(att.attachmentId);
+    } else {
+      removedUploadLocalIds.add(localId);
+    }
     setComposer("attachments", (prev) => prev.filter((a) => a.localId !== localId));
   };
 
@@ -932,6 +942,9 @@ export default function Home() {
 
   const retryMessage = (msg: any) => {
     if (!activeThread() || !msg.text?.trim()) return;
+    const attachmentIds = userAttachments(msg.id)
+      .filter((attachment) => attachment.status === "ready")
+      .map((attachment) => attachment.id);
     const modelId =
       composer.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto";
     sendMessageAction({
@@ -939,6 +952,7 @@ export default function Home() {
       text: msg.text.trim(),
       modelId,
       search: composer.search,
+      attachmentIds,
     });
   };
 

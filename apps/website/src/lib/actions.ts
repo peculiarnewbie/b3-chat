@@ -20,14 +20,47 @@ import { setActiveWorkspaceId, setActiveThreadId, ensureActiveSelection } from "
 // ---------------------------------------------------------------------------
 
 type OptimisticEntry = {
-  collection: { delete: (keys: string | string[]) => any };
-  key: string;
+  rollback: () => void;
+};
+
+type CollectionWithRows = {
+  delete: (keys: string | string[]) => unknown;
+  get: (key: string) => any;
+  insert: (value: any) => unknown;
+  update: (key: string, updater: (draft: any) => void) => unknown;
 };
 
 const optimisticByOp = new Map<string, OptimisticEntry[]>();
 
 function trackOptimistic(opId: string, entries: OptimisticEntry[]) {
   optimisticByOp.set(opId, entries);
+}
+
+function deleteRow(collection: Pick<CollectionWithRows, "delete">, key: string): OptimisticEntry {
+  return {
+    rollback: () => {
+      collection.delete(key);
+    },
+  };
+}
+
+function restoreRow<T extends { id: string }>(
+  collection: CollectionWithRows,
+  row: T,
+): OptimisticEntry {
+  const snapshot = { ...row };
+  return {
+    rollback: () => {
+      const existing = collection.get(snapshot.id);
+      if (existing) {
+        collection.update(snapshot.id, (draft) => {
+          Object.assign(draft, snapshot);
+        });
+        return;
+      }
+      collection.insert(snapshot);
+    },
+  };
 }
 
 /**
@@ -38,9 +71,9 @@ export function rollbackOp(opId: string) {
   if (!entries) return;
   for (const entry of entries) {
     try {
-      entry.collection.delete(entry.key);
+      entry.rollback();
     } catch {
-      // Row may already have been replaced by server data
+      // The row may already have been replaced by server data.
     }
   }
   optimisticByOp.delete(opId);
@@ -68,14 +101,18 @@ export function createWorkspaceAction(name: string, defaultModelId: string) {
   setActiveWorkspaceId(workspace.id);
   setActiveThreadId(initialThread.id);
   trackOptimistic(opId, [
-    { collection: workspaces, key: workspace.id },
-    { collection: threads, key: initialThread.id },
+    deleteRow(workspaces, workspace.id),
+    deleteRow(threads, initialThread.id),
   ]);
 
-  dispatch("create_workspace", {
-    workspace: toWire(workspace, opId),
-    initialThread: toWire(initialThread, opId),
-  });
+  dispatch(
+    "create_workspace",
+    {
+      workspace: toWire(workspace, opId),
+      initialThread: toWire(initialThread, opId),
+    },
+    { opId },
+  );
 }
 
 export function createThreadAction(workspaceId: string) {
@@ -84,9 +121,9 @@ export function createThreadAction(workspaceId: string) {
 
   threads.insert(thread);
   setActiveThreadId(thread.id);
-  trackOptimistic(opId, [{ collection: threads, key: thread.id }]);
+  trackOptimistic(opId, [deleteRow(threads, thread.id)]);
 
-  dispatch("create_thread", { thread: toWire(thread, opId) });
+  dispatch("create_thread", { thread: toWire(thread, opId) }, { opId });
 }
 
 export function archiveThreadAction(threadId: string) {
@@ -119,17 +156,27 @@ export function archiveWorkspaceAction(workspaceId: string) {
 }
 
 export function updateThreadAction(thread: Thread) {
+  const opId = createId("op");
+  const existing = threads.get(thread.id);
   threads.update(thread.id, (draft) => {
     Object.assign(draft, thread);
   });
-  dispatch("update_thread", { thread: toWire(thread, createId("op")) });
+  if (existing) {
+    trackOptimistic(opId, [restoreRow(threads, existing)]);
+  }
+  dispatch("update_thread", { thread: toWire(thread, opId) }, { opId });
 }
 
 export function updateWorkspaceAction(workspace: any) {
+  const opId = createId("op");
+  const existing = workspaces.get(workspace.id);
   workspaces.update(workspace.id, (draft) => {
     Object.assign(draft, workspace);
   });
-  dispatch("update_workspace", { workspace: toWire(workspace, createId("op")) });
+  if (existing) {
+    trackOptimistic(opId, [restoreRow(workspaces, existing)]);
+  }
+  dispatch("update_workspace", { workspace: toWire(workspace, opId) }, { opId });
 }
 
 export function sendMessageAction(input: {
@@ -173,32 +220,39 @@ export function sendMessageAction(input: {
   messages.insert(userMessage);
   messages.insert(assistantMessage);
 
-  // Link attachments to user message
+  const rollbackEntries: OptimisticEntry[] = [
+    restoreRow(threads, input.thread),
+    deleteRow(messages, userMessage.id),
+    deleteRow(messages, assistantMessage.id),
+  ];
+
+  // Link attachments to the user message locally for immediate UI feedback.
   for (const attachmentId of input.attachmentIds ?? []) {
     const existing = attachments.get(attachmentId) as Attachment | undefined;
     if (!existing) continue;
-    completeAttachmentAction({
-      ...existing,
-      messageId: userMessage.id,
-      status: "ready",
+    rollbackEntries.push(restoreRow(attachments, existing));
+    attachments.update(attachmentId, (draft) => {
+      draft.messageId = userMessage.id;
+      draft.status = "ready";
     });
   }
 
-  trackOptimistic(opId, [
-    { collection: messages, key: userMessage.id },
-    { collection: messages, key: assistantMessage.id },
-  ]);
+  trackOptimistic(opId, rollbackEntries);
 
-  dispatch("create_user_message", {
-    threadId: input.thread.id,
-    thread: toWire(threadUpdate, opId),
-    userMessage: toWire(userMessage, opId),
-    assistantMessage: toWire(assistantMessage, opId),
-    promptText: input.text,
-    modelId: input.modelId,
-    search: input.search,
-    attachmentIds: input.attachmentIds ?? [],
-  } satisfies CreateUserMessagePayload);
+  dispatch(
+    "create_user_message",
+    {
+      threadId: input.thread.id,
+      thread: toWire(threadUpdate, opId),
+      userMessage: toWire(userMessage, opId),
+      assistantMessage: toWire(assistantMessage, opId),
+      promptText: input.text,
+      modelId: input.modelId,
+      search: input.search,
+      attachmentIds: input.attachmentIds ?? [],
+    } satisfies CreateUserMessagePayload,
+    { opId },
+  );
 }
 
 export function registerAttachmentAction(attachment: Attachment) {
@@ -206,8 +260,11 @@ export function registerAttachmentAction(attachment: Attachment) {
   const existing = attachments.get(attachment.id) as Attachment | undefined;
   const merged = mergeAttachmentLink(existing ?? null, attachment);
   attachments.insert(merged);
-  trackOptimistic(opId, [{ collection: attachments, key: attachment.id }]);
-  dispatch("register_attachment", { attachment: toWire(merged, opId) });
+  trackOptimistic(
+    opId,
+    existing ? [restoreRow(attachments, existing)] : [deleteRow(attachments, attachment.id)],
+  );
+  dispatch("register_attachment", { attachment: toWire(merged, opId) }, { opId });
 }
 
 export function completeAttachmentAction(attachment: Attachment) {
@@ -221,5 +278,13 @@ export function completeAttachmentAction(attachment: Attachment) {
   } else {
     attachments.insert(merged);
   }
-  dispatch("complete_attachment", { attachment: toWire(merged, opId) });
+  trackOptimistic(
+    opId,
+    existing ? [restoreRow(attachments, existing)] : [deleteRow(attachments, attachment.id)],
+  );
+  dispatch("complete_attachment", { attachment: toWire(merged, opId) }, { opId });
+}
+
+export function deleteAttachmentAction(attachmentId: string) {
+  dispatch("delete_attachment", { id: attachmentId });
 }
