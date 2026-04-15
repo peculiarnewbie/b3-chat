@@ -1,6 +1,7 @@
 import {
   buildMultiSearchContext,
   createAttachment,
+  createThread,
   createWorkspace,
   mergeAttachmentLink,
   sortConversationMessages,
@@ -19,7 +20,18 @@ import {
   parseExaMcpTextResponse,
   verifyUploadToken,
 } from "@b3-chat/server";
-import { describe, expect, it } from "vite-plus/test";
+import { beforeEach, describe, expect, it } from "vite-plus/test";
+import { sendMessageAction } from "./actions";
+import { applyLocalInsert, messages, resetCollections, threads, workspaces } from "./collections";
+import { resetPendingOps } from "./pending-ops";
+
+beforeEach(() => {
+  resetCollections();
+  resetPendingOps();
+  if (typeof localStorage !== "undefined") {
+    localStorage.clear();
+  }
+});
 
 describe("domain helpers", () => {
   it("slugifies workspace names", () => {
@@ -129,6 +141,36 @@ describe("domain helpers", () => {
     ]);
 
     expect(sorted.map((message) => message.id)).toEqual(["msg_user", "msg_assistant"]);
+  });
+
+  it("optimistically sends a message without direct collection mutations", () => {
+    const workspace = createWorkspace({
+      name: "Writing",
+      defaultModelId: "openai/gpt-4.1",
+    });
+    const thread = createThread({ workspaceId: workspace.id });
+
+    applyLocalInsert("workspaces", workspace);
+    applyLocalInsert("threads", thread);
+
+    expect(() =>
+      sendMessageAction({
+        thread,
+        text: "hello",
+        modelId: workspace.defaultModelId,
+        search: false,
+      }),
+    ).not.toThrow();
+
+    const persistedThread = threads.get(thread.id);
+    const optimisticMessages = [...messages.state.values()].filter(
+      (message) => message.threadId === thread.id,
+    );
+
+    expect(workspaces.get(workspace.id)).toBeTruthy();
+    expect(persistedThread?.title).toBe("hello");
+    expect(optimisticMessages).toHaveLength(2);
+    expect(optimisticMessages.map((message) => message.role).sort()).toEqual(["assistant", "user"]);
   });
 });
 

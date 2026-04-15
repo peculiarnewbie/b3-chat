@@ -11,7 +11,15 @@ import {
   type CreateUserMessagePayload,
 } from "@b3-chat/domain";
 import { dispatch } from "./pending-ops";
-import { workspaces, threads, messages, attachments } from "./collections";
+import {
+  workspaces,
+  threads,
+  attachments,
+  applyLocalDelete,
+  applyLocalInsert,
+  applyLocalUpdate,
+  type CollectionId,
+} from "./collections";
 import { setActiveWorkspaceId, setActiveThreadId, ensureActiveSelection } from "./ui-state";
 
 // ---------------------------------------------------------------------------
@@ -23,10 +31,7 @@ type OptimisticEntry = {
 };
 
 type CollectionWithRows = {
-  delete: (keys: string | string[]) => unknown;
   get: (key: string) => any;
-  insert: (value: any) => unknown;
-  update: (key: string, updater: (draft: any) => void) => unknown;
 };
 
 const optimisticByOp = new Map<string, OptimisticEntry[]>();
@@ -35,15 +40,16 @@ function trackOptimistic(opId: string, entries: OptimisticEntry[]) {
   optimisticByOp.set(opId, entries);
 }
 
-function deleteRow(collection: Pick<CollectionWithRows, "delete">, key: string): OptimisticEntry {
+function deleteRow(collectionId: CollectionId, key: string): OptimisticEntry {
   return {
     rollback: () => {
-      collection.delete(key);
+      applyLocalDelete(collectionId, key);
     },
   };
 }
 
 function restoreRow<T extends { id: string }>(
+  collectionId: CollectionId,
   collection: CollectionWithRows,
   row: T,
 ): OptimisticEntry {
@@ -52,12 +58,10 @@ function restoreRow<T extends { id: string }>(
     rollback: () => {
       const existing = collection.get(snapshot.id);
       if (existing) {
-        collection.update(snapshot.id, (draft) => {
-          Object.assign(draft, snapshot);
-        });
+        applyLocalUpdate(collectionId, snapshot);
         return;
       }
-      collection.insert(snapshot);
+      applyLocalInsert(collectionId, snapshot);
     },
   };
 }
@@ -102,13 +106,13 @@ export function createWorkspaceAction(
   const initialThread = createThread({ workspaceId: workspace.id });
 
   // Optimistic
-  workspaces.insert(workspace);
-  threads.insert(initialThread);
+  applyLocalInsert("workspaces", workspace);
+  applyLocalInsert("threads", initialThread);
   setActiveWorkspaceId(workspace.id);
   setActiveThreadId(initialThread.id);
   trackOptimistic(opId, [
-    deleteRow(workspaces, workspace.id),
-    deleteRow(threads, initialThread.id),
+    deleteRow("workspaces", workspace.id),
+    deleteRow("threads", initialThread.id),
   ]);
 
   dispatch(
@@ -125,9 +129,9 @@ export function createThreadAction(workspaceId: string) {
   const opId = createId("op");
   const thread = createThread({ workspaceId });
 
-  threads.insert(thread);
+  applyLocalInsert("threads", thread);
   setActiveThreadId(thread.id);
-  trackOptimistic(opId, [deleteRow(threads, thread.id)]);
+  trackOptimistic(opId, [deleteRow("threads", thread.id)]);
 
   dispatch("create_thread", { thread: toWire(thread, opId) }, { opId });
 }
@@ -135,13 +139,15 @@ export function createThreadAction(workspaceId: string) {
 export function archiveThreadAction(threadId: string) {
   const existing = threads.get(threadId);
   if (!existing) return;
+  const updatedAt = nowIso();
 
-  threads.update(threadId, (draft) => {
-    draft.archivedAt = nowIso();
-    draft.updatedAt = nowIso();
+  applyLocalUpdate("threads", {
+    ...existing,
+    archivedAt: updatedAt,
+    updatedAt,
   });
 
-  dispatch("archive_thread", { id: threadId, archivedAt: nowIso() });
+  dispatch("archive_thread", { id: threadId, archivedAt: updatedAt });
 
   // Re-validate selection
   ensureActiveSelection([...workspaces.state.values()], [...threads.state.values()]);
@@ -150,13 +156,15 @@ export function archiveThreadAction(threadId: string) {
 export function archiveWorkspaceAction(workspaceId: string) {
   const existing = workspaces.get(workspaceId);
   if (!existing) return;
+  const updatedAt = nowIso();
 
-  workspaces.update(workspaceId, (draft) => {
-    draft.archivedAt = nowIso();
-    draft.updatedAt = nowIso();
+  applyLocalUpdate("workspaces", {
+    ...existing,
+    archivedAt: updatedAt,
+    updatedAt,
   });
 
-  dispatch("archive_workspace", { id: workspaceId, archivedAt: nowIso() });
+  dispatch("archive_workspace", { id: workspaceId, archivedAt: updatedAt });
 
   ensureActiveSelection([...workspaces.state.values()], [...threads.state.values()]);
 }
@@ -164,11 +172,9 @@ export function archiveWorkspaceAction(workspaceId: string) {
 export function updateThreadAction(thread: Thread) {
   const opId = createId("op");
   const existing = threads.get(thread.id);
-  threads.update(thread.id, (draft) => {
-    Object.assign(draft, thread);
-  });
+  applyLocalUpdate("threads", thread);
   if (existing) {
-    trackOptimistic(opId, [restoreRow(threads, existing)]);
+    trackOptimistic(opId, [restoreRow("threads", threads, existing)]);
   }
   dispatch("update_thread", { thread: toWire(thread, opId) }, { opId });
 }
@@ -176,11 +182,9 @@ export function updateThreadAction(thread: Thread) {
 export function updateWorkspaceAction(workspace: any) {
   const opId = createId("op");
   const existing = workspaces.get(workspace.id);
-  workspaces.update(workspace.id, (draft) => {
-    Object.assign(draft, workspace);
-  });
+  applyLocalUpdate("workspaces", workspace);
   if (existing) {
-    trackOptimistic(opId, [restoreRow(workspaces, existing)]);
+    trackOptimistic(opId, [restoreRow("workspaces", workspaces, existing)]);
   }
   dispatch("update_workspace", { workspace: toWire(workspace, opId) }, { opId });
 }
@@ -220,26 +224,25 @@ export function sendMessageAction(input: {
   });
 
   // Optimistic mutations
-  threads.update(input.thread.id, (draft) => {
-    Object.assign(draft, threadUpdate);
-  });
-  messages.insert(userMessage);
-  messages.insert(assistantMessage);
+  applyLocalUpdate("threads", threadUpdate);
+  applyLocalInsert("messages", userMessage);
+  applyLocalInsert("messages", assistantMessage);
 
   const rollbackEntries: OptimisticEntry[] = [
-    restoreRow(threads, input.thread),
-    deleteRow(messages, userMessage.id),
-    deleteRow(messages, assistantMessage.id),
+    restoreRow("threads", threads, input.thread),
+    deleteRow("messages", userMessage.id),
+    deleteRow("messages", assistantMessage.id),
   ];
 
   // Link attachments to the user message locally for immediate UI feedback.
   for (const attachmentId of input.attachmentIds ?? []) {
     const existing = attachments.get(attachmentId) as Attachment | undefined;
     if (!existing) continue;
-    rollbackEntries.push(restoreRow(attachments, existing));
-    attachments.update(attachmentId, (draft) => {
-      draft.messageId = userMessage.id;
-      draft.status = "ready";
+    rollbackEntries.push(restoreRow("attachments", attachments, existing));
+    applyLocalUpdate("attachments", {
+      ...existing,
+      messageId: userMessage.id,
+      status: "ready",
     });
   }
 

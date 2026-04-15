@@ -126,6 +126,12 @@ export function clear() {
   persist();
 }
 
+/** Test helper: drop pending ops without rejecting in-flight promises. */
+export function resetPendingOps() {
+  ops.clear();
+  persist();
+}
+
 /** Get all unacked opIds for the hello handshake. */
 export function unackedOpIds(): string[] {
   return [...ops.keys()];
