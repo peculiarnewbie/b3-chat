@@ -519,20 +519,6 @@ export function createAttachment(input: {
   });
 }
 
-export function buildSearchContext(input: {
-  query: string;
-  rows: Array<{ title: string; url: string; snippet: string }>;
-}) {
-  return buildMultiSearchContext({
-    runs: [
-      {
-        query: input.query,
-        rows: input.rows,
-      },
-    ],
-  });
-}
-
 export function buildMultiSearchContext(input: {
   runs: Array<{
     query: string;

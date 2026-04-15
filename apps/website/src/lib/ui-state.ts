@@ -26,13 +26,6 @@ export const [activeWorkspaceId, setActiveWorkspaceId] =
 export const [activeThreadId, setActiveThreadId] = createPersistedSignal("b3.activeThreadId");
 
 // ---------------------------------------------------------------------------
-// Non-persisted signals
-// ---------------------------------------------------------------------------
-
-const [sidebarQuery, setSidebarQuery] = createSignal("");
-export { sidebarQuery, setSidebarQuery };
-
-// ---------------------------------------------------------------------------
 // Selection validation
 // ---------------------------------------------------------------------------
 

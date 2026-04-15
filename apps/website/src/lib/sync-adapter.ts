@@ -295,8 +295,6 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
 
     switch (envelope.type) {
       case "hello_ack":
-        conn.markHandshakeComplete();
-        conn.setConnectionStatus("connected");
         if (envelope.lastServerSeq > conn.getLastServerSeq()) {
           conn.setLastServerSeq(envelope.lastServerSeq);
         }

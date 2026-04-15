@@ -1,7 +1,6 @@
 import {
   buildMultiSearchContext,
   buildSearchPlanningContext,
-  buildSearchContext,
   createAttachment,
   createWorkspace,
   mergeAttachmentLink,
@@ -15,7 +14,6 @@ import {
   extractChatCompletionText,
   filterModelsCatalog,
   getSignedAttachmentUrl,
-  getSearchPlannerModelId,
   inferForcedSearchQuery,
   isImageAttachment,
   isInlineTextAttachment,
@@ -67,13 +65,17 @@ describe("domain helpers", () => {
   });
 
   it("builds grounded search context blocks", () => {
-    const context = buildSearchContext({
-      query: "current date and time right now",
-      rows: [
+    const context = buildMultiSearchContext({
+      runs: [
         {
-          title: "Example",
-          url: "https://example.com",
-          snippet: "hello world",
+          query: "current date and time right now",
+          rows: [
+            {
+              title: "Example",
+              url: "https://example.com",
+              snippet: "hello world",
+            },
+          ],
         },
       ],
     });
@@ -268,10 +270,6 @@ describe("server helpers", () => {
     );
 
     expect(result.models).toHaveLength(2);
-  });
-
-  it("uses the dedicated search planner model", () => {
-    expect(getSearchPlannerModelId()).toBe("minimax-m2.5");
   });
 
   it("classifies supported attachment types", () => {

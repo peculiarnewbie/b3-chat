@@ -1,5 +1,4 @@
 import { createId, type SyncServerEnvelope } from "@b3-chat/domain";
-import { createSignal } from "solid-js";
 import * as pendingOps from "./pending-ops";
 
 // ---------------------------------------------------------------------------
@@ -37,15 +36,6 @@ export function setLastServerSeq(seq: number) {
     localStorage.setItem(LAST_SERVER_SEQ_KEY, JSON.stringify(seq));
   }
 }
-
-// ---------------------------------------------------------------------------
-// Connection status signal
-// ---------------------------------------------------------------------------
-
-export type ConnectionStatus = "connecting" | "connected" | "offline" | "degraded";
-
-const [connectionStatus, setConnectionStatus] = createSignal<ConnectionStatus>("connecting");
-export { connectionStatus, setConnectionStatus };
 
 // ---------------------------------------------------------------------------
 // Envelope callback — set by sync-adapter
@@ -96,7 +86,6 @@ function flush() {
 let socket: WebSocket | undefined;
 let reconnectAttempt = 0;
 let reconnectTimer: number | undefined;
-let handshakeComplete = false;
 let started = false;
 
 function syncLog(message: string, details?: Record<string, unknown>) {
@@ -107,7 +96,7 @@ function syncLog(message: string, details?: Record<string, unknown>) {
   console.log(`[ws] ${message}`);
 }
 
-export function send(message: object) {
+function send(message: object) {
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(message));
   }
@@ -115,12 +104,10 @@ export function send(message: object) {
 
 function connect() {
   if (typeof window === "undefined") return;
-  setConnectionStatus("connecting");
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   syncLog("connect", { clientId, lastServerSeq });
   const ws = new WebSocket(`${protocol}//${location.host}/api/sync/ws`);
   socket = ws;
-  handshakeComplete = false;
 
   ws.addEventListener("open", () => {
     reconnectAttempt = 0;
@@ -140,15 +127,11 @@ function connect() {
 
   ws.addEventListener("close", () => {
     syncLog("close");
-    handshakeComplete = false;
-    setConnectionStatus("offline");
     scheduleReconnect();
   });
 
   ws.addEventListener("error", () => {
     syncLog("error");
-    handshakeComplete = false;
-    setConnectionStatus("degraded");
   });
 }
 
@@ -157,14 +140,6 @@ function scheduleReconnect() {
   if (reconnectTimer) window.clearTimeout(reconnectTimer);
   const delay = Math.min(10_000, 500 * 2 ** reconnectAttempt++);
   reconnectTimer = window.setTimeout(() => connect(), delay);
-}
-
-export function isHandshakeComplete() {
-  return handshakeComplete;
-}
-
-export function markHandshakeComplete() {
-  handshakeComplete = true;
 }
 
 /** Called once from UI onMount. */

@@ -18,10 +18,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { sql } from "drizzle-orm";
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import {
-  TABLES,
-  buildMultiSearchContext,
   createId,
-  nowIso,
   type SyncCommandPayloadMap,
   type SyncCommandType,
   type SyncSnapshot,
@@ -220,10 +217,6 @@ export function allowedEmail(env: AppEnv) {
 
 export function getDefaultModelId(env: Pick<AppEnv, "DEFAULT_MODEL_ID">) {
   return env.DEFAULT_MODEL_ID?.trim() || "auto";
-}
-
-export function getSearchPlannerModelId() {
-  return SEARCH_PLANNER_MODEL_ID;
 }
 
 export function getRuntimeEnv() {
@@ -542,7 +535,7 @@ export async function decideSearchQuery(
       baseUrl: env.OPENCODE_GO_BASE_URL,
       apiKey: env.OPENCODE_GO_API_KEY,
     },
-    getSearchPlannerModelId(),
+    SEARCH_PLANNER_MODEL_ID,
   );
 
   // Use TanStack AI's chat() with stream: false for non-streaming text response
@@ -599,18 +592,6 @@ export async function exaMcpSearchRawText(query: string, numResults = DEFAULT_EX
   return text;
 }
 
-export async function exaMcpSearchContext(query: string, numResults = DEFAULT_EXA_RESULTS) {
-  const text = await exaMcpSearchRawText(query, numResults);
-  return buildMultiSearchContext({
-    runs: [
-      {
-        query,
-        rawText: text,
-      },
-    ],
-  });
-}
-
 export async function completeTextAttachment(env: AppEnv, objectKey: string) {
   const object = await env.UPLOADS.get(objectKey);
   if (!object) return null;
@@ -634,33 +615,6 @@ export function isInlineTextAttachment(mimeType: string, sizeBytes: number) {
 
 export function isImageAttachment(mimeType: string) {
   return mimeType.startsWith("image/");
-}
-
-export async function collectChatHistory(snapshot: SyncSnapshot, threadId: string) {
-  const tables = snapshot.tables ?? {};
-  const messages = Object.values<any>(tables[TABLES.messages] ?? {})
-    .filter((message) => message.threadId === threadId)
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  const partsByMessage = Object.values<any>(tables[TABLES.messageParts] ?? {}).reduce(
-    (acc, part) => {
-      (acc[part.messageId] ??= []).push(part);
-      return acc;
-    },
-    {} as Record<string, any[]>,
-  );
-  Object.values<any[]>(partsByMessage).forEach((parts) =>
-    parts.sort((a: any, b: any) => a.seq - b.seq),
-  );
-  return messages.map((message) => ({
-    ...message,
-    parts: partsByMessage[message.id] ?? [],
-  }));
-}
-
-export function makeThreadTitle(messages: any[]) {
-  const first = messages.find((message) => message.role === "user" && message.text?.trim());
-  if (!first) return "New Chat";
-  return String(first.text).trim().replace(/\s+/g, " ").slice(0, 48) || "New Chat";
 }
 
 export async function createUploadUrl(request: Request, objectKey: string) {
@@ -698,13 +652,4 @@ export async function verifyUploadToken(env: AppEnv, token: string) {
   const valid = await crypto.subtle.verify("HMAC", keyMaterial, signatureBytes, payloadBytes);
   if (!valid) return null;
   return JSON.parse(new TextDecoder().decode(payloadBytes)) as Record<string, unknown>;
-}
-
-export async function heartbeat(env: AppEnv) {
-  const db = drizzle(env.AUTH_DB);
-  await db.run(sql`select 1`);
-  return {
-    ok: true,
-    at: nowIso(),
-  };
 }

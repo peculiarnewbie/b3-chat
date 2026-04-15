@@ -3,7 +3,6 @@ import {
   createMessage,
   createThread,
   createWorkspace,
-  mergeAttachmentLink,
   nowIso,
   summarizeThreadTitle,
   toWire,
@@ -253,36 +252,6 @@ export function sendMessageAction(input: {
     } satisfies CreateUserMessagePayload,
     { opId },
   );
-}
-
-export function registerAttachmentAction(attachment: Attachment) {
-  const opId = createId("op");
-  const existing = attachments.get(attachment.id) as Attachment | undefined;
-  const merged = mergeAttachmentLink(existing ?? null, attachment);
-  attachments.insert(merged);
-  trackOptimistic(
-    opId,
-    existing ? [restoreRow(attachments, existing)] : [deleteRow(attachments, attachment.id)],
-  );
-  dispatch("register_attachment", { attachment: toWire(merged, opId) }, { opId });
-}
-
-export function completeAttachmentAction(attachment: Attachment) {
-  const opId = createId("op");
-  const existing = attachments.get(attachment.id) as Attachment | undefined;
-  const merged = mergeAttachmentLink(existing ?? null, attachment);
-  if (existing) {
-    attachments.update(attachment.id, (draft) => {
-      Object.assign(draft, merged);
-    });
-  } else {
-    attachments.insert(merged);
-  }
-  trackOptimistic(
-    opId,
-    existing ? [restoreRow(attachments, existing)] : [deleteRow(attachments, attachment.id)],
-  );
-  dispatch("complete_attachment", { attachment: toWire(merged, opId) }, { opId });
 }
 
 export function deleteAttachmentAction(attachmentId: string) {

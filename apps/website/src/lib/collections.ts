@@ -55,17 +55,6 @@ export const attachments = createSyncedCollection<Attachment>("attachments", (a)
 export const searchRuns = createSyncedCollection<SearchRun>("searchRuns", (sr) => sr.id);
 export const searchResults = createSyncedCollection<SearchResult>("searchResults", (sr) => sr.id);
 
-// All collections for bulk operations (sync_reset, etc.)
-export const allCollections = [
-  workspaces,
-  threads,
-  messages,
-  messageParts,
-  attachments,
-  searchRuns,
-  searchResults,
-] as const;
-
 // Map from server table names (used in SyncSnapshot) to collection ids
 export const TABLE_TO_COLLECTION: Record<string, string> = {
   workspaces: "workspaces",
