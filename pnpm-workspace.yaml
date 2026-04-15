@@ -4,18 +4,17 @@ packages:
   - tools/*
 
 catalog:
-  "@better-auth/infra": ^0.1.13
+  "@better-auth/infra": ^0.1.14
   "@tanstack/db": ^0.6.5
   "@tanstack/solid-db": ^0.2.19
-  "@types/dompurify": ^3.2.0
   "@types/node": ^24
-  dompurify: ^3.3.3
+  dompurify: ^3.4.0
   highlight.js: ^11.11.1
-  marked: ^17.0.5
-  marked-highlight: ^2.2.3
+  marked: ^17.0.6
+  marked-highlight: ^2.2.4
   typescript: ^5
   vite: npm:@voidzero-dev/vite-plus-core@latest
-  vite-plus: latest
+  vite-plus: ^0.1.18
   vitest: npm:@voidzero-dev/vite-plus-test@latest
 
 catalogMode: prefer
