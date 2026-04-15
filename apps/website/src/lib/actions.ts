@@ -89,9 +89,16 @@ export function confirmOp(opId: string) {
 // Actions
 // ---------------------------------------------------------------------------
 
-export function createWorkspaceAction(name: string, defaultModelId: string) {
+export function createWorkspaceAction(
+  name: string,
+  input: { defaultModelId: string; defaultSearchMode?: boolean },
+) {
   const opId = createId("op");
-  const workspace = createWorkspace({ name, defaultModelId });
+  const workspace = createWorkspace({
+    name,
+    defaultModelId: input.defaultModelId,
+    defaultSearchMode: input.defaultSearchMode,
+  });
   const initialThread = createThread({ workspaceId: workspace.id });
 
   // Optimistic

@@ -200,20 +200,6 @@ function getInitialTheme(): Theme {
   return "clean";
 }
 
-function getInitialModelId(): string {
-  if (typeof localStorage !== "undefined") {
-    return localStorage.getItem("b3-modelId") ?? "";
-  }
-  return "";
-}
-
-function getInitialSearch(): boolean {
-  if (typeof localStorage !== "undefined") {
-    return localStorage.getItem("b3-search") === "true";
-  }
-  return false;
-}
-
 const fetchSession = async () => {
   const response = await fetch("/api/session");
   if (response.status === 401) return null;
@@ -258,8 +244,8 @@ export default function Home() {
   >({});
   const [composer, setComposer] = createStore({
     text: "",
-    modelId: getInitialModelId(),
-    search: getInitialSearch(),
+    modelId: "",
+    search: false,
     sending: false,
     attachments: [] as Array<{
       localId: string;
@@ -406,18 +392,6 @@ export default function Home() {
     localStorage.setItem("b3-theme", theme());
   });
 
-  // Persist model selection
-  createEffect(() => {
-    if (composer.modelId) {
-      localStorage.setItem("b3-modelId", composer.modelId);
-    }
-  });
-
-  // Persist search toggle
-  createEffect(() => {
-    localStorage.setItem("b3-search", String(composer.search));
-  });
-
   // Sync system prompt draft when settings opens or workspace changes
   createEffect(() => {
     if (settingsOpen()) {
@@ -426,12 +400,25 @@ export default function Home() {
   });
 
   createEffect(() => {
+    const workspace = activeWorkspace();
+    if (!workspace) return;
+    setComposer("modelId", workspace.defaultModelId);
+    setComposer("search", workspace.defaultSearchMode);
+  });
+
+  createEffect(() => {
     const modelList = models()?.models ?? [];
-    if (!composer.modelId && modelList[0]) setComposer("modelId", modelList[0].id);
-    // If we have a persisted model, validate it still exists
-    if (composer.modelId && modelList.length > 0) {
-      const exists = modelList.some((m) => m.id === composer.modelId);
-      if (!exists) setComposer("modelId", modelList[0].id);
+    const workspace = activeWorkspace();
+    if (!workspace) {
+      if (!composer.modelId && modelList[0]) setComposer("modelId", modelList[0].id);
+      return;
+    }
+
+    if (workspace.defaultModelId && modelList.length > 0) {
+      const exists = modelList.some((m) => m.id === workspace.defaultModelId);
+      if (!exists && modelList[0]) {
+        updateWorkspacePreferences({ defaultModelId: modelList[0].id });
+      }
     }
   });
 
@@ -863,10 +850,10 @@ export default function Home() {
   };
 
   const createNewWorkspace = async () => {
-    createWorkspaceAction(
-      `Workspace ${workspaces().length + 1}`,
-      composer.modelId || models()?.models?.[0]?.id || "auto",
-    );
+    createWorkspaceAction(`Workspace ${workspaces().length + 1}`, {
+      defaultModelId: composer.modelId || models()?.models?.[0]?.id || "auto",
+      defaultSearchMode: composer.search,
+    });
   };
 
   const createNewThread = async () => {
@@ -938,6 +925,28 @@ export default function Home() {
       updatedAt: nowIso(),
     });
     setSettingsOpen(false);
+  };
+
+  const updateWorkspacePreferences = (
+    changes: Partial<Pick<Workspace, "defaultModelId" | "defaultSearchMode">>,
+  ) => {
+    const workspace = activeWorkspace();
+    if (!workspace) return;
+    updateWorkspaceAction({
+      ...workspace,
+      ...changes,
+      updatedAt: nowIso(),
+    });
+  };
+
+  const handleModelChange = (modelId: string) => {
+    setComposer("modelId", modelId);
+    updateWorkspacePreferences({ defaultModelId: modelId });
+  };
+
+  const handleSearchChange = (search: boolean) => {
+    setComposer("search", search);
+    updateWorkspacePreferences({ defaultSearchMode: search });
   };
 
   const retryMessage = (msg: any) => {
@@ -1345,7 +1354,7 @@ export default function Home() {
                 />
                 <select
                   value={composer.modelId}
-                  onChange={(event) => setComposer("modelId", event.currentTarget.value)}
+                  onChange={(event) => handleModelChange(event.currentTarget.value)}
                 >
                   <For each={models()?.models ?? []}>
                     {(model) => <option value={model.id}>{model.name}</option>}
@@ -1355,7 +1364,7 @@ export default function Home() {
                   <input
                     type="checkbox"
                     checked={composer.search}
-                    onChange={(event) => setComposer("search", event.currentTarget.checked)}
+                    onChange={(event) => handleSearchChange(event.currentTarget.checked)}
                   />
                   Search
                 </label>
