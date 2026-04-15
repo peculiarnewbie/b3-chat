@@ -244,15 +244,16 @@ function applySnapshot(tables: Record<string, Record<string, any>> | undefined) 
   for (const [tableName, collectionId] of Object.entries(TABLE_TO_COLLECTION)) {
     const writer = getSyncWriter(collectionId);
     if (!writer) continue;
+    // Truncate and insert in one transaction
+    writer.begin();
     writer.truncate();
     const rows = tables[tableName];
     if (rows) {
-      writer.begin();
       for (const [_key, value] of Object.entries(rows)) {
         writer.write({ type: "insert", value });
       }
-      writer.commit();
     }
+    writer.commit();
     writer.markReady();
   }
 }
@@ -295,6 +296,10 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
 
     switch (envelope.type) {
       case "hello_ack":
+        console.log("[sync] hello_ack", {
+          serverSeq: envelope.lastServerSeq,
+          localSeq: conn.getLastServerSeq(),
+        });
         if (envelope.lastServerSeq > conn.getLastServerSeq()) {
           conn.setLastServerSeq(envelope.lastServerSeq);
         }
@@ -313,7 +318,11 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
         break;
 
       case "sync_reset":
-        console.log(`[sync] sync_reset reason=${envelope.reason}`);
+        console.log(`[sync] sync_reset reason=${envelope.reason}`, {
+          tables: Object.keys(envelope.snapshot.tables ?? {}),
+          workspaceCount: Object.keys(envelope.snapshot.tables?.workspaces ?? {}).length,
+          threadCount: Object.keys(envelope.snapshot.tables?.threads ?? {}).length,
+        });
         if (envelope.reason !== "initial_sync") {
           pendingOps.clear();
         }
@@ -329,6 +338,11 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
 
   if (needsSelectionCheck) {
     const { workspaces: ws, threads: ts } = collectWorkspacesAndThreads();
+    console.log("[sync] ensureActiveSelection", {
+      workspaceCount: ws.length,
+      threadCount: ts.length,
+      workspaceIds: ws.map((w) => w.id),
+    });
     ensureActiveSelection(ws, ts);
   }
 }

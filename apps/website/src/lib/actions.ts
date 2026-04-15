@@ -264,3 +264,14 @@ export function sendMessageAction(input: {
 export function deleteAttachmentAction(attachmentId: string) {
   dispatch("delete_attachment", { id: attachmentId });
 }
+
+export function resetLocalSync() {
+  // Just clear localStorage and reload - server will send fresh sync_reset
+  if (typeof localStorage !== "undefined") {
+    localStorage.removeItem("b3.lastServerSeq");
+    localStorage.removeItem("b3.activeWorkspaceId");
+    localStorage.removeItem("b3.activeThreadId");
+    localStorage.removeItem("b3.clientId");
+  }
+  location.reload();
+}

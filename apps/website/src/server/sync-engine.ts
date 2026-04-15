@@ -277,11 +277,20 @@ export class SyncEngineDurableObject {
       } satisfies SyncServerEnvelope),
     );
 
-    if (hello.lastServerSeq <= 0) {
+    // Check if client needs a full resync:
+    // 1. lastServerSeq <= 0 means fresh client
+    // 2. lastServerSeq < oldest event means the cursor is stale (events were pruned or client has old data)
+    const oldestSeq = this.getOldestEventSeq();
+    const needsFullSync =
+      hello.lastServerSeq <= 0 || (oldestSeq > 0 && hello.lastServerSeq < oldestSeq);
+
+    if (needsFullSync) {
+      const reason = hello.lastServerSeq <= 0 ? "initial_sync" : "cursor_stale";
+      syncLog("sync_reset", { reason, clientSeq: hello.lastServerSeq, oldestSeq });
       ws.send(
         json({
           type: "sync_reset",
-          reason: "initial_sync",
+          reason,
           snapshot: await this.getSnapshot(),
         } satisfies SyncServerEnvelope),
       );
@@ -525,6 +534,41 @@ export class SyncEngineDurableObject {
                 opId,
               ),
             }),
+          );
+          break;
+        }
+        case "reset_storage": {
+          // Drop all data and reset to a fresh state
+          syncLog("reset_storage", { opId });
+          this.exec(`DELETE FROM workspaces`);
+          this.exec(`DELETE FROM threads`);
+          this.exec(`DELETE FROM messages`);
+          this.exec(`DELETE FROM message_parts`);
+          this.exec(`DELETE FROM attachments`);
+          this.exec(`DELETE FROM search_runs`);
+          this.exec(`DELETE FROM search_results`);
+          this.exec(`DELETE FROM events`);
+          this.exec(`DELETE FROM commands`);
+          // Bootstrap a fresh workspace
+          const workspace = {
+            ...createWorkspace({
+              name: "Default Workspace",
+              defaultModelId: getDefaultModelId(this.env),
+            }),
+            optimistic: false,
+            opId,
+          };
+          const thread = {
+            ...createThread({
+              workspaceId: workspace.id,
+              title: "New Chat",
+            }),
+            optimistic: false,
+            opId,
+          };
+          pendingEvents.push(
+            this.insertEvent(opId, "workspace_upserted", { row: workspace }),
+            this.insertEvent(opId, "thread_upserted", { row: thread }),
           );
           break;
         }
@@ -1131,6 +1175,15 @@ export class SyncEngineDurableObject {
       payload: parseJson(row.payload_json),
       causedByOpId: row.op_id,
     }));
+  }
+
+  /**
+   * Returns the oldest event sequence in the log, or 0 if empty.
+   * Used to detect if a client's cursor is stale (older than the oldest retained event).
+   */
+  private getOldestEventSeq(): number {
+    const row = this.queryOne<{ min_seq: number | null }>(`SELECT MIN(seq) as min_seq FROM events`);
+    return row?.min_seq ?? 0;
   }
 
   private getCommandAck(opId: string) {

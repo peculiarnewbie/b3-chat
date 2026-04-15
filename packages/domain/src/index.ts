@@ -237,6 +237,8 @@ export type SetSearchModePayload = {
   defaultSearchMode: boolean;
 };
 
+export type ResetStoragePayload = Record<string, never>;
+
 export type SyncCommandPayloadMap = {
   bootstrap_session: BootstrapSessionPayload;
   create_workspace: CreateWorkspacePayload;
@@ -252,6 +254,7 @@ export type SyncCommandPayloadMap = {
   complete_attachment: CompleteAttachmentPayload;
   delete_attachment: DeleteAttachmentPayload;
   set_search_mode: SetSearchModePayload;
+  reset_storage: ResetStoragePayload;
 };
 
 export type SyncCommandType = keyof SyncCommandPayloadMap;

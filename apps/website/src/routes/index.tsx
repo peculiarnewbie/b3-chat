@@ -42,6 +42,7 @@ import {
   updateWorkspaceAction,
   deleteAttachmentAction,
   sendMessageAction,
+  resetLocalSync,
 } from "../lib/actions";
 import {
   activeWorkspaceId,
@@ -966,12 +967,27 @@ export default function Home() {
   };
 
   const sendMessage = async () => {
+    console.log("[send] attempt", {
+      activeThread: activeThread(),
+      activeWorkspace: activeWorkspace(),
+      text: composer.text.trim(),
+      attachments: composer.attachments.length,
+      sending: composer.sending,
+      workspacesCount: workspaces().length,
+      threadsCount: threads().length,
+    });
     if (
       !activeThread() ||
       (!composer.text.trim() && composer.attachments.length === 0) ||
       composer.sending
-    )
+    ) {
+      console.log("[send] blocked", {
+        noThread: !activeThread(),
+        noContent: !composer.text.trim() && composer.attachments.length === 0,
+        alreadySending: composer.sending,
+      });
       return;
+    }
     setComposer("sending", true);
     try {
       const text = composer.text.trim();
@@ -1245,6 +1261,16 @@ export default function Home() {
                     </button>
                     <button class="btn btn-primary" onClick={saveSystemPrompt}>
                       Save
+                    </button>
+                  </div>
+
+                  <div class="settings-section settings-danger">
+                    <label class="settings-label">Troubleshooting</label>
+                    <p class="settings-hint">
+                      If sync is broken, reset local state and re-download from server.
+                    </p>
+                    <button class="btn btn-danger" onClick={resetLocalSync}>
+                      Reset Local Sync
                     </button>
                   </div>
                 </div>
