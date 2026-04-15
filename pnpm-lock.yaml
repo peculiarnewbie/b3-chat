@@ -63,6 +63,9 @@ importers:
       '@solidjs/router':
         specifier: ^0.15.4
         version: 0.15.4(solid-js@1.9.11)
+      '@tanstack/ai':
+        specifier: 0.10.2
+        version: 0.10.2
       '@tanstack/db':
         specifier: 'catalog:'
         version: 0.6.5(typescript@5.9.3)

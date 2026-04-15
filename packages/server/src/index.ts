@@ -3,12 +3,14 @@ export {
   createChatCompletionsAdapter,
   type ChatCompletionsAdapterConfig,
   type ChatCompletionsUsage,
-  type SimpleModelMessage,
+  type ModelMessage,
   type ContentPart,
-  type SimpleChatOptions,
-  type StreamEvent,
+  type StreamChunk,
+  type ExtendedStreamChunk,
 } from "./chat-completions-adapter.js";
+export { chat } from "@tanstack/ai";
 import { createChatCompletionsAdapter } from "./chat-completions-adapter.js";
+import { chat } from "@tanstack/ai";
 import { betterAuth } from "better-auth";
 import { dash } from "@better-auth/infra";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
@@ -543,11 +545,14 @@ export async function decideSearchQuery(
     getSearchPlannerModelId(),
   );
 
-  const rawText = await adapter.text({
+  // Use TanStack AI's chat() with stream: false for non-streaming text response
+  const rawText = await chat({
+    adapter,
     messages: [{ role: "user", content: input.planningContext }],
     systemPrompts: [searchPlannerSystemPrompt],
     temperature: 0,
     maxTokens: 180,
+    stream: false,
   });
 
   const decision = parseSearchQueryDecision(rawText);

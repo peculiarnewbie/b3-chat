@@ -30,6 +30,7 @@ import {
   sortConversationMessages,
 } from "@b3-chat/domain";
 import {
+  chat,
   completeTextAttachment,
   createChatCompletionsAdapter,
   getDefaultModelId,
@@ -37,7 +38,7 @@ import {
   isImageAttachment,
   isInlineTextAttachment,
   type AppEnv,
-  type SimpleModelMessage,
+  type ModelMessage,
 } from "@b3-chat/server";
 import { prepareAssistantSearch, type SearchProgressEvent } from "./search";
 import { consumeAssistantStream, type StreamConsumerDeps } from "./stream-consumer";
@@ -691,7 +692,7 @@ export class SyncEngineDurableObject {
       searchContext,
     );
 
-    // Create adapter for streaming
+    // Create adapter for TanStack AI chat()
     const adapter = createChatCompletionsAdapter(
       {
         baseUrl: this.env.OPENCODE_GO_BASE_URL,
@@ -718,9 +719,11 @@ export class SyncEngineDurableObject {
       log: syncLog,
     };
 
-    // Stream using TanStack AI adapter
-    const stream = adapter.chatStream({
-      messages: modelMessages,
+    // Stream using TanStack AI's chat() function
+    // Cast messages to work around strict ConstrainedModelMessage type constraints
+    const stream = chat({
+      adapter,
+      messages: modelMessages as any,
       systemPrompts,
     });
 
@@ -760,14 +763,14 @@ export class SyncEngineDurableObject {
   /**
    * Builds TanStack AI ModelMessage array from thread messages.
    * Resolves attachments (images → signed URLs, text → inline content).
-   * Returns messages and system prompts separately for the adapter.
+   * Returns messages and system prompts separately for TanStack AI's chat().
    */
   private async buildModelMessages(
     snapshot: SyncSnapshot,
     workspaceId: string,
     threadMessages: Message[],
     searchContext?: string,
-  ): Promise<{ messages: SimpleModelMessage[]; systemPrompts: string[] }> {
+  ): Promise<{ messages: ModelMessage[]; systemPrompts: string[] }> {
     const workspace = snapshot.tables?.[TABLES.workspaces]?.[workspaceId];
     const threadId = threadMessages[0]?.threadId;
     const attachments = Object.values<any>(snapshot.tables?.[TABLES.attachments] ?? {}).filter(
@@ -782,15 +785,15 @@ export class SyncEngineDurableObject {
       systemPrompts.push(searchContext);
     }
 
-    const messages: SimpleModelMessage[] = [];
+    const messages: ModelMessage[] = [];
 
     for (const message of threadMessages) {
       if (message.status === "failed" || message.status === "cancelled") continue;
 
+      // Build content parts - strings or typed parts
+      // Our adapter handles conversion to OpenAI format
       const contentParts: Array<
-        | string
-        | { type: "text"; content: string }
-        | { type: "image"; source: { type: "url"; value: string } }
+        string | { type: "image"; source: { type: "url"; value: string } }
       > = [];
 
       if (message.text?.trim()) {
@@ -821,10 +824,10 @@ export class SyncEngineDurableObject {
       if (message.role === "assistant" && contentParts.length === 0) continue;
 
       // Flatten content if only one string part
-      const content =
+      const content: ModelMessage["content"] =
         contentParts.length === 1 && typeof contentParts[0] === "string"
           ? contentParts[0]
-          : contentParts;
+          : (contentParts as ModelMessage["content"]);
 
       messages.push({
         role: message.role as "user" | "assistant",

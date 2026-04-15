@@ -1,17 +1,17 @@
 /**
- * Custom adapter for OpenAI-compatible /chat/completions endpoints.
+ * Custom TanStack AI adapter for OpenAI-compatible /chat/completions endpoints.
  *
- * This adapter speaks the chat/completions SSE protocol (not the Responses API)
- * and emits AG-UI compatible events that can be consumed by stream consumers.
- *
- * Note: This is a standalone implementation that doesn't extend TanStack AI's
- * BaseTextAdapter due to the complexity of its generic type parameters.
- * It provides the same interface shape for our specific use case.
+ * This adapter implements the TextAdapter interface required by TanStack AI's
+ * chat() function, speaking the chat/completions SSE protocol.
  */
+
+import type { StreamChunk, TextOptions, ModelMessage, ContentPart } from "@tanstack/ai";
 
 export type ChatCompletionsAdapterConfig = {
   baseUrl: string;
   apiKey: string;
+  headers?: Record<string, string>;
+  timeout?: number;
 };
 
 export type ChatCompletionsUsage = {
@@ -20,58 +20,13 @@ export type ChatCompletionsUsage = {
   reasoningTokens: number | null;
 };
 
-/**
- * Simplified model message format compatible with TanStack AI's ModelMessage.
- */
-export type SimpleModelMessage = {
-  role: "user" | "assistant" | "system";
-  content: string | ContentPart[];
+// Extended StreamChunk with custom metadata for reasoning tokens
+export type ExtendedStreamChunk = StreamChunk & {
+  _reasoningTokens?: number;
 };
 
-export type ContentPart =
-  | string
-  | { type: "text"; content: string }
-  | { type: "image"; source: { type: "url"; value: string } };
-
-/**
- * Options for text/chat operations.
- */
-export type SimpleChatOptions = {
-  messages: SimpleModelMessage[];
-  systemPrompts?: string[];
-  temperature?: number;
-  maxTokens?: number;
-  abortController?: AbortController;
-};
-
-/**
- * AG-UI compatible stream events.
- */
-export type StreamEvent =
-  | { type: "RUN_STARTED"; runId: string }
-  | {
-      type: "RUN_FINISHED";
-      runId: string;
-      finishReason: "stop" | "length" | "tool_calls" | null;
-      usage?: {
-        promptTokens: number;
-        completionTokens: number;
-        totalTokens: number;
-        reasoningTokens?: number;
-      };
-    }
-  | { type: "RUN_ERROR"; runId?: string; error: { message: string; code?: string } }
-  | { type: "TEXT_MESSAGE_START"; messageId: string; role: "assistant" }
-  | { type: "TEXT_MESSAGE_CONTENT"; messageId: string; delta: string }
-  | { type: "TEXT_MESSAGE_END"; messageId: string }
-  | { type: "STEP_STARTED"; runId: string; stepId: string; stepType: string }
-  | {
-      type: "STEP_FINISHED";
-      runId: string;
-      stepId: string;
-      stepType: string;
-      metadata?: { reasoningTokens?: number };
-    };
+// Re-export types for consumers
+export type { ModelMessage, ContentPart, StreamChunk };
 
 /**
  * Extracts reasoning tokens from a usage object by performing a deep search.
@@ -120,10 +75,10 @@ function extractReasoningTokens(usage: unknown): number | null {
 }
 
 /**
- * Converts SimpleModelMessage format to OpenAI chat/completions message format.
+ * Converts TanStack AI ModelMessage format to OpenAI chat/completions message format.
  */
 function convertToOpenAIMessages(
-  messages: SimpleModelMessage[],
+  messages: ModelMessage[],
   systemPrompts: string[] = [],
 ): Array<Record<string, unknown>> {
   const result: Array<Record<string, unknown>> = [];
@@ -153,11 +108,14 @@ function convertToOpenAIMessages(
 }
 
 /**
- * Converts message content to OpenAI format.
+ * Converts ModelMessage content to OpenAI format.
  */
 function convertMessageContent(
-  content: SimpleModelMessage["content"],
+  content: ModelMessage["content"],
 ): string | Array<Record<string, unknown>> | null {
+  // Null content
+  if (content === null) return null;
+
   // String content passes through
   if (typeof content === "string") {
     return content;
@@ -173,18 +131,31 @@ function convertMessageContent(
         continue;
       }
 
-      if (part.type === "text") {
-        parts.push({ type: "text", text: part.content });
+      const typedPart = part as ContentPart;
+      if (typedPart.type === "text") {
+        // TextPart uses 'content' property
+        parts.push({ type: "text", text: (typedPart as any).content });
         continue;
       }
 
-      if (part.type === "image") {
-        // Handle image parts - source is URL-based
-        const source = part.source;
+      if (typedPart.type === "image") {
+        // ImagePart has source with type 'url' or 'data'
+        const source = (typedPart as any).source as {
+          type: string;
+          value: string;
+          mimeType?: string;
+        };
         if (source.type === "url") {
           parts.push({
             type: "image_url",
             image_url: { url: source.value },
+          });
+        } else if (source.type === "data") {
+          parts.push({
+            type: "image_url",
+            image_url: {
+              url: `data:${source.mimeType};base64,${source.value}`,
+            },
           });
         }
         continue;
@@ -218,29 +189,51 @@ function extractChatCompletionText(
     .trim();
 }
 
+/**
+ * Generate a unique ID for events
+ */
+function generateId(): string {
+  return `${Date.now()}-${Math.random().toString(36).substring(7)}`;
+}
+
+/**
+ * Custom adapter for OpenAI-compatible /chat/completions endpoints.
+ *
+ * Implements the TextAdapter interface required by TanStack AI's chat() function.
+ */
 export class ChatCompletionsAdapter {
+  readonly kind = "text" as const;
+  readonly name = "chat-completions";
+  readonly model: string;
+
+  // Type marker for TanStack AI (never assigned at runtime)
+  "~types"!: {
+    providerOptions: Record<string, unknown>;
+    inputModalities: readonly ["text", "image"];
+    messageMetadataByModality: Record<string, unknown>;
+  };
+
   private readonly config: ChatCompletionsAdapterConfig;
-  private readonly modelId: string;
 
   constructor(config: ChatCompletionsAdapterConfig, modelId: string) {
     this.config = config;
-    this.modelId = modelId;
+    this.model = modelId;
   }
 
   /**
    * Streaming chat completion that yields AG-UI events.
    */
-  async *chatStream(options: SimpleChatOptions): AsyncIterable<StreamEvent> {
-    const messages = convertToOpenAIMessages(options.messages, options.systemPrompts);
+  async *chatStream(options: TextOptions): AsyncIterable<ExtendedStreamChunk> {
+    const messages = convertToOpenAIMessages(options.messages ?? [], options.systemPrompts);
 
-    const runId = crypto.randomUUID();
-    const messageId = crypto.randomUUID();
+    const runId = generateId();
+    const messageId = generateId();
 
     // Emit RUN_STARTED
     yield {
       type: "RUN_STARTED",
       runId,
-    };
+    } as ExtendedStreamChunk;
 
     const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
     const response = await fetch(url, {
@@ -248,9 +241,10 @@ export class ChatCompletionsAdapter {
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${this.config.apiKey}`,
+        ...this.config.headers,
       },
       body: JSON.stringify({
-        model: this.modelId,
+        model: this.model,
         stream: true,
         stream_options: { include_usage: true },
         messages,
@@ -260,6 +254,7 @@ export class ChatCompletionsAdapter {
         ...(options.maxTokens !== undefined && {
           max_tokens: options.maxTokens,
         }),
+        ...options.modelOptions,
       }),
       signal: options.abortController?.signal,
     });
@@ -273,7 +268,7 @@ export class ChatCompletionsAdapter {
           message: `HTTP ${response.status}: ${errorText.slice(0, 500)}`,
           code: String(response.status),
         },
-      };
+      } as ExtendedStreamChunk;
       return;
     }
 
@@ -281,7 +276,6 @@ export class ChatCompletionsAdapter {
     const decoder = new TextDecoder();
     let buffer = "";
     let messageStarted = false;
-    let thinkingStepId: string | null = null;
     let usage: ChatCompletionsUsage = {
       promptTokens: null,
       completionTokens: null,
@@ -326,17 +320,6 @@ export class ChatCompletionsAdapter {
             const reasoningTokens = extractReasoningTokens(parsed.usage);
             if (reasoningTokens !== null) {
               usage.reasoningTokens = reasoningTokens;
-
-              // Emit thinking step for reasoning tokens
-              if (thinkingStepId === null) {
-                thinkingStepId = crypto.randomUUID();
-                yield {
-                  type: "STEP_STARTED",
-                  runId,
-                  stepId: thinkingStepId,
-                  stepType: "thinking",
-                };
-              }
             }
           }
 
@@ -351,7 +334,7 @@ export class ChatCompletionsAdapter {
               type: "TEXT_MESSAGE_START",
               messageId,
               role: "assistant",
-            };
+            } as ExtendedStreamChunk;
           }
 
           // Emit TEXT_MESSAGE_CONTENT for each delta
@@ -359,21 +342,8 @@ export class ChatCompletionsAdapter {
             type: "TEXT_MESSAGE_CONTENT",
             messageId,
             delta,
-          };
+          } as ExtendedStreamChunk;
         }
-      }
-
-      // Finish thinking step if started
-      if (thinkingStepId !== null) {
-        yield {
-          type: "STEP_FINISHED",
-          runId,
-          stepId: thinkingStepId,
-          stepType: "thinking",
-          metadata: {
-            reasoningTokens: usage.reasoningTokens ?? undefined,
-          },
-        };
       }
 
       // Emit TEXT_MESSAGE_END if message was started
@@ -381,11 +351,11 @@ export class ChatCompletionsAdapter {
         yield {
           type: "TEXT_MESSAGE_END",
           messageId,
-        };
+        } as ExtendedStreamChunk;
       }
 
-      // Emit RUN_FINISHED with usage
-      yield {
+      // Emit RUN_FINISHED with usage (including custom _reasoningTokens field)
+      const finishedEvent: ExtendedStreamChunk = {
         type: "RUN_FINISHED",
         runId,
         finishReason: "stop",
@@ -395,10 +365,16 @@ export class ChatCompletionsAdapter {
                 promptTokens: usage.promptTokens ?? 0,
                 completionTokens: usage.completionTokens ?? 0,
                 totalTokens: (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0),
-                reasoningTokens: usage.reasoningTokens ?? undefined,
               }
             : undefined,
-      };
+      } as ExtendedStreamChunk;
+
+      // Add reasoning tokens as custom field
+      if (usage.reasoningTokens !== null) {
+        finishedEvent._reasoningTokens = usage.reasoningTokens;
+      }
+
+      yield finishedEvent;
     } catch (error) {
       yield {
         type: "RUN_ERROR",
@@ -407,15 +383,21 @@ export class ChatCompletionsAdapter {
           message: error instanceof Error ? error.message : String(error),
           code: "stream_error",
         },
-      };
+      } as ExtendedStreamChunk;
     }
   }
 
   /**
-   * Non-streaming text completion.
+   * Structured output using JSON schema response format.
    */
-  async text(options: SimpleChatOptions): Promise<string> {
-    const messages = convertToOpenAIMessages(options.messages, options.systemPrompts);
+  async structuredOutput(options: {
+    chatOptions: TextOptions;
+    outputSchema: Record<string, unknown>;
+  }): Promise<{ data: unknown; rawText: string }> {
+    const messages = convertToOpenAIMessages(
+      options.chatOptions.messages ?? [],
+      options.chatOptions.systemPrompts,
+    );
 
     const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
     const response = await fetch(url, {
@@ -423,19 +405,29 @@ export class ChatCompletionsAdapter {
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${this.config.apiKey}`,
+        ...this.config.headers,
       },
       body: JSON.stringify({
-        model: this.modelId,
+        model: this.model,
         stream: false,
         messages,
-        ...(options.temperature !== undefined && {
-          temperature: options.temperature,
+        ...(options.chatOptions.temperature !== undefined && {
+          temperature: options.chatOptions.temperature,
         }),
-        ...(options.maxTokens !== undefined && {
-          max_tokens: options.maxTokens,
+        ...(options.chatOptions.maxTokens !== undefined && {
+          max_tokens: options.chatOptions.maxTokens,
         }),
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "structured_output",
+            schema: options.outputSchema,
+            strict: true,
+          },
+        },
+        ...options.chatOptions.modelOptions,
       }),
-      signal: options.abortController?.signal,
+      signal: options.chatOptions.abortController?.signal,
     });
 
     if (!response.ok) {
@@ -451,12 +443,19 @@ export class ChatCompletionsAdapter {
       }>;
     };
 
-    return extractChatCompletionText(json.choices?.[0]?.message?.content);
+    const rawText = extractChatCompletionText(json.choices?.[0]?.message?.content);
+    const data = JSON.parse(rawText);
+
+    return {
+      data,
+      rawText,
+    };
   }
 }
 
 /**
  * Factory function to create a ChatCompletionsAdapter instance.
+ * This follows the TanStack AI provider pattern.
  */
 export function createChatCompletionsAdapter(
   config: ChatCompletionsAdapterConfig,

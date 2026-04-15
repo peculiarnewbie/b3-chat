@@ -1,19 +1,17 @@
 /**
- * Stream consumer for AG-UI compatible stream events.
+ * Stream consumer for TanStack AI AG-UI stream events.
  *
- * Consumes AsyncIterable<StreamEvent> from the adapter and drives the existing
- * event pipeline (broadcast, delta batching, activity reporting, etc.).
+ * Consumes AsyncIterable<ExtendedStreamChunk> from TanStack AI's chat() function
+ * and drives the existing event pipeline (broadcast, delta batching,
+ * activity reporting, etc.).
  */
 
-import type { StreamEvent } from "@b3-chat/server";
+import type { ExtendedStreamChunk } from "@b3-chat/server";
 import { nowIso, type MessagePart } from "@b3-chat/domain";
 import type { SearchProgressEvent } from "./search";
 
 /** Threshold for flushing accumulated deltas to the client */
 const DELTA_FLUSH_THRESHOLD = 96;
-
-/** Interval for reporting thinking tokens progress */
-const THINKING_TOKEN_REPORT_INTERVAL = 32;
 
 export type StreamConsumerDeps = {
   /** Appends a server event to the event log and returns the event */
@@ -63,13 +61,13 @@ export type StreamConsumerResult = {
 };
 
 /**
- * Consumes an AG-UI event stream and maps events to the existing event system.
+ * Consumes a TanStack AI stream and maps AG-UI events to the existing event system.
  *
  * This function maintains delta batching behavior (96 chars or newline threshold)
  * and timing metrics (TTFT, duration).
  */
 export async function consumeAssistantStream(
-  stream: AsyncIterable<StreamEvent>,
+  stream: AsyncIterable<ExtendedStreamChunk>,
   deps: StreamConsumerDeps,
 ): Promise<StreamConsumerResult> {
   const { appendServerEvent, broadcast, appendMessagePart, reportActivity, messageId, log } = deps;
@@ -131,7 +129,7 @@ export async function consumeAssistantStream(
         }
 
         case "TEXT_MESSAGE_CONTENT": {
-          const delta = chunk.delta;
+          const delta = (chunk as { delta?: string }).delta;
           if (!delta) continue;
 
           // Track time to first token
@@ -162,31 +160,21 @@ export async function consumeAssistantStream(
           break;
         }
 
-        case "STEP_FINISHED": {
-          // Handle thinking step completion with reasoning tokens
-          if (chunk.stepType === "thinking" && chunk.metadata?.reasoningTokens != null) {
-            const tokens = chunk.metadata.reasoningTokens;
-            reasoningTokens = tokens;
-            if (
-              lastReportedReasoningTokens === null ||
-              tokens - lastReportedReasoningTokens >= THINKING_TOKEN_REPORT_INTERVAL
-            ) {
-              await flushThinkingTokens(tokens);
-            }
-          }
-          break;
-        }
-
         case "RUN_FINISHED": {
           // Extract usage from the event
-          const usage = chunk.usage;
+          const finishedChunk = chunk as {
+            usage?: { promptTokens: number; completionTokens: number };
+            _reasoningTokens?: number;
+          };
 
-          if (usage) {
-            promptTokens = usage.promptTokens ?? null;
-            completionTokens = usage.completionTokens ?? null;
-            if (usage.reasoningTokens != null) {
-              reasoningTokens = usage.reasoningTokens;
-            }
+          if (finishedChunk.usage) {
+            promptTokens = finishedChunk.usage.promptTokens ?? null;
+            completionTokens = finishedChunk.usage.completionTokens ?? null;
+          }
+
+          // Check for custom reasoning tokens field
+          if (finishedChunk._reasoningTokens != null) {
+            reasoningTokens = finishedChunk._reasoningTokens;
           }
 
           // Flush final delta if any
@@ -237,12 +225,13 @@ export async function consumeAssistantStream(
         }
 
         case "RUN_ERROR": {
-          const errorMessage = chunk.error?.message ?? "Unknown error";
+          const errorChunk = chunk as { error?: { message?: string; code?: string } };
+          const errorMessage = errorChunk.error?.message ?? "Unknown error";
 
           // Emit message_failed event
           const failed = await appendServerEvent(null, "message_failed", {
             messageId,
-            errorCode: chunk.error?.code ?? "stream_error",
+            errorCode: errorChunk.error?.code ?? "stream_error",
             errorMessage,
             updatedAt: nowIso(),
           });

@@ -17,6 +17,7 @@
     "@better-auth/infra": "catalog:",
     "@solidjs/meta": "^0.29.4",
     "@solidjs/router": "^0.15.4",
+    "@tanstack/ai": "0.10.2",
     "@tanstack/db": "catalog:",
     "@tanstack/solid-db": "catalog:",
     "better-auth": "^1.3.14",
