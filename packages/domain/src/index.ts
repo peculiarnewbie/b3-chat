@@ -44,6 +44,7 @@ export const ThreadRow = Schema.Struct({
   workspaceId: Schema.String,
   title: Schema.String,
   pinned: Schema.Boolean,
+  headMessageId: NullableString,
   createdAt: Schema.String,
   updatedAt: Schema.String,
   lastMessageAt: Schema.String,
@@ -63,6 +64,8 @@ export const MessageStatus = Schema.Literals([
 export const MessageRow = Schema.Struct({
   id: Schema.String,
   threadId: Schema.String,
+  parentMessageId: NullableString,
+  sourceMessageId: NullableString,
   role: Schema.String,
   status: MessageStatus,
   modelId: Schema.String,
@@ -267,6 +270,31 @@ export type CreateUserMessagePayload = {
   attachmentIds: string[];
 };
 
+export type RetryMessagePayload = {
+  threadId: string;
+  userMessage: Message;
+  assistantMessage: Message;
+  thread: Thread;
+  modelId: string;
+  modelInterleavedField?: string | null;
+  reasoningLevel: ReasoningLevel;
+  search: boolean;
+};
+
+export type EditUserMessagePayload = {
+  threadId: string;
+  sourceMessageId: string;
+  userMessage: Message;
+  assistantMessage: Message;
+  thread: Thread;
+  promptText: string;
+  modelId: string;
+  modelInterleavedField?: string | null;
+  reasoningLevel: ReasoningLevel;
+  search: boolean;
+  attachments: Attachment[];
+};
+
 export type StartAssistantTurnPayload = {
   threadId: string;
   assistantMessage: Message;
@@ -312,6 +340,8 @@ export type SyncCommandPayloadMap = {
   update_thread: UpdateThreadPayload;
   archive_thread: ArchiveThreadPayload;
   create_user_message: CreateUserMessagePayload;
+  retry_message: RetryMessagePayload;
+  edit_user_message: EditUserMessagePayload;
   start_assistant_turn: StartAssistantTurnPayload;
   cancel_assistant_turn: CancelAssistantTurnPayload;
   register_attachment: RegisterAttachmentPayload;
@@ -514,6 +544,7 @@ export function createThread(input: { workspaceId: string; title?: string }) {
     workspaceId: input.workspaceId,
     title: input.title ?? "New Chat",
     pinned: false,
+    headMessageId: null,
     createdAt: now,
     updatedAt: now,
     lastMessageAt: now,
@@ -523,6 +554,8 @@ export function createThread(input: { workspaceId: string; title?: string }) {
 
 export function createMessage(input: {
   threadId: string;
+  parentMessageId?: string | null;
+  sourceMessageId?: string | null;
   role: "user" | "assistant" | "system";
   modelId: string;
   reasoningLevel?: ReasoningLevel;
@@ -534,6 +567,8 @@ export function createMessage(input: {
   return decodeMessageRow({
     id: createId("msg"),
     threadId: input.threadId,
+    parentMessageId: input.parentMessageId ?? null,
+    sourceMessageId: input.sourceMessageId ?? null,
     role: input.role,
     status: input.status ?? "completed",
     modelId: input.modelId,
@@ -740,4 +775,36 @@ export function createSearchRun(input: {
 export function summarizeThreadTitle(text: string) {
   const trimmed = text.trim().replace(/\s+/g, " ");
   return trimmed.slice(0, 48) || "New Chat";
+}
+
+export function resolveThreadMessagePath<
+  T extends {
+    id: string;
+    createdAt: string;
+    role: string;
+    parentMessageId?: string | null;
+  },
+>(messages: readonly T[], headMessageId?: string | null) {
+  const ordered = sortConversationMessages(messages);
+  if (ordered.length <= 1) return ordered;
+
+  const byId = new Map(ordered.map((message) => [message.id, message] as const));
+  const headId = headMessageId ?? null;
+  if (!headId) return ordered;
+
+  const head = byId.get(headId);
+  if (!head) return ordered;
+
+  const path: T[] = [];
+  const seen = new Set<string>();
+  let current: T | undefined = head;
+
+  while (current && !seen.has(current.id)) {
+    path.push(current);
+    seen.add(current.id);
+    const parentId: string | null = current.parentMessageId ?? null;
+    current = parentId ? byId.get(parentId) : undefined;
+  }
+
+  return path.length > 0 ? path.reverse() : ordered;
 }

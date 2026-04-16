@@ -17,8 +17,10 @@ import {
   nowIso,
   type Attachment,
   type CreateUserMessagePayload,
+  type EditUserMessagePayload,
   type Message,
   type ReasoningLevel,
+  type RetryMessagePayload,
   type SearchRun,
   type SearchResult,
   type SyncClientEnvelope,
@@ -35,7 +37,7 @@ import {
   type TraceRun,
   type TraceSpan,
   type Workspace,
-  sortConversationMessages,
+  resolveThreadMessagePath,
 } from "@b3-chat/domain";
 import {
   chat,
@@ -597,6 +599,74 @@ export class SyncEngineDurableObject {
             });
           break;
         }
+        case "retry_message": {
+          const command = payload as RetryMessagePayload;
+          const normalizedThread = this.normalizeThread(command.thread, opId);
+          const userMessage = this.getMessage(command.userMessage.id);
+          if (!userMessage) throw new Error("Message not found");
+          const assistantMessage = this.normalizeMessage(
+            {
+              ...command.assistantMessage,
+              status: "pending",
+              text: "",
+            },
+            opId,
+          );
+          pendingEvents.push(
+            this.insertEvent(opId, "thread_upserted", { row: normalizedThread }),
+            this.insertEvent(opId, "message_upserted", { row: assistantMessage }),
+          );
+          followUp = () =>
+            this.runAssistantTurn({
+              ...command,
+              thread: normalizedThread,
+              userMessage,
+              assistantMessage,
+            });
+          break;
+        }
+        case "edit_user_message": {
+          const command = payload as EditUserMessagePayload;
+          const normalizedThread = this.normalizeThread(command.thread, opId);
+          if (!this.getMessage(command.sourceMessageId)) throw new Error("Message not found");
+          const userMessage = this.normalizeMessage(
+            {
+              ...command.userMessage,
+              status: "completed",
+            },
+            opId,
+          );
+          const assistantMessage = this.normalizeMessage(
+            {
+              ...command.assistantMessage,
+              status: "pending",
+              text: "",
+            },
+            opId,
+          );
+          pendingEvents.push(
+            this.insertEvent(opId, "thread_upserted", { row: normalizedThread }),
+            this.insertEvent(opId, "message_upserted", { row: userMessage }),
+            this.insertEvent(opId, "message_upserted", { row: assistantMessage }),
+          );
+          if (command.attachments?.length) {
+            for (const attachment of command.attachments) {
+              pendingEvents.push(
+                this.insertEvent(opId, "attachment_upserted", {
+                  row: this.normalizeAttachment(attachment, opId),
+                }),
+              );
+            }
+          }
+          followUp = () =>
+            this.runAssistantTurn({
+              ...command,
+              thread: normalizedThread,
+              userMessage,
+              assistantMessage,
+            });
+          break;
+        }
         case "start_assistant_turn": {
           const command = payload as SyncCommandPayloadMap["start_assistant_turn"];
           pendingEvents.push(
@@ -758,7 +828,10 @@ export class SyncEngineDurableObject {
   }
 
   private async runAssistantTurn(
-    payload: CreateUserMessagePayload & {
+    payload: Pick<
+      CreateUserMessagePayload,
+      "threadId" | "modelId" | "modelInterleavedField" | "reasoningLevel" | "search"
+    > & {
       thread: Thread;
       userMessage: Message;
       assistantMessage: Message;
@@ -993,10 +1066,7 @@ export class SyncEngineDurableObject {
 
     try {
       const threadMessages = await traceSync("assistant.thread_messages.load", "sync", {}, () =>
-        this.getThreadMessages(snapshot, thread.id, [
-          payload.userMessage,
-          payload.assistantMessage,
-        ]),
+        this.getThreadMessages(snapshot, thread, [payload.userMessage, payload.assistantMessage]),
       );
       const searchTool = payload.search
         ? createExaSearchTool({
@@ -1200,19 +1270,19 @@ export class SyncEngineDurableObject {
 
   private getThreadMessages(
     snapshot: SyncSnapshot,
-    threadId: string,
+    thread: Pick<Thread, "id" | "headMessageId">,
     additionalMessages: Message[] = [],
   ) {
     const byId = new Map<string, Message>();
     for (const message of Object.values<any>(snapshot.tables?.[TABLES.messages] ?? {})) {
-      if (message.threadId !== threadId) continue;
+      if (message.threadId !== thread.id) continue;
       byId.set(message.id, message);
     }
     for (const message of additionalMessages) {
-      if (message.threadId !== threadId) continue;
+      if (message.threadId !== thread.id) continue;
       byId.set(message.id, message);
     }
-    return sortConversationMessages([...byId.values()]);
+    return resolveThreadMessagePath([...byId.values()], thread.headMessageId ?? null);
   }
 
   /**
@@ -1302,6 +1372,7 @@ export class SyncEngineDurableObject {
   private normalizeThread(row: Thread, opId: string) {
     return decodeThreadRow({
       ...row,
+      headMessageId: row.headMessageId ?? null,
       optimistic: false,
       opId,
       updatedAt: row.updatedAt || nowIso(),
@@ -1312,6 +1383,8 @@ export class SyncEngineDurableObject {
   private normalizeMessage(row: Message, opId: string) {
     return decodeMessageRow({
       ...row,
+      parentMessageId: row.parentMessageId ?? null,
+      sourceMessageId: row.sourceMessageId ?? null,
       reasoningLevel: row.reasoningLevel ?? "off",
       optimistic: false,
       opId,

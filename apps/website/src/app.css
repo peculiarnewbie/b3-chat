@@ -571,32 +571,45 @@ a {
   justify-content: flex-end;
 }
 
-.msg-retry-btn {
+.msg-user-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s ease;
+}
+
+.msg-action-btn {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
+  min-width: 48px;
   height: 28px;
+  padding: 0 10px;
   margin-top: 4px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg);
   color: var(--text-secondary);
   cursor: pointer;
+  font: inherit;
 }
 
-.msg-user-row:hover .msg-retry-btn {
+.msg-user-row:hover .msg-user-actions {
   opacity: 1;
   pointer-events: auto;
 }
 
-.msg-retry-btn:hover {
+.msg-action-btn:hover:not(:disabled) {
   background: var(--bg-hover, var(--line));
   color: var(--text);
+}
+
+.msg-action-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .msg-user-body {
@@ -606,6 +619,45 @@ a {
   background: var(--user-bubble);
   color: var(--user-bubble-text);
   box-shadow: var(--shadow-sm);
+}
+
+.msg-edit-form {
+  width: min(100%, 720px);
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: var(--shadow-sm);
+}
+
+.msg-edit-form textarea {
+  width: 100%;
+  min-height: 110px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) - 4px);
+  padding: 10px 12px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.45;
+}
+
+.msg-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.msg-edit-actions button {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  padding: 6px 12px;
+  font: inherit;
+  cursor: pointer;
 }
 
 /* ── Inline citation badges ───────────────────────── */

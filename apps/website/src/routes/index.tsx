@@ -10,7 +10,7 @@ import {
 } from "solid-js";
 import { createStore } from "solid-js/store";
 import { useLiveQuery } from "@tanstack/solid-db";
-import { createId, nowIso, sortConversationMessages } from "@b3-chat/domain";
+import { createId, nowIso, resolveThreadMessagePath } from "@b3-chat/domain";
 import type {
   Attachment,
   Message,
@@ -46,6 +46,8 @@ import {
   updateThreadAction,
   updateWorkspaceAction,
   deleteAttachmentAction,
+  editUserMessageAction,
+  retryMessageAction,
   sendMessageAction,
   resetAllData,
 } from "../lib/actions";
@@ -408,6 +410,8 @@ export default function Home() {
   const [editingThreadId, setEditingThreadId] = createSignal<string | null>(null);
   const [editingWorkspaceId, setEditingWorkspaceId] = createSignal<string | null>(null);
   const [editValue, setEditValue] = createSignal("");
+  const [editingUserMessageId, setEditingUserMessageId] = createSignal<string | null>(null);
+  const [editingUserMessageText, setEditingUserMessageText] = createSignal("");
   const [workspaceDeleteTarget, setWorkspaceDeleteTarget] = createSignal<{
     id: string;
     name: string;
@@ -623,6 +627,9 @@ export default function Home() {
   const selectedModel = createMemo(
     () => (models()?.models ?? []).find((model) => model.id === composerModelId()) ?? null,
   );
+  const modelInterleavedFieldFor = (modelId: string) =>
+    (models()?.models ?? []).find((model) => model.id === modelId)?.interleaved?.field?.trim() ||
+    null;
   const selectedModelSupportsReasoning = createMemo(() => Boolean(selectedModel()?.reasoning));
   const selectedModelInterleavedField = createMemo(
     () => selectedModel()?.interleaved?.field?.trim() || null,
@@ -713,10 +720,11 @@ export default function Home() {
     setComposer("text", text);
   };
   const messageIds = createMemo(() =>
-    sortConversationMessages(
+    resolveThreadMessagePath(
       (allMessages() as Message[]).filter(
         (message) => message.threadId === selectedConversationThread()?.id,
       ),
+      selectedConversationThread()?.headMessageId ?? null,
     ).map((message) => message.id),
   );
   const messagesById = createMemo(() => {
@@ -962,25 +970,24 @@ export default function Home() {
               when={message().role === "assistant"}
               fallback={
                 <div class="msg-user-row">
-                  <button
-                    class="msg-retry-btn"
-                    title="Retry with original settings"
-                    onClick={() => retryMessage(message())}
-                  >
-                    <svg
-                      width="14"
-                      height="14"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
+                  <div class="msg-user-actions">
+                    <button
+                      class="msg-action-btn"
+                      title="Edit and regenerate from this point"
+                      disabled={isSelectedThreadBusy()}
+                      onClick={() => startEditingUserMessage(message())}
                     >
-                      <polyline points="1 4 1 10 7 10" />
-                      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
-                    </svg>
-                  </button>
+                      Edit
+                    </button>
+                    <button
+                      class="msg-action-btn"
+                      title="Retry from this point with original settings"
+                      disabled={isSelectedThreadBusy()}
+                      onClick={() => retryMessage(message())}
+                    >
+                      Retry
+                    </button>
+                  </div>
                   <div class="msg-user-stack">
                     <Show when={userImageAttachments(message().id).length > 0}>
                       <div class="msg-attachment-gallery">
@@ -1003,9 +1010,40 @@ export default function Home() {
                         </For>
                       </div>
                     </Show>
-                    <Show when={message().text?.trim()}>
-                      <div class="msg-user-body">
-                        <p>{message().text}</p>
+                    <Show
+                      when={editingUserMessageId() === message().id}
+                      fallback={
+                        <Show when={message().text?.trim()}>
+                          <div class="msg-user-body">
+                            <p>{message().text}</p>
+                          </div>
+                        </Show>
+                      }
+                    >
+                      <div class="msg-edit-form">
+                        <textarea
+                          value={editingUserMessageText()}
+                          onInput={(e) => setEditingUserMessageText(e.currentTarget.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Escape") {
+                              e.preventDefault();
+                              cancelEditingUserMessage();
+                              return;
+                            }
+                            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                              e.preventDefault();
+                              commitUserMessageEdit(message());
+                            }
+                          }}
+                        />
+                        <div class="msg-edit-actions">
+                          <button type="button" onClick={cancelEditingUserMessage}>
+                            Cancel
+                          </button>
+                          <button type="button" onClick={() => commitUserMessageEdit(message())}>
+                            Save
+                          </button>
+                        </div>
                       </div>
                     </Show>
                     <Show when={userFileAttachments(message().id).length > 0}>
@@ -1440,19 +1478,54 @@ export default function Home() {
     updateWorkspacePreferences({ defaultReasoningLevel: reasoningLevel });
   };
 
-  const retryMessage = (msg: any) => {
-    if (!selectedConversationThread() || !msg.text?.trim()) return;
+  const isSelectedThreadBusy = createMemo(() => {
+    const thread = selectedConversationThread();
+    return thread ? streamingThreadIds().has(thread.id) : false;
+  });
+
+  const startEditingUserMessage = (msg: Message) => {
+    if (isSelectedThreadBusy()) return;
+    setEditingUserMessageId(msg.id);
+    setEditingUserMessageText(msg.text);
+  };
+
+  const cancelEditingUserMessage = () => {
+    setEditingUserMessageId(null);
+    setEditingUserMessageText("");
+  };
+
+  const commitUserMessageEdit = (msg: Message) => {
+    const thread = selectedConversationThread();
+    const text = editingUserMessageText().trim();
+    cancelEditingUserMessage();
+    if (!thread || !text || text === msg.text.trim()) return;
     const attachmentIds = userAttachments(msg.id)
       .filter((attachment) => attachment.status === "ready")
       .map((attachment) => attachment.id);
-    sendMessageAction({
-      thread: selectedConversationThread()!,
-      text: msg.text.trim(),
+    editUserMessageAction({
+      thread,
+      sourceMessage: msg,
+      text,
       modelId:
         msg.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto",
+      modelInterleavedField: modelInterleavedFieldFor(msg.modelId),
       reasoningLevel: (msg.reasoningLevel ?? "off") as ReasoningLevel,
       search: Boolean(msg.searchEnabled),
       attachmentIds,
+    });
+  };
+
+  const retryMessage = (msg: Message) => {
+    const thread = selectedConversationThread();
+    if (!thread || !msg.text?.trim() || isSelectedThreadBusy()) return;
+    retryMessageAction({
+      thread,
+      userMessage: msg,
+      modelId:
+        msg.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto",
+      modelInterleavedField: modelInterleavedFieldFor(msg.modelId),
+      reasoningLevel: (msg.reasoningLevel ?? "off") as ReasoningLevel,
+      search: Boolean(msg.searchEnabled),
     });
   };
 

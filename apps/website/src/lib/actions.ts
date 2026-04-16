@@ -1,4 +1,5 @@
 import {
+  createAttachment,
   createId,
   createMessage,
   createThread,
@@ -8,7 +9,10 @@ import {
   toWire,
   type Attachment,
   type CreateUserMessagePayload,
+  type EditUserMessagePayload,
+  type Message,
   type ReasoningLevel,
+  type RetryMessagePayload,
   type Thread,
   type Workspace,
 } from "@b3-chat/domain";
@@ -217,16 +221,9 @@ export function sendMessageAction(input: {
 }) {
   const opId = createId("op");
   const updatedAt = nowIso();
-
-  const threadUpdate: Thread = {
-    ...input.thread,
-    title:
-      input.thread.title === "New Chat" ? summarizeThreadTitle(input.text) : input.thread.title,
-    updatedAt,
-    lastMessageAt: updatedAt,
-  };
   const userMessage = createMessage({
     threadId: input.thread.id,
+    parentMessageId: input.thread.headMessageId ?? null,
     role: "user",
     modelId: input.modelId,
     reasoningLevel: input.reasoningLevel,
@@ -236,6 +233,7 @@ export function sendMessageAction(input: {
   });
   const assistantMessage = createMessage({
     threadId: input.thread.id,
+    parentMessageId: userMessage.id,
     role: "assistant",
     modelId: input.modelId,
     reasoningLevel: input.reasoningLevel,
@@ -243,6 +241,14 @@ export function sendMessageAction(input: {
     searchEnabled: input.search,
     status: "pending",
   });
+  const threadUpdate: Thread = {
+    ...input.thread,
+    title:
+      input.thread.title === "New Chat" ? summarizeThreadTitle(input.text) : input.thread.title,
+    headMessageId: assistantMessage.id,
+    updatedAt,
+    lastMessageAt: updatedAt,
+  };
 
   // Optimistic mutations
   const existingThread = threads.get(input.thread.id);
@@ -291,6 +297,163 @@ export function sendMessageAction(input: {
       search: input.search,
       attachmentIds: input.attachmentIds ?? [],
     } satisfies CreateUserMessagePayload,
+    { opId },
+  );
+}
+
+export function retryMessageAction(input: {
+  thread: Thread;
+  userMessage: Message;
+  modelId: string;
+  modelInterleavedField?: string | null;
+  reasoningLevel: ReasoningLevel;
+  search: boolean;
+}) {
+  const opId = createId("op");
+  const updatedAt = nowIso();
+  const assistantMessage = createMessage({
+    threadId: input.thread.id,
+    parentMessageId: input.userMessage.id,
+    role: "assistant",
+    modelId: input.modelId,
+    reasoningLevel: input.reasoningLevel,
+    text: "",
+    searchEnabled: input.search,
+    status: "pending",
+  });
+  const threadUpdate: Thread = {
+    ...input.thread,
+    headMessageId: assistantMessage.id,
+    updatedAt,
+    lastMessageAt: updatedAt,
+  };
+
+  const existingThread = threads.get(input.thread.id);
+  if (existingThread) {
+    applyLocalUpdate("threads", toLocalSyncRow(threadUpdate, opId));
+  }
+  applyLocalInsert("messages", toLocalSyncRow(assistantMessage, opId));
+
+  trackOptimistic(opId, [
+    existingThread
+      ? restoreRow("threads", threads, existingThread)
+      : deleteRow("threads", input.thread.id),
+    deleteRow("messages", assistantMessage.id),
+  ]);
+
+  dispatch(
+    "retry_message",
+    {
+      threadId: input.thread.id,
+      thread: toWire(threadUpdate, opId),
+      userMessage: toWire(input.userMessage, opId),
+      assistantMessage: toWire(assistantMessage, opId),
+      modelId: input.modelId,
+      modelInterleavedField: input.modelInterleavedField ?? null,
+      reasoningLevel: input.reasoningLevel,
+      search: input.search,
+    } satisfies RetryMessagePayload,
+    { opId },
+  );
+}
+
+export function editUserMessageAction(input: {
+  thread: Thread;
+  sourceMessage: Message;
+  text: string;
+  modelId: string;
+  modelInterleavedField?: string | null;
+  reasoningLevel: ReasoningLevel;
+  search: boolean;
+  attachmentIds?: string[];
+}) {
+  const opId = createId("op");
+  const updatedAt = nowIso();
+  const userMessage = createMessage({
+    threadId: input.thread.id,
+    parentMessageId: input.sourceMessage.parentMessageId ?? null,
+    sourceMessageId: input.sourceMessage.id,
+    role: "user",
+    modelId: input.modelId,
+    reasoningLevel: input.reasoningLevel,
+    text: input.text,
+    searchEnabled: input.search,
+    status: "completed",
+  });
+  const assistantMessage = createMessage({
+    threadId: input.thread.id,
+    parentMessageId: userMessage.id,
+    role: "assistant",
+    modelId: input.modelId,
+    reasoningLevel: input.reasoningLevel,
+    text: "",
+    searchEnabled: input.search,
+    status: "pending",
+  });
+  const threadUpdate: Thread = {
+    ...input.thread,
+    headMessageId: assistantMessage.id,
+    updatedAt,
+    lastMessageAt: updatedAt,
+  };
+
+  const existingThread = threads.get(input.thread.id);
+  if (existingThread) {
+    applyLocalUpdate("threads", toLocalSyncRow(threadUpdate, opId));
+  }
+  applyLocalInsert("messages", toLocalSyncRow(userMessage, opId));
+  applyLocalInsert("messages", toLocalSyncRow(assistantMessage, opId));
+
+  const rollbackEntries: OptimisticEntry[] = [
+    existingThread
+      ? restoreRow("threads", threads, existingThread)
+      : deleteRow("threads", input.thread.id),
+    deleteRow("messages", userMessage.id),
+    deleteRow("messages", assistantMessage.id),
+  ];
+  const clonedAttachments: Attachment[] = [];
+
+  for (const attachmentId of input.attachmentIds ?? []) {
+    const existing = attachments.get(attachmentId) as Attachment | undefined;
+    if (!existing || existing.status !== "ready") continue;
+    const clonedAttachment = {
+      ...createAttachment({
+        threadId: input.thread.id,
+        messageId: userMessage.id,
+        objectKey: existing.objectKey,
+        fileName: existing.fileName,
+        mimeType: existing.mimeType,
+        sizeBytes: existing.sizeBytes,
+        sha256: existing.sha256,
+        status: "ready",
+      }),
+      width: existing.width,
+      height: existing.height,
+      optimistic: false as const,
+      opId,
+    };
+    applyLocalInsert("attachments", clonedAttachment);
+    rollbackEntries.push(deleteRow("attachments", clonedAttachment.id));
+    clonedAttachments.push(clonedAttachment);
+  }
+
+  trackOptimistic(opId, rollbackEntries);
+
+  dispatch(
+    "edit_user_message",
+    {
+      threadId: input.thread.id,
+      sourceMessageId: input.sourceMessage.id,
+      thread: toWire(threadUpdate, opId),
+      userMessage: toWire(userMessage, opId),
+      assistantMessage: toWire(assistantMessage, opId),
+      promptText: input.text,
+      modelId: input.modelId,
+      modelInterleavedField: input.modelInterleavedField ?? null,
+      reasoningLevel: input.reasoningLevel,
+      search: input.search,
+      attachments: clonedAttachments.map((attachment) => toWire(attachment, opId)),
+    } satisfies EditUserMessagePayload,
     { opId },
   );
 }

@@ -1,9 +1,11 @@
 import {
   buildMultiSearchContext,
   createAttachment,
+  createMessage,
   createThread,
   createWorkspace,
   mergeAttachmentLink,
+  resolveThreadMessagePath,
   sortConversationMessages,
   slugify,
 } from "@b3-chat/domain";
@@ -25,8 +27,15 @@ import {
 import { toolDefinition } from "@tanstack/ai";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { explainAssistantError } from "./assistant-errors";
-import { sendMessageAction } from "./actions";
-import { applyLocalInsert, messages, resetCollections, threads, workspaces } from "./collections";
+import { editUserMessageAction, retryMessageAction, sendMessageAction } from "./actions";
+import {
+  applyLocalInsert,
+  attachments,
+  messages,
+  resetCollections,
+  threads,
+  workspaces,
+} from "./collections";
 import {
   activateWorkspaceDraftView,
   clearAllDraftState,
@@ -161,6 +170,45 @@ describe("domain helpers", () => {
     expect(sorted.map((message) => message.id)).toEqual(["msg_user", "msg_assistant"]);
   });
 
+  it("resolves the active thread path from the thread head", () => {
+    const baseThread = createThread({ workspaceId: "wrk_123" });
+    const firstUser = createMessage({
+      threadId: baseThread.id,
+      role: "user",
+      modelId: "openai/gpt-4.1",
+      text: "original",
+    });
+    const firstAssistant = createMessage({
+      threadId: baseThread.id,
+      parentMessageId: firstUser.id,
+      role: "assistant",
+      modelId: "openai/gpt-4.1",
+      text: "first answer",
+    });
+    const revisedUser = createMessage({
+      threadId: baseThread.id,
+      parentMessageId: firstUser.parentMessageId ?? null,
+      sourceMessageId: firstUser.id,
+      role: "user",
+      modelId: "openai/gpt-4.1",
+      text: "revised",
+    });
+    const revisedAssistant = createMessage({
+      threadId: baseThread.id,
+      parentMessageId: revisedUser.id,
+      role: "assistant",
+      modelId: "openai/gpt-4.1",
+      text: "revised answer",
+    });
+
+    const visible = resolveThreadMessagePath(
+      [firstUser, firstAssistant, revisedUser, revisedAssistant],
+      revisedAssistant.id,
+    );
+
+    expect(visible.map((message) => message.id)).toEqual([revisedUser.id, revisedAssistant.id]);
+  });
+
   it("optimistically sends a message without direct collection mutations", () => {
     const workspace = createWorkspace({
       name: "Writing",
@@ -188,12 +236,18 @@ describe("domain helpers", () => {
 
     expect(workspaces.get(workspace.id)).toBeTruthy();
     expect(persistedThread?.title).toBe("hello");
+    expect(persistedThread?.headMessageId).toBeTruthy();
     expect(optimisticMessages).toHaveLength(2);
     expect(optimisticMessages.map((message) => message.role).sort()).toEqual(["assistant", "user"]);
     expect(optimisticMessages.map((message) => message.reasoningLevel)).toEqual([
       "medium",
       "medium",
     ]);
+    const userMessage = optimisticMessages.find((message) => message.role === "user");
+    const assistantMessage = optimisticMessages.find((message) => message.role === "assistant");
+    expect(userMessage?.parentMessageId).toBeNull();
+    expect(assistantMessage?.parentMessageId).toBe(userMessage?.id);
+    expect(assistantMessage?.id).toBe(persistedThread?.headMessageId);
   });
 
   it("materializes a draft thread on first send", () => {
@@ -219,6 +273,121 @@ describe("domain helpers", () => {
     expect(
       [...messages.state.values()].filter((message) => message.threadId === draftThread.id),
     ).toHaveLength(2);
+  });
+
+  it("retries from an existing user turn by only appending a new assistant branch", () => {
+    const workspace = createWorkspace({
+      name: "Writing",
+      defaultModelId: "openai/gpt-4.1",
+    });
+    const thread = createThread({ workspaceId: workspace.id });
+    const userMessage = createMessage({
+      threadId: thread.id,
+      role: "user",
+      modelId: workspace.defaultModelId,
+      text: "hello",
+    });
+    const assistantMessage = createMessage({
+      threadId: thread.id,
+      parentMessageId: userMessage.id,
+      role: "assistant",
+      modelId: workspace.defaultModelId,
+      text: "world",
+    });
+
+    applyLocalInsert("workspaces", workspace);
+    applyLocalInsert("threads", { ...thread, headMessageId: assistantMessage.id });
+    applyLocalInsert("messages", userMessage);
+    applyLocalInsert("messages", assistantMessage);
+
+    retryMessageAction({
+      thread: { ...thread, headMessageId: assistantMessage.id },
+      userMessage,
+      modelId: workspace.defaultModelId,
+      reasoningLevel: "off",
+      search: false,
+    });
+
+    const threadAfterRetry = threads.get(thread.id);
+    const threadMessages = [...messages.state.values()].filter(
+      (message) => message.threadId === thread.id,
+    );
+    const assistantMessages = threadMessages.filter((message) => message.role === "assistant");
+    const retriedAssistant = assistantMessages.find(
+      (message) => message.id !== assistantMessage.id,
+    );
+
+    expect(threadMessages).toHaveLength(3);
+    expect(retriedAssistant?.parentMessageId).toBe(userMessage.id);
+    expect(retriedAssistant?.status).toBe("pending");
+    expect(threadAfterRetry?.headMessageId).toBe(retriedAssistant?.id);
+  });
+
+  it("edits a user turn by creating a new user branch and cloned attachments", () => {
+    const workspace = createWorkspace({
+      name: "Writing",
+      defaultModelId: "openai/gpt-4.1",
+    });
+    const thread = createThread({ workspaceId: workspace.id });
+    const originalUser = createMessage({
+      threadId: thread.id,
+      role: "user",
+      modelId: workspace.defaultModelId,
+      text: "draft",
+    });
+    const originalAssistant = createMessage({
+      threadId: thread.id,
+      parentMessageId: originalUser.id,
+      role: "assistant",
+      modelId: workspace.defaultModelId,
+      text: "answer",
+    });
+    const originalAttachment = createAttachment({
+      threadId: thread.id,
+      messageId: originalUser.id,
+      objectKey: `${thread.id}/note.txt`,
+      fileName: "note.txt",
+      mimeType: "text/plain",
+      sizeBytes: 12,
+      status: "ready",
+    });
+
+    applyLocalInsert("workspaces", workspace);
+    applyLocalInsert("threads", { ...thread, headMessageId: originalAssistant.id });
+    applyLocalInsert("messages", originalUser);
+    applyLocalInsert("messages", originalAssistant);
+    applyLocalInsert("attachments", originalAttachment);
+
+    editUserMessageAction({
+      thread: { ...thread, headMessageId: originalAssistant.id },
+      sourceMessage: originalUser,
+      text: "revised draft",
+      modelId: workspace.defaultModelId,
+      reasoningLevel: "off",
+      search: false,
+      attachmentIds: [originalAttachment.id],
+    });
+
+    const threadAfterEdit = threads.get(thread.id);
+    const threadMessages = [...messages.state.values()].filter(
+      (message) => message.threadId === thread.id,
+    );
+    const editedUser = threadMessages.find(
+      (message) => message.role === "user" && message.id !== originalUser.id,
+    );
+    const editedAssistant = threadMessages.find(
+      (message) => message.role === "assistant" && message.id !== originalAssistant.id,
+    );
+    const clonedAttachments = [...attachments.state.values()].filter(
+      (attachment) => attachment.threadId === thread.id && attachment.id !== originalAttachment.id,
+    );
+
+    expect(editedUser?.sourceMessageId).toBe(originalUser.id);
+    expect(editedAssistant?.parentMessageId).toBe(editedUser?.id);
+    expect(threadAfterEdit?.headMessageId).toBe(editedAssistant?.id);
+    expect(clonedAttachments).toHaveLength(1);
+    expect(clonedAttachments[0]?.messageId).toBe(editedUser?.id);
+    expect(clonedAttachments[0]?.objectKey).toBe(originalAttachment.objectKey);
   });
 
   it("applies authoritative upserts over optimistic rows without duplicate-key errors", () => {
