@@ -7,7 +7,7 @@
  */
 
 import type { ExtendedStreamChunk } from "@b3-chat/server";
-import { nowIso, type MessagePart } from "@b3-chat/domain";
+import { nowIso, type MessagePart, type TraceSpanKind } from "@b3-chat/domain";
 import type { SearchProgressEvent } from "./search";
 import { normalizeAssistantError } from "./error-normalization";
 
@@ -31,7 +31,7 @@ export type StreamConsumerDeps = {
   broadcast: (envelope: Record<string, unknown>) => void;
   /** Appends a message part (activity, thinking tokens, etc.) */
   appendMessagePart: (
-    kind: string,
+    kind: "activity" | "thinking_tokens",
     input: { text?: string; json?: string | null },
   ) => Promise<MessagePart>;
   /** Reports activity progress events */
@@ -40,6 +40,13 @@ export type StreamConsumerDeps = {
   messageId: string;
   /** Logging function */
   log?: (message: string, details?: Record<string, unknown>) => void;
+  /** Optional tracing wrapper for stream sub-operations */
+  trace?: <A>(
+    name: string,
+    kind: TraceSpanKind,
+    attrs: Record<string, unknown>,
+    run: () => Promise<A>,
+  ) => Promise<A>;
 };
 
 export type StreamConsumerResult = {
@@ -72,6 +79,10 @@ export async function consumeAssistantStream(
   deps: StreamConsumerDeps,
 ): Promise<StreamConsumerResult> {
   const { appendServerEvent, broadcast, appendMessagePart, reportActivity, messageId, log } = deps;
+  const trace =
+    deps.trace ??
+    ((_: string, __: TraceSpanKind, ___: Record<string, unknown>, run: () => Promise<any>) =>
+      run());
 
   const streamStartedAt = Date.now();
   let firstTokenAt: number | null = null;
@@ -89,20 +100,112 @@ export async function consumeAssistantStream(
 
   const flushDelta = async () => {
     if (!pendingDelta) return;
-    deltaCount += 1;
-    accumulated += pendingDelta;
-    const deltaEvent = await appendServerEvent(null, "message_delta", {
-      messageId,
-      delta: pendingDelta,
-      updatedAt: nowIso(),
-    });
-    broadcast(deltaEvent);
-    log?.("assistant_turn_delta", {
-      assistantMessageId: messageId,
-      chars: pendingDelta.length,
-      totalChars: accumulated.length,
-    });
+    const delta = pendingDelta;
     pendingDelta = "";
+    await trace(
+      "assistant.stream.delta.flush",
+      "io",
+      { messageId, chars: delta.length },
+      async () => {
+        deltaCount += 1;
+        accumulated += delta;
+        const deltaEvent = await appendServerEvent(null, "message_delta", {
+          messageId,
+          delta,
+          updatedAt: nowIso(),
+        });
+        broadcast(deltaEvent);
+        log?.("assistant_turn_delta", {
+          assistantMessageId: messageId,
+          chars: delta.length,
+          totalChars: accumulated.length,
+        });
+      },
+    );
+  };
+
+  const completeMessage = async () => {
+    const durationMs = Date.now() - streamStartedAt;
+    const ttftMs = firstTokenAt !== null ? firstTokenAt - streamStartedAt : null;
+
+    await trace("assistant.message.complete", "sync", { messageId, durationMs }, async () => {
+      const completed = await appendServerEvent(null, "message_completed", {
+        messageId,
+        text: accumulated,
+        updatedAt: nowIso(),
+        durationMs,
+        ttftMs,
+        promptTokens: sawUsage ? promptTokens : null,
+        completionTokens: sawUsage ? completionTokens : null,
+      });
+      broadcast(completed);
+      await reportActivity({
+        label: "Response complete",
+        state: "completed",
+      });
+    });
+
+    log?.("assistant_turn_completed", {
+      assistantMessageId: messageId,
+      chunkCount,
+      deltaCount,
+      totalChars: accumulated.length,
+      preview: accumulated.replace(/\s+/g, " ").trim().slice(0, 160),
+    });
+
+    return {
+      text: accumulated,
+      durationMs,
+      ttftMs,
+      promptTokens: sawUsage ? promptTokens : null,
+      completionTokens: sawUsage ? completionTokens : null,
+      reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
+      success: true,
+    } satisfies StreamConsumerResult;
+  };
+
+  const failMessage = async (normalizedError: ReturnType<typeof normalizeAssistantError>) => {
+    return trace(
+      "assistant.message.fail",
+      "sync",
+      { messageId, errorCode: normalizedError.errorCode },
+      async () => {
+        const failed = await appendServerEvent(null, "message_failed", {
+          messageId,
+          errorCode: normalizedError.errorCode,
+          errorMessage: normalizedError.errorMessage,
+          updatedAt: nowIso(),
+        });
+        broadcast(failed);
+
+        await reportActivity({
+          label: "Response failed",
+          state: "failed",
+          detail: normalizedError.errorMessage,
+        });
+
+        log?.("assistant_turn_failed", {
+          assistantMessageId: messageId,
+          chunkCount,
+          deltaCount,
+          error: normalizedError.errorMessage,
+          normalizedErrorCode: normalizedError.errorCode,
+          providerName: normalizedError.providerName,
+          retryable: normalizedError.retryable,
+        });
+
+        return {
+          text: accumulated,
+          durationMs: Date.now() - streamStartedAt,
+          ttftMs: firstTokenAt !== null ? firstTokenAt - streamStartedAt : null,
+          promptTokens: sawUsage ? promptTokens : null,
+          completionTokens: sawUsage ? completionTokens : null,
+          reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
+          success: false,
+          errorMessage: normalizedError.errorMessage,
+        } satisfies StreamConsumerResult;
+      },
+    );
   };
 
   const flushThinkingTokens = async (tokens: number) => {
@@ -199,43 +302,7 @@ export async function consumeAssistantStream(
             await flushThinkingTokens(reasoningTokens);
           }
 
-          const durationMs = Date.now() - streamStartedAt;
-          const ttftMs = firstTokenAt !== null ? firstTokenAt - streamStartedAt : null;
-
-          // Emit message_completed event
-          const completed = await appendServerEvent(null, "message_completed", {
-            messageId,
-            text: accumulated,
-            updatedAt: nowIso(),
-            durationMs,
-            ttftMs,
-            promptTokens: sawUsage ? promptTokens : null,
-            completionTokens: sawUsage ? completionTokens : null,
-          });
-          broadcast(completed);
-
-          await reportActivity({
-            label: "Response complete",
-            state: "completed",
-          });
-
-          log?.("assistant_turn_completed", {
-            assistantMessageId: messageId,
-            chunkCount,
-            deltaCount,
-            totalChars: accumulated.length,
-            preview: accumulated.replace(/\s+/g, " ").trim().slice(0, 160),
-          });
-
-          return {
-            text: accumulated,
-            durationMs,
-            ttftMs,
-            promptTokens: sawUsage ? promptTokens : null,
-            completionTokens: sawUsage ? completionTokens : null,
-            reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
-            success: true,
-          };
+          return completeMessage();
         }
 
         case "RUN_ERROR": {
@@ -245,41 +312,7 @@ export async function consumeAssistantStream(
             errorMessage: errorChunk.error?.message ?? "Unknown error",
           });
 
-          // Emit message_failed event
-          const failed = await appendServerEvent(null, "message_failed", {
-            messageId,
-            errorCode: normalizedError.errorCode,
-            errorMessage: normalizedError.errorMessage,
-            updatedAt: nowIso(),
-          });
-          broadcast(failed);
-
-          await reportActivity({
-            label: "Response failed",
-            state: "failed",
-            detail: normalizedError.errorMessage,
-          });
-
-          log?.("assistant_turn_failed", {
-            assistantMessageId: messageId,
-            chunkCount,
-            deltaCount,
-            error: normalizedError.errorMessage,
-            normalizedErrorCode: normalizedError.errorCode,
-            providerName: normalizedError.providerName,
-            retryable: normalizedError.retryable,
-          });
-
-          return {
-            text: accumulated,
-            durationMs: Date.now() - streamStartedAt,
-            ttftMs: firstTokenAt !== null ? firstTokenAt - streamStartedAt : null,
-            promptTokens: sawUsage ? promptTokens : null,
-            completionTokens: sawUsage ? completionTokens : null,
-            reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
-            success: false,
-            errorMessage: normalizedError.errorMessage,
-          };
+          return failMessage(normalizedError);
         }
 
         // Ignore other event types (RUN_STARTED, STEP_STARTED, etc.)
@@ -295,16 +328,18 @@ export async function consumeAssistantStream(
 
     // Still emit completion since we have accumulated text
     if (accumulated) {
-      const completed = await appendServerEvent(null, "message_completed", {
-        messageId,
-        text: accumulated,
-        updatedAt: nowIso(),
-        durationMs,
-        ttftMs,
-        promptTokens: sawUsage ? promptTokens : null,
-        completionTokens: sawUsage ? completionTokens : null,
+      await trace("assistant.message.complete", "sync", { messageId, durationMs }, async () => {
+        const completed = await appendServerEvent(null, "message_completed", {
+          messageId,
+          text: accumulated,
+          updatedAt: nowIso(),
+          durationMs,
+          ttftMs,
+          promptTokens: sawUsage ? promptTokens : null,
+          completionTokens: sawUsage ? completionTokens : null,
+        });
+        broadcast(completed);
       });
-      broadcast(completed);
     }
 
     return {
@@ -322,40 +357,6 @@ export async function consumeAssistantStream(
       errorMessage: error instanceof Error ? error.message : String(error),
     });
 
-    // Emit message_failed event
-    const failed = await appendServerEvent(null, "message_failed", {
-      messageId,
-      errorCode: normalizedError.errorCode,
-      errorMessage: normalizedError.errorMessage,
-      updatedAt: nowIso(),
-    });
-    broadcast(failed);
-
-    await reportActivity({
-      label: "Response failed",
-      state: "failed",
-      detail: normalizedError.errorMessage,
-    });
-
-    log?.("assistant_turn_failed", {
-      assistantMessageId: messageId,
-      chunkCount,
-      deltaCount,
-      error: normalizedError.errorMessage,
-      normalizedErrorCode: normalizedError.errorCode,
-      providerName: normalizedError.providerName,
-      retryable: normalizedError.retryable,
-    });
-
-    return {
-      text: accumulated,
-      durationMs: Date.now() - streamStartedAt,
-      ttftMs: firstTokenAt !== null ? firstTokenAt - streamStartedAt : null,
-      promptTokens: sawUsage ? promptTokens : null,
-      completionTokens: sawUsage ? completionTokens : null,
-      reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
-      success: false,
-      errorMessage: normalizedError.errorMessage,
-    };
+    return failMessage(normalizedError);
   }
 }

@@ -1,5 +1,5 @@
 {
-  "name": "@b3-chat/server",
+  "name": "@b3-chat/effect",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,15 +12,9 @@
   },
   "dependencies": {
     "@b3-chat/domain": "workspace:*",
-    "@b3-chat/effect": "workspace:*",
-    "@better-auth/infra": "catalog:",
-    "@tanstack/ai": "0.10.2",
-    "better-auth": "^1.6.4",
-    "drizzle-orm": "^0.45.2",
     "effect": "catalog:"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260317.1",
     "typescript": "^5.9.3",
     "vite-plus": "catalog:"
   }

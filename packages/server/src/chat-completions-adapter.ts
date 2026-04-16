@@ -6,12 +6,19 @@
  */
 
 import type { StreamChunk, TextOptions, ModelMessage, ContentPart, Tool } from "@tanstack/ai";
+import type { TraceSpanKind } from "@b3-chat/domain";
 
 export type ChatCompletionsAdapterConfig = {
   baseUrl: string;
   apiKey: string;
   headers?: Record<string, string>;
   timeout?: number;
+  trace?: <A>(
+    name: string,
+    kind: TraceSpanKind,
+    attrs: Record<string, unknown>,
+    run: () => Promise<A>,
+  ) => Promise<A>;
 };
 
 export type ChatCompletionsUsage = {
@@ -311,6 +318,10 @@ export class ChatCompletionsAdapter {
   async *chatStream(options: TextOptions): AsyncIterable<ExtendedStreamChunk> {
     const messages = convertToOpenAIMessages(options.messages ?? [], options.systemPrompts);
     const tools = convertToOpenAITools(options.tools);
+    const trace =
+      this.config.trace ??
+      ((_: string, __: TraceSpanKind, ___: Record<string, unknown>, run: () => Promise<any>) =>
+        run());
 
     const runId = generateId();
     const messageId = generateId();
@@ -329,29 +340,40 @@ export class ChatCompletionsAdapter {
 
     try {
       const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.config.apiKey}`,
-          ...this.config.headers,
-        },
-        body: JSON.stringify({
-          model: this.model,
+      const response = await trace(
+        "assistant.upstream.chat",
+        "model",
+        {
+          modelId: this.model,
           stream: true,
-          stream_options: { include_usage: true },
-          messages,
-          ...(tools ? { tools } : {}),
-          ...(options.temperature !== undefined && {
-            temperature: options.temperature,
+          messageCount: messages.length,
+          toolCount: tools?.length ?? 0,
+        },
+        () =>
+          fetch(url, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${this.config.apiKey}`,
+              ...this.config.headers,
+            },
+            body: JSON.stringify({
+              model: this.model,
+              stream: true,
+              stream_options: { include_usage: true },
+              messages,
+              ...(tools ? { tools } : {}),
+              ...(options.temperature !== undefined && {
+                temperature: options.temperature,
+              }),
+              ...(options.maxTokens !== undefined && {
+                max_tokens: options.maxTokens,
+              }),
+              ...options.modelOptions,
+            }),
+            signal: request.signal,
           }),
-          ...(options.maxTokens !== undefined && {
-            max_tokens: options.maxTokens,
-          }),
-          ...options.modelOptions,
-        }),
-        signal: request.signal,
-      });
+      );
 
       if (!response.ok || !response.body) {
         const errorText = await response.text().catch(() => "Unknown error");
@@ -592,6 +614,10 @@ export class ChatCompletionsAdapter {
       options.chatOptions.messages ?? [],
       options.chatOptions.systemPrompts,
     );
+    const trace =
+      this.config.trace ??
+      ((_: string, __: TraceSpanKind, ___: Record<string, unknown>, run: () => Promise<any>) =>
+        run());
     const request = createRequestSignal({
       externalSignal: options.chatOptions.abortController?.signal,
       timeoutMs: this.config.timeout,
@@ -599,35 +625,45 @@ export class ChatCompletionsAdapter {
 
     try {
       const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.config.apiKey}`,
-          ...this.config.headers,
-        },
-        body: JSON.stringify({
-          model: this.model,
+      const response = await trace(
+        "assistant.upstream.chat",
+        "model",
+        {
+          modelId: this.model,
           stream: false,
-          messages,
-          ...(options.chatOptions.temperature !== undefined && {
-            temperature: options.chatOptions.temperature,
-          }),
-          ...(options.chatOptions.maxTokens !== undefined && {
-            max_tokens: options.chatOptions.maxTokens,
-          }),
-          response_format: {
-            type: "json_schema",
-            json_schema: {
-              name: "structured_output",
-              schema: options.outputSchema,
-              strict: true,
+          messageCount: messages.length,
+        },
+        () =>
+          fetch(url, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${this.config.apiKey}`,
+              ...this.config.headers,
             },
-          },
-          ...options.chatOptions.modelOptions,
-        }),
-        signal: request.signal,
-      });
+            body: JSON.stringify({
+              model: this.model,
+              stream: false,
+              messages,
+              ...(options.chatOptions.temperature !== undefined && {
+                temperature: options.chatOptions.temperature,
+              }),
+              ...(options.chatOptions.maxTokens !== undefined && {
+                max_tokens: options.chatOptions.maxTokens,
+              }),
+              response_format: {
+                type: "json_schema",
+                json_schema: {
+                  name: "structured_output",
+                  schema: options.outputSchema,
+                  strict: true,
+                },
+              },
+              ...options.chatOptions.modelOptions,
+            }),
+            signal: request.signal,
+          }),
+      );
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => "Unknown error");

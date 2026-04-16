@@ -8,7 +8,11 @@ export const TABLES = {
   attachments: "attachments",
   searchRuns: "search_runs",
   searchResults: "search_results",
+  traceRuns: "trace_runs",
+  traceSpans: "trace_spans",
 } as const;
+
+export const SYNC_PROTOCOL_VERSION = "effect4-trace-v1";
 
 const NullableString = Schema.NullOr(Schema.String);
 const NullableNumber = Schema.NullOr(Schema.Number);
@@ -18,7 +22,7 @@ const OptionalOptimisticRowFields = {
   opId: Schema.optional(NullableString),
 } as const;
 
-export const ReasoningLevel = Schema.Literal("off", "low", "medium", "high");
+export const ReasoningLevel = Schema.Literals(["off", "low", "medium", "high"]);
 
 export const WorkspaceRow = Schema.Struct({
   id: Schema.String,
@@ -47,14 +51,14 @@ export const ThreadRow = Schema.Struct({
   ...OptionalOptimisticRowFields,
 });
 
-export const MessageStatus = Schema.Literal(
+export const MessageStatus = Schema.Literals([
   "queued",
   "pending",
   "streaming",
   "completed",
   "failed",
   "cancelled",
-);
+]);
 
 export const MessageRow = Schema.Struct({
   id: Schema.String,
@@ -76,16 +80,18 @@ export const MessageRow = Schema.Struct({
   ...OptionalOptimisticRowFields,
 });
 
+export const MessagePartKind = Schema.Literals(["activity", "thinking_tokens"]);
+
 export const MessagePartRow = Schema.Struct({
   id: Schema.String,
   messageId: Schema.String,
   seq: Schema.Number,
-  kind: Schema.String,
+  kind: MessagePartKind,
   text: Schema.String,
   json: NullableString,
 });
 
-export const AttachmentStatus = Schema.Literal("queued", "uploading", "ready", "failed");
+export const AttachmentStatus = Schema.Literals(["queued", "uploading", "ready", "failed"]);
 
 export const AttachmentRow = Schema.Struct({
   id: Schema.String,
@@ -104,7 +110,7 @@ export const AttachmentRow = Schema.Struct({
   ...OptionalOptimisticRowFields,
 });
 
-export const SearchRunStatus = Schema.Literal("completed", "failed");
+export const SearchRunStatus = Schema.Literals(["completed", "failed"]);
 
 export const SearchRunRow = Schema.Struct({
   id: Schema.String,
@@ -131,6 +137,44 @@ export const SearchResultRow = Schema.Struct({
   score: Schema.Number,
 });
 
+export const TraceStatus = Schema.Literals(["running", "completed", "failed", "cancelled"]);
+export const TraceSpanKind = Schema.Literals(["root", "internal", "tool", "model", "io", "sync"]);
+
+export const TraceRunRow = Schema.Struct({
+  id: Schema.String,
+  messageId: NullableString,
+  threadId: NullableString,
+  workspaceId: NullableString,
+  traceId: Schema.String,
+  rootSpanId: Schema.String,
+  modelId: NullableString,
+  status: TraceStatus,
+  startedAt: Schema.String,
+  endedAt: NullableString,
+  durationMs: NullableNumber,
+  errorCode: NullableString,
+  errorMessage: NullableString,
+  attrsJson: Schema.String,
+});
+
+export const TraceSpanRow = Schema.Struct({
+  id: Schema.String,
+  traceRunId: NullableString,
+  traceId: Schema.String,
+  parentSpanId: NullableString,
+  messageId: NullableString,
+  name: Schema.String,
+  kind: TraceSpanKind,
+  status: TraceStatus,
+  startedAt: Schema.String,
+  endedAt: NullableString,
+  durationMs: NullableNumber,
+  errorCode: NullableString,
+  errorMessage: NullableString,
+  attrsJson: Schema.String,
+  eventsJson: Schema.String,
+});
+
 /** Add optimistic wire fields to an entity for command payloads sent to the server. */
 export function toWire<T extends object>(
   entity: T,
@@ -146,6 +190,8 @@ export const decodeMessagePartRow = Schema.decodeUnknownSync(MessagePartRow);
 export const decodeAttachmentRow = Schema.decodeUnknownSync(AttachmentRow);
 export const decodeSearchRunRow = Schema.decodeUnknownSync(SearchRunRow);
 export const decodeSearchResultRow = Schema.decodeUnknownSync(SearchResultRow);
+export const decodeTraceRunRow = Schema.decodeUnknownSync(TraceRunRow);
+export const decodeTraceSpanRow = Schema.decodeUnknownSync(TraceSpanRow);
 
 export type Workspace = Schema.Schema.Type<typeof WorkspaceRow>;
 export type Thread = Schema.Schema.Type<typeof ThreadRow>;
@@ -155,6 +201,11 @@ export type Attachment = Schema.Schema.Type<typeof AttachmentRow>;
 export type SearchRun = Schema.Schema.Type<typeof SearchRunRow>;
 export type SearchResult = Schema.Schema.Type<typeof SearchResultRow>;
 export type ReasoningLevel = Schema.Schema.Type<typeof ReasoningLevel>;
+export type MessagePartKind = Schema.Schema.Type<typeof MessagePartKind>;
+export type TraceStatus = Schema.Schema.Type<typeof TraceStatus>;
+export type TraceSpanKind = Schema.Schema.Type<typeof TraceSpanKind>;
+export type TraceRun = Schema.Schema.Type<typeof TraceRunRow>;
+export type TraceSpan = Schema.Schema.Type<typeof TraceSpanRow>;
 
 export function mergeAttachmentLink(
   existing: Pick<Attachment, "messageId"> | null | undefined,
@@ -271,6 +322,7 @@ export type SyncCommandType = keyof SyncCommandPayloadMap;
 export type SyncClientHello = {
   type: "hello";
   clientId: string;
+  protocolVersion: string;
   lastServerSeq: number;
   unackedOpIds: string[];
 };
@@ -320,6 +372,8 @@ export type SyncEventPayloadMap = {
   attachment_deleted: { id: string };
   search_runs_replaced: { messageId: string; rows: SearchRun[] };
   search_results_replaced: { messageId: string; rows: SearchResult[] };
+  trace_run_upserted: { row: TraceRun };
+  trace_span_upserted: { row: TraceSpan };
   server_state_rebased: { snapshot: SyncSnapshot };
 };
 
@@ -327,6 +381,7 @@ export type SyncEventType = keyof SyncEventPayloadMap;
 
 export type SyncServerHelloAck = {
   type: "hello_ack";
+  protocolVersion: string;
   serverTime: string;
   lastServerSeq: number;
 };
@@ -359,6 +414,7 @@ export type SyncServerEvent<T extends SyncEventType = SyncEventType> = {
 export type SyncServerReset = {
   type: "sync_reset";
   reason: string;
+  protocolVersion?: string;
   snapshot: SyncSnapshot;
 };
 
@@ -493,7 +549,7 @@ export function createMessage(input: {
 export function createMessagePart(input: {
   messageId: string;
   seq: number;
-  kind: string;
+  kind: MessagePartKind;
   text?: string;
   json?: string | null;
 }) {
@@ -504,6 +560,76 @@ export function createMessagePart(input: {
     kind: input.kind,
     text: input.text ?? "",
     json: input.json ?? null,
+  });
+}
+
+export function createTraceRun(input: {
+  id?: string;
+  messageId?: string | null;
+  threadId?: string | null;
+  workspaceId?: string | null;
+  traceId: string;
+  rootSpanId: string;
+  modelId?: string | null;
+  status?: TraceStatus;
+  startedAt?: string;
+  endedAt?: string | null;
+  durationMs?: number | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  attrs?: Record<string, unknown>;
+}) {
+  return decodeTraceRunRow({
+    id: input.id ?? createId("trun"),
+    messageId: input.messageId ?? null,
+    threadId: input.threadId ?? null,
+    workspaceId: input.workspaceId ?? null,
+    traceId: input.traceId,
+    rootSpanId: input.rootSpanId,
+    modelId: input.modelId ?? null,
+    status: input.status ?? "running",
+    startedAt: input.startedAt ?? nowIso(),
+    endedAt: input.endedAt ?? null,
+    durationMs: input.durationMs ?? null,
+    errorCode: input.errorCode ?? null,
+    errorMessage: input.errorMessage ?? null,
+    attrsJson: JSON.stringify(input.attrs ?? {}),
+  });
+}
+
+export function createTraceSpan(input: {
+  id?: string;
+  traceRunId?: string | null;
+  traceId: string;
+  parentSpanId?: string | null;
+  messageId?: string | null;
+  name: string;
+  kind: TraceSpanKind;
+  status?: TraceStatus;
+  startedAt?: string;
+  endedAt?: string | null;
+  durationMs?: number | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  attrs?: Record<string, unknown>;
+  events?: Record<string, unknown>[];
+}) {
+  return decodeTraceSpanRow({
+    id: input.id ?? createId("span"),
+    traceRunId: input.traceRunId ?? null,
+    traceId: input.traceId,
+    parentSpanId: input.parentSpanId ?? null,
+    messageId: input.messageId ?? null,
+    name: input.name,
+    kind: input.kind,
+    status: input.status ?? "running",
+    startedAt: input.startedAt ?? nowIso(),
+    endedAt: input.endedAt ?? null,
+    durationMs: input.durationMs ?? null,
+    errorCode: input.errorCode ?? null,
+    errorMessage: input.errorMessage ?? null,
+    attrsJson: JSON.stringify(input.attrs ?? {}),
+    eventsJson: JSON.stringify(input.events ?? []),
   });
 }
 

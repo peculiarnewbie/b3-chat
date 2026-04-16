@@ -1,12 +1,17 @@
 import {
+  SYNC_PROTOCOL_VERSION,
   TABLES,
   createId,
   createMessagePart,
+  createTraceRun,
+  createTraceSpan,
   createThread,
   createWorkspace,
   decodeAttachmentRow,
   decodeMessageRow,
   decodeThreadRow,
+  decodeTraceRunRow,
+  decodeTraceSpanRow,
   decodeWorkspaceRow,
   mergeAttachmentLink,
   nowIso,
@@ -27,6 +32,8 @@ import {
   type SyncServerEvent,
   type SyncSnapshot,
   type Thread,
+  type TraceRun,
+  type TraceSpan,
   type Workspace,
   sortConversationMessages,
 } from "@b3-chat/domain";
@@ -41,6 +48,15 @@ import {
   type AppEnv,
   type ModelMessage,
 } from "@b3-chat/server";
+import {
+  createStructuredLogger,
+  decodeAppEnv,
+  makeRootTraceContext,
+  makeTraceRecorder,
+  runAppEffect,
+  traceEffect,
+} from "@b3-chat/effect";
+import { Effect } from "effect";
 import { createExaSearchTool, type SearchProgressEvent } from "./search";
 import { normalizeAssistantError } from "./error-normalization";
 import { consumeAssistantStream, type StreamConsumerDeps } from "./stream-consumer";
@@ -65,12 +81,10 @@ function isWebSocketRequest(request: Request) {
 }
 
 function syncLog(message: string, details?: Record<string, unknown>) {
-  if (details) {
-    console.log(`[sync-do] ${message}`, JSON.stringify(details));
-    return;
-  }
-  console.log(`[sync-do] ${message}`);
+  syncLogger.log(message, details);
 }
+
+const syncLogger = createStructuredLogger("sync-do");
 
 function previewText(value: string, limit = 160) {
   return value.replace(/\s+/g, " ").trim().slice(0, limit);
@@ -156,7 +170,7 @@ export class SyncEngineDurableObject {
 
   constructor(ctx: DurableObjectState, env: AppEnv) {
     this.ctx = ctx;
-    this.env = env;
+    this.env = decodeAppEnv(env);
   }
 
   async fetch(request: Request) {
@@ -212,6 +226,7 @@ export class SyncEngineDurableObject {
         json({
           type: "sync_reset",
           reason: error instanceof Error ? error.message : String(error),
+          protocolVersion: SYNC_PROTOCOL_VERSION,
           snapshot: await this.getSnapshot(),
         } satisfies SyncServerEnvelope),
       );
@@ -240,6 +255,10 @@ export class SyncEngineDurableObject {
         response_json TEXT,
         created_at TEXT NOT NULL,
         acked_seq INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS workspaces (
         id TEXT PRIMARY KEY,
@@ -288,6 +307,23 @@ export class SyncEngineDurableObject {
         message_id TEXT NOT NULL,
         row_json TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS trace_runs (
+        id TEXT PRIMARY KEY,
+        message_id TEXT,
+        thread_id TEXT,
+        workspace_id TEXT,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        row_json TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS trace_spans (
+        id TEXT PRIMARY KEY,
+        trace_run_id TEXT,
+        message_id TEXT,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        row_json TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS idx_events_seq ON events(seq);
       CREATE INDEX IF NOT EXISTS idx_commands_seq ON commands(acked_seq);
       CREATE INDEX IF NOT EXISTS idx_threads_workspace ON threads(workspace_id);
@@ -296,7 +332,15 @@ export class SyncEngineDurableObject {
       CREATE INDEX IF NOT EXISTS idx_attachments_thread ON attachments(thread_id);
       CREATE INDEX IF NOT EXISTS idx_search_runs_message ON search_runs(message_id);
       CREATE INDEX IF NOT EXISTS idx_search_results_message ON search_results(message_id);
+      CREATE INDEX IF NOT EXISTS idx_trace_runs_message ON trace_runs(message_id);
+      CREATE INDEX IF NOT EXISTS idx_trace_spans_trace_run ON trace_spans(trace_run_id);
     `);
+    const version = this.queryOne<{ value: string }>(
+      `SELECT value FROM metadata WHERE key = 'sync_protocol_version'`,
+    );
+    if (version?.value !== SYNC_PROTOCOL_VERSION) {
+      this.resetForProtocolVersion();
+    }
   }
 
   private async handleSocketEnvelope(ws: WebSocket, envelope: SyncClientEnvelope) {
@@ -338,10 +382,28 @@ export class SyncEngineDurableObject {
     ws.send(
       json({
         type: "hello_ack",
+        protocolVersion: SYNC_PROTOCOL_VERSION,
         serverTime: nowIso(),
         lastServerSeq,
       } satisfies SyncServerEnvelope),
     );
+
+    if (hello.protocolVersion !== SYNC_PROTOCOL_VERSION) {
+      syncLog("sync_reset", {
+        reason: "protocol_mismatch",
+        clientProtocolVersion: hello.protocolVersion,
+        serverProtocolVersion: SYNC_PROTOCOL_VERSION,
+      });
+      ws.send(
+        json({
+          type: "sync_reset",
+          reason: "protocol_mismatch",
+          protocolVersion: SYNC_PROTOCOL_VERSION,
+          snapshot: await this.getSnapshot(),
+        } satisfies SyncServerEnvelope),
+      );
+      return;
+    }
 
     // Check if client needs a full resync:
     // 1. lastServerSeq <= 0 means fresh client
@@ -357,6 +419,7 @@ export class SyncEngineDurableObject {
         json({
           type: "sync_reset",
           reason,
+          protocolVersion: SYNC_PROTOCOL_VERSION,
           snapshot: await this.getSnapshot(),
         } satisfies SyncServerEnvelope),
       );
@@ -613,10 +676,17 @@ export class SyncEngineDurableObject {
           this.exec(`DELETE FROM attachments`);
           this.exec(`DELETE FROM search_runs`);
           this.exec(`DELETE FROM search_results`);
+          this.exec(`DELETE FROM trace_runs`);
+          this.exec(`DELETE FROM trace_spans`);
           this.exec(`DELETE FROM events`);
           this.exec(`DELETE FROM commands`);
+          this.exec(`DELETE FROM metadata WHERE key <> 'sync_protocol_version'`);
           // Reset autoincrement sequences
           this.exec(`DELETE FROM sqlite_sequence`);
+          this.exec(
+            `INSERT OR REPLACE INTO metadata (key, value) VALUES ('sync_protocol_version', ?)`,
+            SYNC_PROTOCOL_VERSION,
+          );
           // Bootstrap a fresh workspace
           const workspace = {
             ...createWorkspace({
@@ -697,23 +767,209 @@ export class SyncEngineDurableObject {
       assistantMessage: Message;
     },
   ) {
+    const traceContext = makeRootTraceContext({
+      messageId: payload.assistantMessage.id,
+      threadId: payload.threadId,
+      modelId: payload.modelId,
+      opId: payload.assistantMessage.opId ?? null,
+    });
+    const rootSpanId = createId("span");
+    const childTraceContext = {
+      ...traceContext,
+      parentSpanId: rootSpanId,
+    };
+    const traceRuns = new Map<string, TraceRun>();
+    const traceSpans = new Map<string, TraceSpan>();
+    const turnLogger = createStructuredLogger("assistant-turn", {
+      traceId: traceContext.traceId,
+      traceRunId: traceContext.traceRunId,
+      rootSpanId,
+      messageId: payload.assistantMessage.id,
+      threadId: payload.threadId,
+      modelId: payload.modelId,
+    });
+
+    const upsertTraceRun = async (row: TraceRun) => {
+      traceRuns.set(row.id, row);
+      const event = await this.appendServerEvent(null, "trace_run_upserted", { row });
+      this.broadcast(event);
+    };
+
+    const upsertTraceSpan = async (row: TraceSpan) => {
+      traceSpans.set(row.id, row);
+      const event = await this.appendServerEvent(null, "trace_span_upserted", { row });
+      this.broadcast(event);
+    };
+
+    const recorder = makeTraceRecorder({
+      scope: "assistant-turn",
+      logger: turnLogger,
+      onTraceRunStart: async (row) => {
+        await upsertTraceRun(
+          createTraceRun({
+            id: row.id,
+            messageId: row.messageId,
+            threadId: row.threadId,
+            workspaceId: row.workspaceId,
+            traceId: row.traceId,
+            rootSpanId: row.rootSpanId,
+            modelId: row.modelId,
+            status: row.status,
+            startedAt: row.startedAt,
+            endedAt: row.endedAt,
+            durationMs: row.durationMs,
+            errorCode: row.errorCode,
+            errorMessage: row.errorMessage,
+            attrs: typeof row.attrsJson === "string" ? parseJson(row.attrsJson) : {},
+          }),
+        );
+      },
+      onTraceRunFinish: async (row) => {
+        const current = traceRuns.get(row.id);
+        if (!current) return;
+        await upsertTraceRun(
+          decodeTraceRunRow({
+            ...current,
+            ...row,
+          }),
+        );
+      },
+      onSpanStart: async (row) => {
+        await upsertTraceSpan(
+          createTraceSpan({
+            id: row.id,
+            traceRunId: row.traceRunId,
+            traceId: row.traceId,
+            parentSpanId: row.parentSpanId,
+            messageId: row.messageId,
+            name: row.name,
+            kind: row.kind,
+            status: row.status,
+            startedAt: row.startedAt,
+            endedAt: row.endedAt,
+            durationMs: row.durationMs,
+            errorCode: row.errorCode,
+            errorMessage: row.errorMessage,
+            attrs: typeof row.attrsJson === "string" ? parseJson(row.attrsJson) : {},
+            events: typeof row.eventsJson === "string" ? parseJson(row.eventsJson) : [],
+          }),
+        );
+      },
+      onSpanFinish: async (row) => {
+        const current = traceSpans.get(row.id);
+        if (!current) return;
+        await upsertTraceSpan(
+          decodeTraceSpanRow({
+            ...current,
+            ...row,
+          }),
+        );
+      },
+    });
+
+    const traceRuntime = {
+      env: this.env,
+      traceRecorder: recorder,
+      traceContext: childTraceContext,
+    } satisfies Parameters<typeof runAppEffect>[1];
+
+    const traceAsync = <A>(
+      name: string,
+      kind: TraceSpan["kind"],
+      attrs: Record<string, unknown>,
+      run: () => Promise<A>,
+    ) => runAppEffect(traceEffect(name, kind, attrs, Effect.tryPromise(run)), traceRuntime);
+
+    const traceSync = <A>(
+      name: string,
+      kind: TraceSpan["kind"],
+      attrs: Record<string, unknown>,
+      run: () => A,
+    ) => runAppEffect(traceEffect(name, kind, attrs, Effect.sync(run)), traceRuntime);
+
     syncLog("assistant_turn_start", {
       threadId: payload.threadId,
       assistantMessageId: payload.assistantMessage.id,
       modelId: payload.modelId,
       reasoningLevel: payload.reasoningLevel,
       search: payload.search,
+      traceId: traceContext.traceId,
+      traceRunId: traceContext.traceRunId,
     });
-    const snapshot = await this.getSnapshot();
+
+    await recorder.startTraceRun({
+      traceRunId: traceContext.traceRunId,
+      traceId: traceContext.traceId,
+      rootSpanId,
+      messageId: payload.assistantMessage.id,
+      threadId: payload.threadId,
+      workspaceId: payload.thread.workspaceId,
+      modelId: payload.modelId || payload.assistantMessage.modelId || null,
+      attrs: {
+        reasoningLevel: payload.reasoningLevel,
+        searchEnabled: payload.search,
+      },
+    });
+    await recorder.startSpan({
+      spanId: rootSpanId,
+      traceRunId: traceContext.traceRunId,
+      traceId: traceContext.traceId,
+      parentSpanId: null,
+      messageId: payload.assistantMessage.id,
+      name: "assistant.turn",
+      kind: "root",
+      attrs: {
+        workspaceId: payload.thread.workspaceId,
+        threadId: payload.threadId,
+        messageId: payload.assistantMessage.id,
+        modelId: payload.modelId || payload.assistantMessage.modelId || null,
+        reasoningLevel: payload.reasoningLevel,
+        searchEnabled: payload.search,
+      },
+    });
+
+    const snapshot = await traceAsync("assistant.snapshot.load", "io", {}, () =>
+      this.getSnapshot(),
+    );
     const thread = this.getThread(payload.threadId);
-    if (!thread) return;
+    if (!thread) {
+      await recorder.finishSpan({
+        spanId: rootSpanId,
+        status: "failed",
+        errorCode: "ThreadNotFound",
+        errorMessage: "Thread not found",
+      });
+      await recorder.finishTraceRun({
+        traceRunId: traceContext.traceRunId,
+        status: "failed",
+        errorCode: "ThreadNotFound",
+        errorMessage: "Thread not found",
+      });
+      return;
+    }
     const workspace = this.getWorkspace(thread.workspaceId);
-    if (!workspace) return;
+    if (!workspace) {
+      await recorder.finishSpan({
+        spanId: rootSpanId,
+        status: "failed",
+        errorCode: "WorkspaceNotFound",
+        errorMessage: "Workspace not found",
+      });
+      await recorder.finishTraceRun({
+        traceRunId: traceContext.traceRunId,
+        status: "failed",
+        errorCode: "WorkspaceNotFound",
+        errorMessage: "Workspace not found",
+      });
+      return;
+    }
     const modelId = payload.modelId || workspace.defaultModelId || getDefaultModelId(this.env);
+    childTraceContext.workspaceId = workspace.id;
+    childTraceContext.modelId = modelId;
     let seq = 0;
 
     const appendMessagePart = async (
-      kind: string,
+      kind: "activity" | "thinking_tokens",
       input: {
         text?: string;
         json?: string | null;
@@ -739,15 +995,24 @@ export class SyncEngineDurableObject {
     };
 
     try {
-      const threadMessages = this.getThreadMessages(snapshot, thread.id, [
-        payload.userMessage,
-        payload.assistantMessage,
-      ]);
+      const threadMessages = await traceSync("assistant.thread_messages.load", "sync", {}, () =>
+        this.getThreadMessages(snapshot, thread.id, [
+          payload.userMessage,
+          payload.assistantMessage,
+        ]),
+      );
       const searchTool = payload.search
         ? createExaSearchTool({
             env: this.env,
             assistantMessageId: payload.assistantMessage.id,
             log: syncLog,
+            trace: (name, attrs, run) =>
+              traceAsync(
+                name,
+                name === "assistant.search.prepare" ? "internal" : "tool",
+                attrs,
+                run,
+              ),
             onProgress: reportActivity,
             onSearchStateChange: async (state) => {
               const searchRunEvent = await this.appendServerEvent(null, "search_runs_replaced", {
@@ -765,11 +1030,11 @@ export class SyncEngineDurableObject {
           })
         : null;
 
-      // Build model messages with resolved attachments
-      const { messages: modelMessages, systemPrompts } = await this.buildModelMessages(
-        snapshot,
-        workspace.id,
-        threadMessages,
+      const { messages: modelMessages, systemPrompts } = await traceAsync(
+        "assistant.attachments.resolve",
+        "io",
+        { threadMessageCount: threadMessages.length },
+        () => this.buildModelMessages(snapshot, workspace.id, threadMessages),
       );
       if (searchTool) {
         systemPrompts.push(SEARCH_TOOL_SYSTEM_PROMPT);
@@ -780,14 +1045,26 @@ export class SyncEngineDurableObject {
         {
           baseUrl: this.env.OPENCODE_GO_BASE_URL,
           apiKey: this.env.OPENCODE_GO_API_KEY,
+          trace: (name, kind, attrs, run) => traceAsync(name, kind, attrs, run),
         },
         modelId,
       );
-      const providerOptions = getProviderModelOptions(
-        modelId,
-        searchTool ? 1 : 0,
-        payload.reasoningLevel,
-        payload.modelInterleavedField,
+      const providerOptions = await traceSync(
+        "assistant.provider.options",
+        "model",
+        {
+          modelId,
+          reasoningLevel: payload.reasoningLevel,
+          toolCount: searchTool ? 1 : 0,
+          searchEnabled: payload.search,
+        },
+        () =>
+          getProviderModelOptions(
+            modelId,
+            searchTool ? 1 : 0,
+            payload.reasoningLevel,
+            payload.modelInterleavedField,
+          ),
       );
       const modelOptions = providerOptions.modelOptions;
 
@@ -821,6 +1098,7 @@ export class SyncEngineDurableObject {
         reportActivity,
         messageId: payload.assistantMessage.id,
         log: syncLog,
+        trace: (name, kind, attrs, run) => traceAsync(name, kind, attrs, run),
       };
 
       // Stream using TanStack AI's chat() function
@@ -833,7 +1111,9 @@ export class SyncEngineDurableObject {
         ...(searchTool ? { tools: [searchTool.tool] } : {}),
       });
 
-      const result = await consumeAssistantStream(stream, consumerDeps);
+      const result = await traceAsync("assistant.stream.consume", "io", { modelId }, () =>
+        consumeAssistantStream(stream, consumerDeps),
+      );
       const searchRuns = searchTool?.state.searchRuns ?? [];
 
       // Log completion metrics
@@ -852,6 +1132,22 @@ export class SyncEngineDurableObject {
         likelyIgnoredGrounding:
           searchRuns.length > 0 && looksLikeMissingRealtimeAccess(result.text),
         answerPreview: previewText(result.text),
+      });
+      await recorder.finishSpan({
+        spanId: rootSpanId,
+        status: "completed",
+        attrs: {
+          searchRunCount: searchRuns.length,
+          answerPreview: previewText(result.text),
+        },
+      });
+      await recorder.finishTraceRun({
+        traceRunId: traceContext.traceRunId,
+        status: "completed",
+        attrs: {
+          resultTextLength: result.text.length,
+          searchRunCount: searchRuns.length,
+        },
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -889,6 +1185,18 @@ export class SyncEngineDurableObject {
           state: "failed",
           detail: normalizedError.errorMessage,
         } satisfies SearchProgressEvent),
+      });
+      await recorder.finishSpan({
+        spanId: rootSpanId,
+        status: normalizedError.errorCode === "cancelled" ? "cancelled" : "failed",
+        errorCode: normalizedError.errorCode,
+        errorMessage: normalizedError.errorMessage,
+      });
+      await recorder.finishTraceRun({
+        traceRunId: traceContext.traceRunId,
+        status: normalizedError.errorCode === "cancelled" ? "cancelled" : "failed",
+        errorCode: normalizedError.errorCode,
+        errorMessage: normalizedError.errorMessage,
       });
     }
   }
@@ -1238,6 +1546,37 @@ export class SyncEngineDurableObject {
         }
         break;
       }
+      case "trace_run_upserted": {
+        const event = payload as SyncEventPayloadMap["trace_run_upserted"];
+        const row = event.row;
+        this.exec(
+          `INSERT OR REPLACE INTO trace_runs (id, message_id, thread_id, workspace_id, status, started_at, row_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          row.id,
+          row.messageId,
+          row.threadId,
+          row.workspaceId,
+          row.status,
+          row.startedAt,
+          json(row),
+        );
+        break;
+      }
+      case "trace_span_upserted": {
+        const event = payload as SyncEventPayloadMap["trace_span_upserted"];
+        const row = event.row;
+        this.exec(
+          `INSERT OR REPLACE INTO trace_spans (id, trace_run_id, message_id, status, started_at, row_json)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          row.id,
+          row.traceRunId,
+          row.messageId,
+          row.status,
+          row.startedAt,
+          json(row),
+        );
+        break;
+      }
       case "server_state_rebased": {
         const event = payload as SyncEventPayloadMap["server_state_rebased"];
         this.replaceSnapshot(event.snapshot);
@@ -1256,6 +1595,8 @@ export class SyncEngineDurableObject {
       "attachments",
       "search_runs",
       "search_results",
+      "trace_runs",
+      "trace_spans",
     ]) {
       this.exec(`DELETE FROM ${tableName}`);
     }
@@ -1291,6 +1632,12 @@ export class SyncEngineDurableObject {
     }
     for (const [messageId, rows] of resultsByMessage) {
       this.applyEventToMaterializedState("search_results_replaced", { messageId, rows });
+    }
+    for (const row of Object.values<TraceRun>(tables[TABLES.traceRuns] ?? {})) {
+      this.applyEventToMaterializedState("trace_run_upserted", { row });
+    }
+    for (const row of Object.values<TraceSpan>(tables[TABLES.traceSpans] ?? {})) {
+      this.applyEventToMaterializedState("trace_span_upserted", { row });
     }
   }
 
@@ -1378,6 +1725,8 @@ export class SyncEngineDurableObject {
         [TABLES.attachments]: this.readTable("attachments"),
         [TABLES.searchRuns]: this.readTable("search_runs"),
         [TABLES.searchResults]: this.readTable("search_results"),
+        [TABLES.traceRuns]: this.readTable("trace_runs"),
+        [TABLES.traceSpans]: this.readTable("trace_spans"),
       },
     };
   }
@@ -1416,5 +1765,28 @@ export class SyncEngineDurableObject {
 
   private queryAll<T extends Record<string, unknown>>(query: string, ...params: any[]) {
     return this.exec(query, ...params).toArray() as T[];
+  }
+
+  private resetForProtocolVersion() {
+    for (const tableName of [
+      "events",
+      "commands",
+      "workspaces",
+      "threads",
+      "messages",
+      "message_parts",
+      "attachments",
+      "search_runs",
+      "search_results",
+      "trace_runs",
+      "trace_spans",
+    ]) {
+      this.exec(`DELETE FROM ${tableName}`);
+    }
+    this.exec(`DELETE FROM sqlite_sequence`);
+    this.exec(
+      `INSERT OR REPLACE INTO metadata (key, value) VALUES ('sync_protocol_version', ?)`,
+      SYNC_PROTOCOL_VERSION,
+    );
   }
 }

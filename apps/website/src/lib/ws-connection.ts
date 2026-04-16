@@ -1,4 +1,4 @@
-import { createId, type SyncServerEnvelope } from "@b3-chat/domain";
+import { SYNC_PROTOCOL_VERSION, createId, type SyncServerEnvelope } from "@b3-chat/domain";
 import * as pendingOps from "./pending-ops";
 
 // ---------------------------------------------------------------------------
@@ -111,6 +111,7 @@ function connect() {
     send({
       type: "hello",
       clientId,
+      protocolVersion: SYNC_PROTOCOL_VERSION,
       lastServerSeq,
       unackedOpIds: pendingOps.unackedOpIds(),
     });

@@ -1,4 +1,4 @@
-import type { AppEnv } from "@b3-chat/server";
+import { setRuntimeEnv, type AppEnv } from "@b3-chat/server";
 import { handleAuth } from "./api/auth";
 import { handleSession } from "./api/session";
 import { handleModels } from "./api/models";
@@ -17,8 +17,7 @@ type Env = AppEnv & {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Make env available to getRuntimeEnv() used throughout @b3-chat/server
-    globalThis.__env__ = env;
+    setRuntimeEnv(env);
 
     const withVersionHeader = (response: Response) => {
       const next = new Response(response.body, response);

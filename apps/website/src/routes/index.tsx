@@ -19,6 +19,8 @@ import type {
   SearchRun,
   SearchResult,
   Thread,
+  TraceRun,
+  TraceSpan,
   Workspace,
 } from "@b3-chat/domain";
 import Markdown from "../components/Markdown";
@@ -34,6 +36,8 @@ import {
   attachments as attachmentsCollection,
   searchRuns as searchRunsCollection,
   searchResults as searchResultsCollection,
+  traceRuns as traceRunsCollection,
+  traceSpans as traceSpansCollection,
 } from "../lib/collections";
 import {
   createWorkspaceAction,
@@ -84,6 +88,12 @@ type AssistantActivity = {
   step: number | null;
   query: string | null;
   detail: string | null;
+};
+
+type ParsedTraceSpan = TraceSpan & {
+  attrs: Record<string, unknown>;
+  events: Record<string, unknown>[];
+  children: ParsedTraceSpan[];
 };
 
 const REASONING_OPTIONS: Array<{ value: ReasoningLevel; label: string }> = [
@@ -205,6 +215,106 @@ function parseAssistantActivity(part: { kind?: string; text?: string; json?: str
   }
 }
 
+function parseTraceJson(value: string | null | undefined) {
+  if (typeof value !== "string" || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseTraceEvents(value: string | null | undefined) {
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is Record<string, unknown> =>
+          Boolean(item && typeof item === "object"),
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function formatTraceStatus(status: string) {
+  switch (status) {
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+    default:
+      return "Running";
+  }
+}
+
+function shortTraceId(value: string) {
+  return value.length <= 14 ? value : `${value.slice(0, 14)}…`;
+}
+
+function buildTraceTree(spans: TraceSpan[], parentSpanId: string | null = null): ParsedTraceSpan[] {
+  return spans
+    .filter((span) => (span.parentSpanId ?? null) === parentSpanId)
+    .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+    .map((span) => ({
+      ...span,
+      attrs: parseTraceJson(span.attrsJson),
+      events: parseTraceEvents(span.eventsJson),
+      children: buildTraceTree(spans, span.id),
+    }));
+}
+
+function TraceSpanTree(props: { span: ParsedTraceSpan }) {
+  return (
+    <div class="trace-span-node">
+      <div
+        classList={{
+          "trace-span-header": true,
+          "is-failed": props.span.status === "failed",
+          "is-cancelled": props.span.status === "cancelled",
+        }}
+      >
+        <span class="trace-span-name">{props.span.name}</span>
+        <span class="trace-span-meta">
+          <span>{formatTraceStatus(props.span.status)}</span>
+          <Show when={props.span.durationMs != null}>
+            <span>{formatDuration(props.span.durationMs!)}</span>
+          </Show>
+        </span>
+      </div>
+      <Show
+        when={
+          Object.keys(props.span.attrs).length > 0 ||
+          props.span.errorMessage ||
+          props.span.events.length > 0
+        }
+      >
+        <details class="trace-span-details">
+          <summary>Details</summary>
+          <Show when={Object.keys(props.span.attrs).length > 0}>
+            <pre>{JSON.stringify(props.span.attrs, null, 2)}</pre>
+          </Show>
+          <Show when={props.span.errorMessage}>
+            <pre>{props.span.errorMessage}</pre>
+          </Show>
+          <Show when={props.span.events.length > 0}>
+            <pre>{JSON.stringify(props.span.events, null, 2)}</pre>
+          </Show>
+        </details>
+      </Show>
+      <Show when={props.span.children.length > 0}>
+        <div class="trace-span-children">
+          <For each={props.span.children}>{(child) => <TraceSpanTree span={child} />}</For>
+        </div>
+      </Show>
+    </div>
+  );
+}
+
 const THEMES: { id: Theme; label: string }[] = [
   { id: "clean", label: "Clean" },
   { id: "night", label: "Night" },
@@ -253,12 +363,17 @@ export default function Home() {
   const allAttachments = useLiveQuery(() => attachmentsCollection);
   const allSearchRuns = useLiveQuery(() => searchRunsCollection);
   const allSearchResults = useLiveQuery(() => searchResultsCollection);
+  const allTraceRuns = useLiveQuery(() => traceRunsCollection);
+  const allTraceSpans = useLiveQuery(() => traceSpansCollection);
   const [theme, setTheme] = createSignal<Theme>(getInitialTheme());
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
   const [collapsedProgressByMessage, setCollapsedProgressByMessage] = createStore<
     Record<string, boolean>
   >({});
   const [didAutoCollapseProgressByMessage, setDidAutoCollapseProgressByMessage] = createStore<
+    Record<string, boolean>
+  >({});
+  const [collapsedTraceByMessage, setCollapsedTraceByMessage] = createStore<
     Record<string, boolean>
   >({});
   const [composer, setComposer] = createStore({
@@ -564,6 +679,32 @@ export default function Home() {
     }
     return byMessage;
   });
+  const traceRunsByMessage = createMemo(() => {
+    const byMessage = new Map<string, TraceRun[]>();
+    for (const row of allTraceRuns() as TraceRun[]) {
+      if (!row.messageId) continue;
+      const list = byMessage.get(row.messageId) ?? [];
+      list.push(row);
+      byMessage.set(row.messageId, list);
+    }
+    for (const list of byMessage.values()) {
+      list.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    }
+    return byMessage;
+  });
+  const traceSpansByRun = createMemo(() => {
+    const byRun = new Map<string, TraceSpan[]>();
+    for (const row of allTraceSpans() as TraceSpan[]) {
+      if (!row.traceRunId) continue;
+      const list = byRun.get(row.traceRunId) ?? [];
+      list.push(row);
+      byRun.set(row.traceRunId, list);
+    }
+    for (const list of byRun.values()) {
+      list.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    }
+    return byRun;
+  });
 
   const thinkingTokens = (messageId: string) => thinkingTokensByMessage().get(messageId) ?? null;
   const activitiesForMessage = (messageId: string) => assistantActivities().get(messageId) ?? [];
@@ -590,6 +731,7 @@ export default function Home() {
     (Boolean(message.text?.trim()) ||
       message.status === "failed" ||
       (searchRunsMemo().get(message.id)?.length ?? 0) > 0 ||
+      traceRunsForMessage(message.id).length > 0 ||
       hasAssistantStats(message));
   const thinkingLabel = (messageId: string) => {
     const tokens = thinkingTokens(messageId);
@@ -631,6 +773,16 @@ export default function Home() {
     }
     return assistantError(message).summary;
   };
+  const isTraceCollapsed = (messageId: string) => collapsedTraceByMessage[messageId] ?? true;
+  const toggleTraceDrawer = (messageId: string) =>
+    setCollapsedTraceByMessage(messageId, !isTraceCollapsed(messageId));
+  const traceRunsForMessage = (messageId: string) => traceRunsByMessage().get(messageId) ?? [];
+  const traceTreesForMessage = (messageId: string) =>
+    traceRunsForMessage(messageId).map((run) => ({
+      run,
+      spans: buildTraceTree(traceSpansByRun().get(run.id) ?? []),
+      attrs: parseTraceJson(run.attrsJson),
+    }));
 
   createEffect(() => {
     for (const messageId of messageIds()) {
@@ -909,6 +1061,72 @@ export default function Home() {
                           )}{" "}
                           tok/s
                         </span>
+                      </Show>
+                    </div>
+                  </Show>
+                  <Show when={traceRunsForMessage(message().id).length > 0}>
+                    <div class="trace-shell">
+                      <button
+                        type="button"
+                        class="trace-toggle"
+                        aria-expanded={!isTraceCollapsed(message().id)}
+                        aria-controls={`trace-drawer-${message().id}`}
+                        onClick={() => toggleTraceDrawer(message().id)}
+                      >
+                        <span class="trace-toggle-copy">
+                          <span class="trace-toggle-label">Trace</span>
+                          <span class="trace-toggle-meta">
+                            {traceTreesForMessage(message().id)[0]?.run
+                              ? `${formatTraceStatus(traceTreesForMessage(message().id)[0]!.run.status)} • ${shortTraceId(traceTreesForMessage(message().id)[0]!.run.traceId)}`
+                              : "Developer trace"}
+                          </span>
+                        </span>
+                        <span
+                          classList={{
+                            "assistant-progress-toggle-chevron": true,
+                            "is-collapsed": isTraceCollapsed(message().id),
+                          }}
+                          aria-hidden="true"
+                        >
+                          ▾
+                        </span>
+                      </button>
+                      <Show when={!isTraceCollapsed(message().id)}>
+                        <div class="trace-drawer" id={`trace-drawer-${message().id}`}>
+                          <For each={traceTreesForMessage(message().id)}>
+                            {(trace) => (
+                              <div class="trace-run-card">
+                                <div class="trace-run-header">
+                                  <span class="trace-run-id">
+                                    trace {shortTraceId(trace.run.traceId)}
+                                  </span>
+                                  <span class="trace-run-badges">
+                                    <span>{formatTraceStatus(trace.run.status)}</span>
+                                    <Show when={trace.run.modelId}>
+                                      <span>{trace.run.modelId}</span>
+                                    </Show>
+                                    <Show when={trace.attrs.searchEnabled === true}>
+                                      <span>search</span>
+                                    </Show>
+                                    <Show when={trace.run.durationMs != null}>
+                                      <span>{formatDuration(trace.run.durationMs!)}</span>
+                                    </Show>
+                                  </span>
+                                </div>
+                                <Show when={trace.run.errorMessage}>
+                                  <div class="trace-run-error">{trace.run.errorMessage}</div>
+                                </Show>
+                                <Show when={trace.spans.length > 0}>
+                                  <div class="trace-tree">
+                                    <For each={trace.spans}>
+                                      {(span) => <TraceSpanTree span={span} />}
+                                    </For>
+                                  </div>
+                                </Show>
+                              </div>
+                            )}
+                          </For>
+                        </div>
                       </Show>
                     </div>
                   </Show>

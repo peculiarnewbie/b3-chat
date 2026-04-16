@@ -46,6 +46,7 @@ export function createExaSearchTool(input: {
   env: AppEnv;
   assistantMessageId: string;
   log?: (event: string, details?: Record<string, unknown>) => void;
+  trace?: <A>(name: string, attrs: Record<string, unknown>, run: () => Promise<A>) => Promise<A>;
   onProgress?: (event: SearchProgressEvent) => void | Promise<void>;
   onSearchStateChange?: (state: Readonly<SearchToolState>) => void | Promise<void>;
 }) {
@@ -60,6 +61,8 @@ export function createExaSearchTool(input: {
       searchResults: [...state.searchResults],
     });
   };
+  const trace =
+    input.trace ?? ((_: string, __: Record<string, unknown>, run: () => Promise<any>) => run());
 
   const tool = toolDefinition({
     name: "exa_web_search",
@@ -85,139 +88,143 @@ export function createExaSearchTool(input: {
   }).server(async (args: any) => {
     const query = typeof args?.query === "string" ? args.query.trim() : "";
     const numResults = clampExaResults(args?.numResults ?? SEARCH_RESULTS_PER_RUN);
-    if (!query) {
-      throw new Error("Search query is required");
-    }
-
-    const step = state.searchRuns.length + 1;
-    await input.onProgress?.({
-      label: `Searching the web for "${query}"`,
-      state: "active",
-      step,
-      query,
-    });
-
-    try {
-      let groundingRun: SearchGroundingRun;
-
-      if (input.env.EXA_API_KEY) {
-        const runRows = (await exaSearch(input.env, query, numResults)).map((row) =>
-          decodeSearchResultRow({
-            ...row,
-            searchRunId: "",
-            messageId: input.assistantMessageId,
-          }),
-        );
-        const run = createSearchRun({
-          messageId: input.assistantMessageId,
-          query,
-          status: "completed",
-          step,
-          numResults,
-          resultCount: runRows.length,
-          previewText: summarizeStructuredResults(runRows),
-        });
-        const normalizedRows = runRows.map((row) =>
-          decodeSearchResultRow({
-            ...row,
-            searchRunId: run.id,
-            messageId: input.assistantMessageId,
-          }),
-        );
-
-        state.searchRuns.push(run);
-        state.searchResults.push(...normalizedRows);
-        groundingRun = {
-          query,
-          rows: normalizedRows.map((row) => ({
-            title: row.title,
-            url: row.url,
-            snippet: row.snippet,
-          })),
-        };
-
-        input.log?.("assistant_turn_tool_search_success", {
-          assistantMessageId: input.assistantMessageId,
-          step,
-          query,
-          resultCount: normalizedRows.length,
-          mode: "exa_api",
-          previewText: run.previewText,
-        });
-        await input.onProgress?.({
-          label: `Found ${normalizedRows.length} result${normalizedRows.length === 1 ? "" : "s"} for "${query}"`,
-          state: "completed",
-          step,
-          query,
-          detail: run.previewText || undefined,
-        });
-      } else {
-        const rawText = await exaMcpSearchRawText(query, numResults);
-        const run = createSearchRun({
-          messageId: input.assistantMessageId,
-          query,
-          status: "completed",
-          step,
-          numResults,
-          resultCount: 0,
-          previewText: summarizeRawText(rawText),
-        });
-
-        state.searchRuns.push(run);
-        groundingRun = {
-          query,
-          rawText,
-        };
-
-        input.log?.("assistant_turn_tool_search_success", {
-          assistantMessageId: input.assistantMessageId,
-          step,
-          query,
-          resultCount: 0,
-          mode: "exa_mcp",
-          previewText: run.previewText,
-        });
-        await input.onProgress?.({
-          label: `Search finished for "${query}"`,
-          state: "completed",
-          step,
-          query,
-          detail: run.previewText || undefined,
-        });
+    return trace("assistant.search.prepare", { query, numResults }, async () => {
+      if (!query) {
+        throw new Error("Search query is required");
       }
 
-      await publishState();
-      return buildMultiSearchContext({
-        runs: [groundingRun],
-      });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      state.searchRuns.push(
-        createSearchRun({
-          messageId: input.assistantMessageId,
-          query,
-          status: "failed",
-          step,
-          numResults,
-          errorMessage,
-        }),
-      );
-      await publishState();
-      input.log?.("assistant_turn_tool_search_error", {
-        assistantMessageId: input.assistantMessageId,
-        step,
-        query,
-        error: errorMessage,
-      });
+      const step = state.searchRuns.length + 1;
       await input.onProgress?.({
-        label: `Search failed for "${query}"`,
-        state: "failed",
+        label: `Searching the web for "${query}"`,
+        state: "active",
         step,
         query,
-        detail: errorMessage,
       });
-      throw error instanceof Error ? error : new Error(errorMessage);
-    }
+
+      return trace("assistant.search.run", { query, step, numResults }, async () => {
+        try {
+          let groundingRun: SearchGroundingRun;
+
+          if (input.env.EXA_API_KEY) {
+            const runRows = (await exaSearch(input.env, query, numResults)).map((row) =>
+              decodeSearchResultRow({
+                ...row,
+                searchRunId: "",
+                messageId: input.assistantMessageId,
+              }),
+            );
+            const run = createSearchRun({
+              messageId: input.assistantMessageId,
+              query,
+              status: "completed",
+              step,
+              numResults,
+              resultCount: runRows.length,
+              previewText: summarizeStructuredResults(runRows),
+            });
+            const normalizedRows = runRows.map((row) =>
+              decodeSearchResultRow({
+                ...row,
+                searchRunId: run.id,
+                messageId: input.assistantMessageId,
+              }),
+            );
+
+            state.searchRuns.push(run);
+            state.searchResults.push(...normalizedRows);
+            groundingRun = {
+              query,
+              rows: normalizedRows.map((row) => ({
+                title: row.title,
+                url: row.url,
+                snippet: row.snippet,
+              })),
+            };
+
+            input.log?.("assistant_turn_tool_search_success", {
+              assistantMessageId: input.assistantMessageId,
+              step,
+              query,
+              resultCount: normalizedRows.length,
+              mode: "exa_api",
+              previewText: run.previewText,
+            });
+            await input.onProgress?.({
+              label: `Found ${normalizedRows.length} result${normalizedRows.length === 1 ? "" : "s"} for "${query}"`,
+              state: "completed",
+              step,
+              query,
+              detail: run.previewText || undefined,
+            });
+          } else {
+            const rawText = await exaMcpSearchRawText(query, numResults);
+            const run = createSearchRun({
+              messageId: input.assistantMessageId,
+              query,
+              status: "completed",
+              step,
+              numResults,
+              resultCount: 0,
+              previewText: summarizeRawText(rawText),
+            });
+
+            state.searchRuns.push(run);
+            groundingRun = {
+              query,
+              rawText,
+            };
+
+            input.log?.("assistant_turn_tool_search_success", {
+              assistantMessageId: input.assistantMessageId,
+              step,
+              query,
+              resultCount: 0,
+              mode: "exa_mcp",
+              previewText: run.previewText,
+            });
+            await input.onProgress?.({
+              label: `Search finished for "${query}"`,
+              state: "completed",
+              step,
+              query,
+              detail: run.previewText || undefined,
+            });
+          }
+
+          await publishState();
+          return buildMultiSearchContext({
+            runs: [groundingRun],
+          });
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          state.searchRuns.push(
+            createSearchRun({
+              messageId: input.assistantMessageId,
+              query,
+              status: "failed",
+              step,
+              numResults,
+              errorMessage,
+            }),
+          );
+          await publishState();
+          input.log?.("assistant_turn_tool_search_error", {
+            assistantMessageId: input.assistantMessageId,
+            step,
+            query,
+            error: errorMessage,
+          });
+          await input.onProgress?.({
+            label: `Search failed for "${query}"`,
+            state: "failed",
+            step,
+            query,
+            detail: errorMessage,
+          });
+          throw error instanceof Error ? error : new Error(errorMessage);
+        }
+      });
+    });
   });
 
   return {

@@ -9,6 +9,7 @@ catalog:
   "@tanstack/solid-db": ^0.2.19
   "@types/node": ^24
   dompurify: ^3.4.0
+  effect: 4.0.0-beta.49
   highlight.js: ^11.11.1
   marked: ^17.0.6
   marked-highlight: ^2.2.4

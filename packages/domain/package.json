@@ -11,7 +11,7 @@
     "test": "vp test"
   },
   "dependencies": {
-    "effect": "^3.18.4"
+    "effect": "catalog:"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

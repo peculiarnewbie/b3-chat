@@ -804,6 +804,169 @@ a {
     ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
+.trace-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.trace-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.trace-toggle-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.trace-toggle-label {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.trace-toggle-meta {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trace-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.trace-run-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 90%, var(--bg));
+}
+
+.trace-run-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.trace-run-id {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.trace-run-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+.trace-run-badges span {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+}
+
+.trace-run-error {
+  font-size: 0.74rem;
+  color: #b94a48;
+}
+
+.trace-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.trace-span-node {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+}
+
+.trace-span-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.76rem;
+  color: var(--text);
+}
+
+.trace-span-header.is-failed {
+  color: #b94a48;
+}
+
+.trace-span-header.is-cancelled {
+  color: #946200;
+}
+
+.trace-span-name {
+  font-weight: 600;
+}
+
+.trace-span-meta {
+  display: flex;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+}
+
+.trace-span-details {
+  font-size: 0.72rem;
+}
+
+.trace-span-details summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.trace-span-details pre {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.72rem;
+  font-family:
+    ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+.trace-span-children {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 @keyframes pulse {
   50% {
     transform: scale(1.15);

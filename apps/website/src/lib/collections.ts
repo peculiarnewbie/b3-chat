@@ -7,6 +7,8 @@ import type {
   Attachment,
   SearchRun,
   SearchResult,
+  TraceRun,
+  TraceSpan,
 } from "@b3-chat/domain";
 
 // ---------------------------------------------------------------------------
@@ -30,6 +32,8 @@ export const COLLECTION_IDS = [
   "attachments",
   "searchRuns",
   "searchResults",
+  "traceRuns",
+  "traceSpans",
 ] as const;
 
 export type CollectionId = (typeof COLLECTION_IDS)[number];
@@ -90,6 +94,8 @@ export const messageParts = createSyncedCollection<MessagePart>("messageParts", 
 export const attachments = createSyncedCollection<Attachment>("attachments", (a) => a.id);
 export const searchRuns = createSyncedCollection<SearchRun>("searchRuns", (sr) => sr.id);
 export const searchResults = createSyncedCollection<SearchResult>("searchResults", (sr) => sr.id);
+export const traceRuns = createSyncedCollection<TraceRun>("traceRuns", (run) => run.id);
+export const traceSpans = createSyncedCollection<TraceSpan>("traceSpans", (span) => span.id);
 
 export function applyLocalInsert<T extends object>(collectionId: CollectionId, value: T) {
   commitImmediateWrite(collectionId, { type: "insert", value });
@@ -123,4 +129,6 @@ export const TABLE_TO_COLLECTION: Record<string, string> = {
   attachments: "attachments",
   search_runs: "searchRuns",
   search_results: "searchResults",
+  trace_runs: "traceRuns",
+  trace_spans: "traceSpans",
 };

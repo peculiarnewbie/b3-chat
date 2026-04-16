@@ -1,5 +1,6 @@
 import {
   mergeAttachmentLink,
+  SYNC_PROTOCOL_VERSION,
   type SyncEventPayloadMap,
   type SyncServerEnvelope,
 } from "@b3-chat/domain";
@@ -15,7 +16,10 @@ import {
   attachments,
   searchRuns,
   searchResults,
+  traceRuns,
+  traceSpans,
   getSyncWriter,
+  resetCollections,
   TABLE_TO_COLLECTION,
 } from "./collections";
 import { confirmOp, rollbackOp } from "./actions";
@@ -73,6 +77,10 @@ function hasRow(collectionId: string, key: string) {
       return Boolean(searchRuns.get(key));
     case "searchResults":
       return Boolean(searchResults.get(key));
+    case "traceRuns":
+      return Boolean(traceRuns.get(key));
+    case "traceSpans":
+      return Boolean(traceSpans.get(key));
     default:
       return false;
   }
@@ -197,8 +205,6 @@ function applyEvent(eventType: string, payload: unknown) {
     }
     case "message_part_appended": {
       const event = payload as SyncEventPayloadMap["message_part_appended"];
-      // Text is streamed through message_delta; skip duplicate text parts
-      if (event.row.kind === "text") break;
       syncUpsert("messageParts", event.row.id, event.row);
       break;
     }
@@ -247,6 +253,16 @@ function applyEvent(eventType: string, payload: unknown) {
         }
         resWriter.commit();
       }
+      break;
+    }
+    case "trace_run_upserted": {
+      const event = payload as SyncEventPayloadMap["trace_run_upserted"];
+      syncUpsert("traceRuns", event.row.id, event.row);
+      break;
+    }
+    case "trace_span_upserted": {
+      const event = payload as SyncEventPayloadMap["trace_span_upserted"];
+      syncUpsert("traceSpans", event.row.id, event.row);
       break;
     }
     case "server_state_rebased": {
@@ -319,9 +335,17 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
     switch (envelope.type) {
       case "hello_ack":
         console.log("[sync] hello_ack", {
+          protocolVersion: envelope.protocolVersion,
           serverSeq: envelope.lastServerSeq,
           localSeq: conn.getLastServerSeq(),
         });
+        if (envelope.protocolVersion !== SYNC_PROTOCOL_VERSION) {
+          pendingOps.clear();
+          resetCollections();
+          conn.setLastServerSeq(0);
+          window.location.reload();
+          break;
+        }
         if (envelope.lastServerSeq > conn.getLastServerSeq()) {
           conn.setLastServerSeq(envelope.lastServerSeq);
         }
@@ -341,6 +365,7 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
 
       case "sync_reset":
         console.log(`[sync] sync_reset reason=${envelope.reason}`, {
+          protocolVersion: envelope.protocolVersion,
           tables: Object.keys(envelope.snapshot.tables ?? {}),
           workspaceCount: Object.keys(envelope.snapshot.tables?.workspaces ?? {}).length,
           threadCount: Object.keys(envelope.snapshot.tables?.threads ?? {}).length,

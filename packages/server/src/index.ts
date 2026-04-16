@@ -9,6 +9,7 @@ export {
   type ExtendedStreamChunk,
 } from "./chat-completions-adapter.js";
 export { chat } from "@tanstack/ai";
+import { decodeAppEnv, type AppEnv } from "@b3-chat/effect";
 import { betterAuth } from "better-auth";
 import { dash } from "@better-auth/infra";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
@@ -22,22 +23,7 @@ import {
   type SyncSnapshot,
 } from "@b3-chat/domain";
 
-export type AppEnv = {
-  ALLOWED_EMAIL: string;
-  BETTER_AUTH_SECRET: string;
-  BETTER_AUTH_URL: string;
-  BETTER_AUTH_API_KEY: string;
-  GOOGLE_CLIENT_ID: string;
-  GOOGLE_CLIENT_SECRET: string;
-  OPENCODE_GO_BASE_URL: string;
-  OPENCODE_GO_API_KEY: string;
-  OPENCODE_GO_MODEL_ALLOWLIST?: string;
-  DEFAULT_MODEL_ID: string;
-  EXA_API_KEY: string;
-  AUTH_DB: D1Database;
-  UPLOADS: R2Bucket;
-  SYNC_ENGINE: DurableObjectNamespace;
-};
+export type { AppEnv } from "@b3-chat/effect";
 
 declare global {
   // Worker entry sets bindings here per request for getRuntimeEnv().
@@ -137,6 +123,12 @@ export function getDefaultModelId(env: Pick<AppEnv, "DEFAULT_MODEL_ID">) {
 export function getRuntimeEnv() {
   const env = globalThis.__env__;
   if (!env) throw new Error("Cloudflare env bindings are not available");
+  return env;
+}
+
+export function setRuntimeEnv(input: unknown) {
+  const env = decodeAppEnv(input);
+  globalThis.__env__ = env;
   return env;
 }
 
@@ -310,11 +302,15 @@ export function clampExaResults(value: number | null | undefined) {
 }
 
 export async function exaSearch(env: AppEnv, query: string, numResults = DEFAULT_EXA_RESULTS) {
+  const apiKey = env.EXA_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error("Exa API key missing");
+  }
   const response = await fetch("https://api.exa.ai/search", {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-api-key": env.EXA_API_KEY,
+      "x-api-key": apiKey,
     },
     body: JSON.stringify({
       query,

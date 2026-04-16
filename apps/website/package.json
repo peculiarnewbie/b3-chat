@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@b3-chat/domain": "workspace:*",
+    "@b3-chat/effect": "workspace:*",
     "@b3-chat/server": "workspace:*",
     "@better-auth/infra": "catalog:",
     "@solidjs/meta": "^0.29.4",
@@ -22,7 +23,7 @@
     "@tanstack/solid-db": "catalog:",
     "better-auth": "^1.6.4",
     "dompurify": "catalog:",
-    "effect": "^3.21.0",
+    "effect": "catalog:",
     "highlight.js": "catalog:",
     "marked": "catalog:",
     "marked-highlight": "catalog:",

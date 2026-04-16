@@ -1,4 +1,5 @@
 import { getRuntimeEnv, requireSession, verifyUploadToken } from "@b3-chat/server";
+import { runApiTrace } from "../server/api-tracing";
 
 function readObjectKey(url: URL) {
   const index = url.pathname.indexOf("/api/uploads/blob/");
@@ -11,57 +12,82 @@ function asString(value: unknown, fallback = "") {
 
 export async function handleUploadBlobPut(request: Request): Promise<Response> {
   const env = getRuntimeEnv();
-  await requireSession(request, env);
-  const url = new URL(request.url);
-  const token = url.searchParams.get("token");
-  if (!token) return new Response("Missing token", { status: 401 });
-  const payload = await verifyUploadToken(env, token);
-  if (!payload) return new Response("Invalid token", { status: 401 });
-  if (Number(payload.expiresAt ?? 0) < Date.now())
-    return new Response("Expired token", { status: 401 });
-
-  const objectKey = readObjectKey(url);
-  if (objectKey !== payload.objectKey) return new Response("Key mismatch", { status: 401 });
-
-  const contentType =
-    request.headers.get("content-type") ?? asString(payload.mimeType, "application/octet-stream");
-  await env.UPLOADS.put(objectKey, request.body, {
-    httpMetadata: {
-      contentType,
+  return runApiTrace({
+    scope: "upload-api",
+    name: "upload.complete",
+    kind: "io",
+    env,
+    attrs: {
+      method: request.method,
+      path: new URL(request.url).pathname,
     },
-    customMetadata: {
-      fileName: asString(payload.fileName),
-      threadId: asString(payload.threadId),
-      attachmentId: asString(payload.attachmentId),
+    run: async () => {
+      await requireSession(request, env);
+      const url = new URL(request.url);
+      const token = url.searchParams.get("token");
+      if (!token) return new Response("Missing token", { status: 401 });
+      const payload = await verifyUploadToken(env, token);
+      if (!payload) return new Response("Invalid token", { status: 401 });
+      if (Number(payload.expiresAt ?? 0) < Date.now())
+        return new Response("Expired token", { status: 401 });
+
+      const objectKey = readObjectKey(url);
+      if (objectKey !== payload.objectKey) return new Response("Key mismatch", { status: 401 });
+
+      const contentType =
+        request.headers.get("content-type") ??
+        asString(payload.mimeType, "application/octet-stream");
+      await env.UPLOADS.put(objectKey, request.body, {
+        httpMetadata: {
+          contentType,
+        },
+        customMetadata: {
+          fileName: asString(payload.fileName),
+          threadId: asString(payload.threadId),
+          attachmentId: asString(payload.attachmentId),
+        },
+      });
+
+      return Response.json({ ok: true, objectKey });
     },
   });
-
-  return Response.json({ ok: true, objectKey });
 }
 
 export async function handleUploadBlobGet(request: Request): Promise<Response> {
   const env = getRuntimeEnv();
-  const url = new URL(request.url);
-  const objectKey = readObjectKey(url);
-  const token = url.searchParams.get("token");
+  return runApiTrace({
+    scope: "upload-api",
+    name: "upload.read",
+    kind: "io",
+    env,
+    attrs: {
+      method: request.method,
+      path: new URL(request.url).pathname,
+    },
+    run: async () => {
+      const url = new URL(request.url);
+      const objectKey = readObjectKey(url);
+      const token = url.searchParams.get("token");
 
-  if (token) {
-    const payload = await verifyUploadToken(env, token);
-    if (!payload) return new Response("Invalid token", { status: 401 });
-    if (payload.action !== "read_attachment")
-      return new Response("Invalid token action", { status: 401 });
-    if (Number(payload.expiresAt ?? 0) < Date.now())
-      return new Response("Expired token", { status: 401 });
-    if (payload.objectKey !== objectKey) return new Response("Key mismatch", { status: 401 });
-  } else {
-    await requireSession(request, env);
-  }
+      if (token) {
+        const payload = await verifyUploadToken(env, token);
+        if (!payload) return new Response("Invalid token", { status: 401 });
+        if (payload.action !== "read_attachment")
+          return new Response("Invalid token action", { status: 401 });
+        if (Number(payload.expiresAt ?? 0) < Date.now())
+          return new Response("Expired token", { status: 401 });
+        if (payload.objectKey !== objectKey) return new Response("Key mismatch", { status: 401 });
+      } else {
+        await requireSession(request, env);
+      }
 
-  const object = await env.UPLOADS.get(objectKey);
-  if (!object) return new Response("Not found", { status: 404 });
+      const object = await env.UPLOADS.get(objectKey);
+      if (!object) return new Response("Not found", { status: 404 });
 
-  const headers = new Headers();
-  object.writeHttpMetadata(headers);
-  headers.set("etag", object.httpEtag);
-  return new Response(object.body, { headers });
+      const headers = new Headers();
+      object.writeHttpMetadata(headers);
+      headers.set("etag", object.httpEtag);
+      return new Response(object.body, { headers });
+    },
+  });
 }
