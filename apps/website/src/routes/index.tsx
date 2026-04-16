@@ -25,7 +25,6 @@ import Markdown from "../components/Markdown";
 import { explainAssistantError } from "../lib/assistant-errors";
 import { authClient } from "../lib/auth-client";
 import { BUILD_INFO } from "../lib/build-info";
-import { isKimi25ModelId } from "../lib/model-compat";
 import { isAllowedFile, isImageMime, uploadFile } from "../lib/upload";
 import {
   workspaces as workspacesCollection,
@@ -68,6 +67,10 @@ type ModelsPayload = {
     name: string;
     attachment: boolean;
     reasoning: boolean;
+    toolCall: boolean;
+    interleaved: {
+      field: string | null;
+    } | null;
     family: string;
     context: number | null;
     output: number | null;
@@ -444,14 +447,17 @@ export default function Home() {
     () => (models()?.models ?? []).find((model) => model.id === composer.modelId) ?? null,
   );
   const selectedModelSupportsReasoning = createMemo(() => Boolean(selectedModel()?.reasoning));
+  const selectedModelInterleavedField = createMemo(
+    () => selectedModel()?.interleaved?.field?.trim() || null,
+  );
   const effectiveComposerReasoningLevel = createMemo<ReasoningLevel>(() =>
     selectedModelSupportsReasoning() ? composer.reasoningLevel : "off",
   );
-  const willDisableReasoningForKimiToolTurn = createMemo(
+  const willDisableReasoningForToolTurn = createMemo(
     () =>
       composer.search &&
       effectiveComposerReasoningLevel() !== "off" &&
-      isKimi25ModelId(selectedModel()?.id),
+      Boolean(selectedModelInterleavedField()),
   );
 
   // Auto-scroll only when user is already near the bottom
@@ -1082,6 +1088,7 @@ export default function Home() {
           activeWorkspace()?.defaultModelId ||
           models()?.models?.[0]?.id ||
           "auto",
+        modelInterleavedField: selectedModelInterleavedField(),
         reasoningLevel: effectiveComposerReasoningLevel(),
         search: composer.search,
         attachmentIds,
@@ -1507,10 +1514,12 @@ export default function Home() {
                   {composer.sending ? "Sending…" : "Send"}
                 </button>
               </div>
-              <Show when={willDisableReasoningForKimiToolTurn()}>
+              <Show when={willDisableReasoningForToolTurn()}>
                 <p class="composer-note">
-                  Thinking will be disabled for this turn because Kimi K2.5 is incompatible with
-                  tool-enabled turns in this app.
+                  Thinking will be disabled for this turn because this model requires interleaved
+                  reasoning replay
+                  {selectedModelInterleavedField() ? ` (${selectedModelInterleavedField()})` : ""}
+                  across tool calls, and this app does not preserve that field.
                 </p>
               </Show>
             </footer>

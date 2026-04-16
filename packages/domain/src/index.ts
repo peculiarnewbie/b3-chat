@@ -210,6 +210,7 @@ export type CreateUserMessagePayload = {
   thread: Thread;
   promptText: string;
   modelId: string;
+  modelInterleavedField?: string | null;
   reasoningLevel: ReasoningLevel;
   search: boolean;
   attachmentIds: string[];
@@ -219,6 +220,7 @@ export type StartAssistantTurnPayload = {
   threadId: string;
   assistantMessage: Message;
   modelId: string;
+  modelInterleavedField?: string | null;
   reasoningLevel: ReasoningLevel;
   search: boolean;
 };

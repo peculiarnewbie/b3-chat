@@ -285,6 +285,13 @@ export function filterModelsCatalog(raw: any, env: AppEnv) {
       name: model.name ?? model.id,
       attachment: !!model.attachment || model.modalities?.input?.includes("image"),
       reasoning: !!model.reasoning,
+      toolCall: !!model.tool_call,
+      interleaved:
+        model.interleaved && typeof model.interleaved === "object"
+          ? {
+              field: typeof model.interleaved.field === "string" ? model.interleaved.field : null,
+            }
+          : null,
       context: model.limit?.context ?? null,
       output: model.limit?.output ?? null,
       family: model.family ?? "unknown",

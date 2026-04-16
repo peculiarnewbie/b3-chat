@@ -27,7 +27,6 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { explainAssistantError } from "./assistant-errors";
 import { sendMessageAction } from "./actions";
 import { applyLocalInsert, messages, resetCollections, threads, workspaces } from "./collections";
-import { isKimi25ModelId } from "./model-compat";
 import { resetPendingOps } from "./pending-ops";
 import { processEnvelopes } from "./sync-adapter";
 import { normalizeAssistantError } from "../server/error-normalization";
@@ -256,7 +255,12 @@ describe("server helpers", () => {
           id: "opencode-go",
           api: "https://api.example.com",
           models: {
-            a: { id: "openai/gpt-4.1", name: "GPT 4.1" },
+            a: {
+              id: "openai/gpt-4.1",
+              name: "GPT 4.1",
+              tool_call: true,
+              interleaved: { field: "reasoning_content" },
+            },
             b: { id: "openai/o3-mini", name: "o3-mini" },
           },
         },
@@ -267,6 +271,8 @@ describe("server helpers", () => {
     expect(result.models).toHaveLength(1);
     expect(result.models[0]?.id).toBe("openai/gpt-4.1");
     expect(result.models[0]?.reasoning).toBe(false);
+    expect(result.models[0]?.toolCall).toBe(true);
+    expect(result.models[0]?.interleaved?.field).toBe("reasoning_content");
     expect(result.models[0]?.family).toBe("unknown");
   });
 
@@ -331,14 +337,6 @@ describe("server helpers", () => {
     expect(normalized.errorCode).toBe("provider_reasoning_incompatible");
     expect(normalized.retryable).toBe(false);
     expect(normalized.providerName).toBe("moonshot");
-  });
-
-  it("matches Kimi K2.5 model id variants for tool compatibility safeguards", () => {
-    expect(isKimi25ModelId("moonshot/kimi-k2.5")).toBe(true);
-    expect(isKimi25ModelId("moonshot/kimi-k2-5")).toBe(true);
-    expect(isKimi25ModelId("moonshot/kimi-k2_5-thinking")).toBe(true);
-    expect(isKimi25ModelId("moonshot/kimi-k2")).toBe(false);
-    expect(isKimi25ModelId("openai/gpt-5.2")).toBe(false);
   });
 
   it("extracts fallback Exa MCP search text", () => {

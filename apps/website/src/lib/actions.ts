@@ -208,6 +208,7 @@ export function sendMessageAction(input: {
   thread: Thread;
   text: string;
   modelId: string;
+  modelInterleavedField?: string | null;
   reasoningLevel: ReasoningLevel;
   search: boolean;
   attachmentIds?: string[];
@@ -277,6 +278,7 @@ export function sendMessageAction(input: {
       assistantMessage: toWire(assistantMessage, opId),
       promptText: input.text,
       modelId: input.modelId,
+      modelInterleavedField: input.modelInterleavedField ?? null,
       reasoningLevel: input.reasoningLevel,
       search: input.search,
       attachmentIds: input.attachmentIds ?? [],

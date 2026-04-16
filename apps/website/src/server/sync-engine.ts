@@ -44,7 +44,6 @@ import {
 import { createExaSearchTool, type SearchProgressEvent } from "./search";
 import { normalizeAssistantError } from "./error-normalization";
 import { consumeAssistantStream, type StreamConsumerDeps } from "./stream-consumer";
-import { isKimi25ModelId } from "../lib/model-compat";
 type SyncCommandResult = {
   ack?: SyncServerAck;
   events: SyncServerEvent[];
@@ -90,19 +89,20 @@ function getProviderModelOptions(
   modelId: string,
   toolCount: number,
   reasoningLevel: ReasoningLevel,
+  modelInterleavedField?: string | null,
 ) {
   const provider = modelId.split("/")[0]?.toLowerCase() ?? "";
   let effectiveReasoningLevel = reasoningLevel;
   let overrideReason: string | null = null;
 
-  if (toolCount > 0 && isKimi25ModelId(modelId)) {
+  if (toolCount > 0 && modelInterleavedField) {
     effectiveReasoningLevel = "off";
     if (reasoningLevel !== "off") {
-      overrideReason = "kimi_tool_turn_requires_thinking_disabled";
+      overrideReason = "tool_turn_requires_interleaved_reasoning_replay";
     }
   }
 
-  if (isKimi25ModelId(modelId)) {
+  if (modelInterleavedField === "reasoning_content") {
     return {
       effectiveReasoningLevel,
       overrideReason,
@@ -787,6 +787,7 @@ export class SyncEngineDurableObject {
         modelId,
         searchTool ? 1 : 0,
         payload.reasoningLevel,
+        payload.modelInterleavedField,
       );
       const modelOptions = providerOptions.modelOptions;
 
@@ -804,6 +805,7 @@ export class SyncEngineDurableObject {
         messageCount: modelMessages.length,
         systemPromptCount: systemPrompts.length,
         toolCount: searchTool ? 1 : 0,
+        modelInterleavedField: payload.modelInterleavedField ?? null,
         requestedReasoningLevel: payload.reasoningLevel,
         effectiveReasoningLevel: providerOptions.effectiveReasoningLevel,
         overrideReason: providerOptions.overrideReason,
