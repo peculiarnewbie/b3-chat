@@ -27,6 +27,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { explainAssistantError } from "./assistant-errors";
 import { sendMessageAction } from "./actions";
 import { applyLocalInsert, messages, resetCollections, threads, workspaces } from "./collections";
+import { isKimi25ModelId } from "./model-compat";
 import { resetPendingOps } from "./pending-ops";
 import { processEnvelopes } from "./sync-adapter";
 import { normalizeAssistantError } from "../server/error-normalization";
@@ -330,6 +331,14 @@ describe("server helpers", () => {
     expect(normalized.errorCode).toBe("provider_reasoning_incompatible");
     expect(normalized.retryable).toBe(false);
     expect(normalized.providerName).toBe("moonshot");
+  });
+
+  it("matches Kimi K2.5 model id variants for tool compatibility safeguards", () => {
+    expect(isKimi25ModelId("moonshot/kimi-k2.5")).toBe(true);
+    expect(isKimi25ModelId("moonshot/kimi-k2-5")).toBe(true);
+    expect(isKimi25ModelId("moonshot/kimi-k2_5-thinking")).toBe(true);
+    expect(isKimi25ModelId("moonshot/kimi-k2")).toBe(false);
+    expect(isKimi25ModelId("openai/gpt-5.2")).toBe(false);
   });
 
   it("extracts fallback Exa MCP search text", () => {

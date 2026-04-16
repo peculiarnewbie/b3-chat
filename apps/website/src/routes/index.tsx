@@ -25,6 +25,7 @@ import Markdown from "../components/Markdown";
 import { explainAssistantError } from "../lib/assistant-errors";
 import { authClient } from "../lib/auth-client";
 import { BUILD_INFO } from "../lib/build-info";
+import { isKimi25ModelId } from "../lib/model-compat";
 import { isAllowedFile, isImageMime, uploadFile } from "../lib/upload";
 import {
   workspaces as workspacesCollection,
@@ -450,7 +451,7 @@ export default function Home() {
     () =>
       composer.search &&
       effectiveComposerReasoningLevel() !== "off" &&
-      /(?:^|\/)kimi-k2\.5(?:$|[-/])/i.test(selectedModel()?.id ?? ""),
+      isKimi25ModelId(selectedModel()?.id),
   );
 
   // Auto-scroll only when user is already near the bottom

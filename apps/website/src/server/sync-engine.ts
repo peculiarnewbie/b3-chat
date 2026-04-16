@@ -44,6 +44,7 @@ import {
 import { createExaSearchTool, type SearchProgressEvent } from "./search";
 import { normalizeAssistantError } from "./error-normalization";
 import { consumeAssistantStream, type StreamConsumerDeps } from "./stream-consumer";
+import { isKimi25ModelId } from "../lib/model-compat";
 type SyncCommandResult = {
   ack?: SyncServerAck;
   events: SyncServerEvent[];
@@ -85,10 +86,6 @@ function looksLikeMissingRealtimeAccess(text: string) {
 const SEARCH_TOOL_SYSTEM_PROMPT =
   "You have access to the exa_web_search tool for current or external information. Use it when the answer depends on up-to-date facts, live information, or verification outside the conversation. If the tool is available, do not claim you lack access to current information without trying it when it is relevant.";
 
-function isKimi25Model(modelId: string) {
-  return /(?:^|\/)kimi-k2\.5(?:$|[-/])/i.test(modelId);
-}
-
 function getProviderModelOptions(
   modelId: string,
   toolCount: number,
@@ -98,14 +95,14 @@ function getProviderModelOptions(
   let effectiveReasoningLevel = reasoningLevel;
   let overrideReason: string | null = null;
 
-  if (toolCount > 0 && isKimi25Model(modelId)) {
+  if (toolCount > 0 && isKimi25ModelId(modelId)) {
     effectiveReasoningLevel = "off";
     if (reasoningLevel !== "off") {
       overrideReason = "kimi_tool_turn_requires_thinking_disabled";
     }
   }
 
-  if (isKimi25Model(modelId)) {
+  if (isKimi25ModelId(modelId)) {
     return {
       effectiveReasoningLevel,
       overrideReason,
