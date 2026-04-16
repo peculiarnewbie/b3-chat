@@ -101,21 +101,16 @@ const SEARCH_TOOL_SYSTEM_PROMPT =
 
 function getProviderModelOptions(
   modelId: string,
-  toolCount: number,
+  _toolCount: number,
   reasoningLevel: ReasoningLevel,
   modelInterleavedField?: string | null,
 ) {
   const provider = modelId.split("/")[0]?.toLowerCase() ?? "";
-  let effectiveReasoningLevel = reasoningLevel;
-  let overrideReason: string | null = null;
+  const effectiveReasoningLevel = reasoningLevel;
+  const overrideReason: string | null = null;
 
-  if (toolCount > 0 && modelInterleavedField) {
-    effectiveReasoningLevel = "off";
-    if (reasoningLevel !== "off") {
-      overrideReason = "tool_turn_requires_interleaved_reasoning_replay";
-    }
-  }
-
+  // Models with interleaved thinking (e.g., Kimi K2.5) use reasoning_content field.
+  // The adapter now properly caches and replays reasoning_content across tool calls.
   if (modelInterleavedField === "reasoning_content") {
     return {
       effectiveReasoningLevel,

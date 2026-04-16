@@ -125,10 +125,12 @@ function extractReasoningTokens(usage: unknown): number | null {
 
 /**
  * Converts TanStack AI ModelMessage format to OpenAI chat/completions message format.
+ * Optionally includes reasoning_content from cache for models that require it.
  */
 function convertToOpenAIMessages(
   messages: ModelMessage[],
   systemPrompts: string[] = [],
+  reasoningContentCache?: Map<string, string>,
 ): Array<Record<string, unknown>> {
   const result: Array<Record<string, unknown>> = [];
 
@@ -172,6 +174,18 @@ function convertToOpenAIMessages(
           arguments: toolCall.function.arguments,
         },
       }));
+
+      // Look up and include reasoning_content for interleaved thinking models (e.g., Kimi K2.5)
+      if (reasoningContentCache) {
+        const toolCallIds = message.toolCalls.map((tc) => tc.id).sort();
+        const cacheKey = toolCallIds.join(",");
+        const cachedReasoning = reasoningContentCache.get(cacheKey);
+        if (cachedReasoning) {
+          convertedMessage.reasoning_content = cachedReasoning;
+          // Clean up cache after use to prevent memory leaks
+          reasoningContentCache.delete(cacheKey);
+        }
+      }
     }
 
     result.push(convertedMessage);
@@ -307,6 +321,13 @@ export class ChatCompletionsAdapter {
 
   private readonly config: ChatCompletionsAdapterConfig;
 
+  /**
+   * Stores reasoning_content from assistant responses that have tool calls.
+   * Keyed by a hash of the tool call IDs to correlate with subsequent messages.
+   * This is needed for models like Kimi K2.5 that require reasoning context replay.
+   */
+  private reasoningContentCache = new Map<string, string>();
+
   constructor(config: ChatCompletionsAdapterConfig, modelId: string) {
     this.config = config;
     this.model = modelId;
@@ -316,7 +337,11 @@ export class ChatCompletionsAdapter {
    * Streaming chat completion that yields AG-UI events.
    */
   async *chatStream(options: TextOptions): AsyncIterable<ExtendedStreamChunk> {
-    const messages = convertToOpenAIMessages(options.messages ?? [], options.systemPrompts);
+    const messages = convertToOpenAIMessages(
+      options.messages ?? [],
+      options.systemPrompts,
+      this.reasoningContentCache,
+    );
     const tools = convertToOpenAITools(options.tools);
     const trace =
       this.config.trace ??
@@ -398,6 +423,7 @@ export class ChatCompletionsAdapter {
         reasoningTokens: null,
       };
       let finishReason: "stop" | "length" | "content_filter" | "tool_calls" | null = "stop";
+      let reasoningContent = "";
       const toolCalls = new Map<
         number,
         {
@@ -451,6 +477,12 @@ export class ChatCompletionsAdapter {
           const choice = parsed.choices?.[0];
           if (choice?.finish_reason) {
             finishReason = choice.finish_reason;
+          }
+
+          // Capture reasoning_content for models that use interleaved thinking (e.g., Kimi K2.5)
+          const reasoningDelta = choice?.delta?.reasoning_content ?? "";
+          if (reasoningDelta) {
+            reasoningContent += reasoningDelta;
           }
 
           const toolCallDeltas = Array.isArray(choice?.delta?.tool_calls)
@@ -562,6 +594,13 @@ export class ChatCompletionsAdapter {
           timestamp: Date.now(),
           model: this.model,
         } as ExtendedStreamChunk;
+      }
+
+      // Cache reasoning_content for tool call continuations (needed for Kimi K2.5 and similar)
+      if (toolCalls.size > 0 && reasoningContent) {
+        const toolCallIds = [...toolCalls.values()].map((tc) => tc.toolCallId).sort();
+        const cacheKey = toolCallIds.join(",");
+        this.reasoningContentCache.set(cacheKey, reasoningContent);
       }
 
       // Emit RUN_FINISHED with usage (including custom _reasoningTokens field)
