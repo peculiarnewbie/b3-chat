@@ -22,6 +22,7 @@ import {
   applyLocalUpdate,
   type CollectionId,
 } from "./collections";
+import { clearAllDraftState, clearWorkspaceDraft } from "./draft-state";
 import { setActiveWorkspaceId, setActiveThreadId, ensureActiveSelection } from "./ui-state";
 
 // ---------------------------------------------------------------------------
@@ -181,6 +182,7 @@ export function archiveWorkspaceAction(workspaceId: string) {
 
   dispatch("archive_workspace", { id: workspaceId, archivedAt: updatedAt });
 
+  clearWorkspaceDraft(workspaceId);
   ensureActiveSelection([...workspaces.state.values()], [...threads.state.values()]);
 }
 
@@ -243,12 +245,18 @@ export function sendMessageAction(input: {
   });
 
   // Optimistic mutations
+  const existingThread = threads.get(input.thread.id);
+  if (!existingThread) {
+    applyLocalInsert("threads", toLocalSyncRow(input.thread, opId));
+  }
   applyLocalUpdate("threads", toLocalSyncRow(threadUpdate, opId));
   applyLocalInsert("messages", toLocalSyncRow(userMessage, opId));
   applyLocalInsert("messages", toLocalSyncRow(assistantMessage, opId));
 
   const rollbackEntries: OptimisticEntry[] = [
-    restoreRow("threads", threads, input.thread),
+    existingThread
+      ? restoreRow("threads", threads, existingThread)
+      : deleteRow("threads", input.thread.id),
     deleteRow("messages", userMessage.id),
     deleteRow("messages", assistantMessage.id),
   ];
@@ -291,6 +299,16 @@ export function deleteAttachmentAction(attachmentId: string) {
   dispatch("delete_attachment", { id: attachmentId });
 }
 
+export function updateAttachmentAction(attachment: Attachment) {
+  const opId = createId("op");
+  const existing = attachments.get(attachment.id);
+  applyLocalUpdate("attachments", toLocalSyncRow(attachment, opId));
+  if (existing) {
+    trackOptimistic(opId, [restoreRow("attachments", attachments, existing)]);
+  }
+  dispatch("update_attachment", { attachment: toWire(attachment, opId) }, { opId });
+}
+
 export function resetAllData() {
   const opId = createId("op");
   // Tell server to wipe all DO state
@@ -302,6 +320,7 @@ export function resetAllData() {
     localStorage.removeItem("b3.activeThreadId");
     localStorage.removeItem("b3.clientId");
   }
+  clearAllDraftState();
   // Reload to get fresh state from server
   setTimeout(() => location.reload(), 300);
 }

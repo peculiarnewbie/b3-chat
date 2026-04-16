@@ -623,10 +623,12 @@ export class SyncEngineDurableObject {
           break;
         }
         case "register_attachment":
-        case "complete_attachment": {
+        case "complete_attachment":
+        case "update_attachment": {
           const command = payload as
             | SyncCommandPayloadMap["register_attachment"]
-            | SyncCommandPayloadMap["complete_attachment"];
+            | SyncCommandPayloadMap["complete_attachment"]
+            | SyncCommandPayloadMap["update_attachment"];
           const existing = this.getAttachment(command.attachment.id);
           pendingEvents.push(
             this.insertEvent(opId, "attachment_upserted", {

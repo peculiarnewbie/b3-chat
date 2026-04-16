@@ -23,7 +23,7 @@ import type {
   TraceSpan,
   Workspace,
 } from "@b3-chat/domain";
-import Markdown from "../components/Markdown";
+import Markdown, { type Citation } from "../components/Markdown";
 import { explainAssistantError } from "../lib/assistant-errors";
 import { authClient } from "../lib/auth-client";
 import { BUILD_INFO } from "../lib/build-info";
@@ -41,7 +41,6 @@ import {
 } from "../lib/collections";
 import {
   createWorkspaceAction,
-  createThreadAction,
   archiveThreadAction,
   archiveWorkspaceAction,
   updateThreadAction,
@@ -56,6 +55,18 @@ import {
   activeThreadId,
   setActiveThreadId,
 } from "../lib/ui-state";
+import {
+  activateWorkspaceDraftView,
+  activateWorkspaceThreadView,
+  consumePendingDraftAttachmentCleanup,
+  ensureWorkspaceDraft,
+  finalizeWorkspaceDraft,
+  getWorkspaceConversationView,
+  getWorkspaceDraft,
+  pendingDraftAttachmentCleanupTick,
+  removeWorkspaceDraftAttachment,
+  updateWorkspaceDraft,
+} from "../lib/draft-state";
 import { start as startConnection } from "../lib/ws-connection";
 import { init as initSyncAdapter } from "../lib/sync-adapter";
 
@@ -419,55 +430,103 @@ export default function Home() {
 
   // File upload handlers
   const handleFileSelect = async (files: FileList | null) => {
-    if (!files || !activeThread()) return;
+    const thread = selectedConversationThread();
+    const workspace = activeWorkspace();
+    const draftMode = isDraftViewActive();
+    if (!files || !thread || !workspace) return;
     for (const file of Array.from(files)) {
       if (!isAllowedFile(file)) continue;
       const localId = createId("local");
       const previewUrl = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined;
 
-      setComposer("attachments", (prev) => [
-        ...prev,
-        {
-          localId,
-          attachmentId: null,
-          fileName: file.name,
-          mimeType: file.type,
-          sizeBytes: file.size,
-          status: "uploading",
-          previewUrl,
-        },
-      ]);
+      const draftAttachment = {
+        localId,
+        attachmentId: null,
+        threadId: thread.id,
+        fileName: file.name,
+        mimeType: file.type,
+        sizeBytes: file.size,
+        status: "uploading" as const,
+        previewUrl,
+      };
+      if (draftMode) {
+        updateWorkspaceDraft(workspace.id, (draft) => ({
+          ...draft,
+          attachments: [...draft.attachments, draftAttachment],
+          updatedAt: nowIso(),
+        }));
+      } else {
+        setComposer("attachments", (prev) => [...prev, draftAttachment]);
+      }
 
       try {
-        const result = await uploadFile(file, activeThread()!.id);
+        const result = await uploadFile(file, thread.id);
         if (removedUploadLocalIds.delete(localId)) {
           deleteAttachmentAction(result.attachment.id);
           continue;
         }
-        setComposer("attachments", (att) => att.localId === localId, {
-          attachmentId: result.attachment.id,
-          status: "ready",
-        });
+        if (draftMode) {
+          updateWorkspaceDraft(workspace.id, (draft) => ({
+            ...draft,
+            attachments: draft.attachments.map((attachment) =>
+              attachment.localId === localId
+                ? {
+                    ...attachment,
+                    attachmentId: result.attachment.id,
+                    status: "ready",
+                  }
+                : attachment,
+            ),
+            updatedAt: nowIso(),
+          }));
+        } else {
+          setComposer("attachments", (att) => att.localId === localId, {
+            attachmentId: result.attachment.id,
+            status: "ready",
+          });
+        }
       } catch (err) {
         if (removedUploadLocalIds.delete(localId)) {
           continue;
         }
         console.error("Upload failed:", err);
-        setComposer("attachments", (att) => att.localId === localId, "status", "failed");
+        if (draftMode) {
+          updateWorkspaceDraft(workspace.id, (draft) => ({
+            ...draft,
+            attachments: draft.attachments.map((attachment) =>
+              attachment.localId === localId
+                ? {
+                    ...attachment,
+                    status: "failed",
+                  }
+                : attachment,
+            ),
+            updatedAt: nowIso(),
+          }));
+        } else {
+          setComposer("attachments", (att) => att.localId === localId, "status", "failed");
+        }
       }
     }
     if (fileInputRef) fileInputRef.value = "";
   };
 
   const removeAttachment = (localId: string) => {
-    const att = composer.attachments.find((a) => a.localId === localId);
+    const workspace = activeWorkspace();
+    const att = composerAttachments().find((attachment) => attachment.localId === localId);
     if (att?.previewUrl) URL.revokeObjectURL(att.previewUrl);
     if (att?.attachmentId) {
       deleteAttachmentAction(att.attachmentId);
     } else {
       removedUploadLocalIds.add(localId);
     }
-    setComposer("attachments", (prev) => prev.filter((a) => a.localId !== localId));
+    if (workspace && isDraftViewActive()) {
+      removeWorkspaceDraftAttachment(workspace.id, localId);
+      return;
+    }
+    setComposer("attachments", (prev) =>
+      prev.filter((attachment) => attachment.localId !== localId),
+    );
   };
 
   const handleDragEnter = (e: DragEvent) => {
@@ -537,6 +596,9 @@ export default function Home() {
   createEffect(() => {
     const workspace = activeWorkspace();
     if (!workspace) return;
+    if (getWorkspaceConversationView(workspace.id) === "draft" && getWorkspaceDraft(workspace.id)) {
+      return;
+    }
     setComposer("modelId", workspace.defaultModelId);
     setComposer("reasoningLevel", workspace.defaultReasoningLevel ?? "off");
     setComposer("search", workspace.defaultSearchMode);
@@ -559,21 +621,35 @@ export default function Home() {
   });
 
   const selectedModel = createMemo(
-    () => (models()?.models ?? []).find((model) => model.id === composer.modelId) ?? null,
+    () => (models()?.models ?? []).find((model) => model.id === composerModelId()) ?? null,
   );
   const selectedModelSupportsReasoning = createMemo(() => Boolean(selectedModel()?.reasoning));
   const selectedModelInterleavedField = createMemo(
     () => selectedModel()?.interleaved?.field?.trim() || null,
   );
   const effectiveComposerReasoningLevel = createMemo<ReasoningLevel>(() =>
-    selectedModelSupportsReasoning() ? composer.reasoningLevel : "off",
+    selectedModelSupportsReasoning() ? composerReasoningLevel() : "off",
   );
   const willDisableReasoningForToolTurn = createMemo(
     () =>
-      composer.search &&
+      composerSearch() &&
       effectiveComposerReasoningLevel() !== "off" &&
       Boolean(selectedModelInterleavedField()),
   );
+
+  createEffect(() => {
+    pendingDraftAttachmentCleanupTick();
+    for (const cleanup of consumePendingDraftAttachmentCleanup()) {
+      if (cleanup.previewUrl) {
+        URL.revokeObjectURL(cleanup.previewUrl);
+      }
+      if (cleanup.attachmentId) {
+        deleteAttachmentAction(cleanup.attachmentId);
+        continue;
+      }
+      removedUploadLocalIds.add(cleanup.localId);
+    }
+  });
 
   // Auto-scroll only when user is already near the bottom
   createEffect(() => {
@@ -602,9 +678,45 @@ export default function Home() {
   const activeThread = createMemo(
     () => threads().find((thread) => thread.id === activeThreadId()) ?? threads()[0],
   );
+  const activeDraft = createMemo(() => {
+    const workspace = activeWorkspace();
+    if (!workspace) return null;
+    return getWorkspaceDraft(workspace.id);
+  });
+  const isDraftViewActive = createMemo(() => {
+    const workspace = activeWorkspace();
+    if (!workspace) return false;
+    return getWorkspaceConversationView(workspace.id) === "draft" && Boolean(activeDraft());
+  });
+  const selectedConversationThread = createMemo(
+    () => (isDraftViewActive() ? activeDraft()?.thread : activeThread()) ?? null,
+  );
+  const composerText = () => (isDraftViewActive() ? (activeDraft()?.text ?? "") : composer.text);
+  const composerAttachments = () =>
+    isDraftViewActive() ? (activeDraft()?.attachments ?? []) : composer.attachments;
+  const composerModelId = () =>
+    isDraftViewActive() ? (activeDraft()?.modelId ?? "") : composer.modelId;
+  const composerReasoningLevel = () =>
+    isDraftViewActive() ? (activeDraft()?.reasoningLevel ?? "off") : composer.reasoningLevel;
+  const composerSearch = () =>
+    isDraftViewActive() ? (activeDraft()?.search ?? false) : composer.search;
+  const setComposerTextValue = (text: string) => {
+    const workspace = activeWorkspace();
+    if (workspace && isDraftViewActive()) {
+      updateWorkspaceDraft(workspace.id, (draft) => ({
+        ...draft,
+        text,
+        updatedAt: nowIso(),
+      }));
+      return;
+    }
+    setComposer("text", text);
+  };
   const messageIds = createMemo(() =>
     sortConversationMessages(
-      (allMessages() as Message[]).filter((message) => message.threadId === activeThread()?.id),
+      (allMessages() as Message[]).filter(
+        (message) => message.threadId === selectedConversationThread()?.id,
+      ),
     ).map((message) => message.id),
   );
   const messagesById = createMemo(() => {
@@ -647,6 +759,19 @@ export default function Home() {
     }
     return byMessage;
   });
+  /** Flat, ordered list of citations per message (matches [1],[2]… numbering the model uses). */
+  const citationsForMessage = (messageId: string): Citation[] => {
+    const runs = searchRunsMemo().get(messageId);
+    if (!runs?.length) return [];
+    return runs.flatMap((run) =>
+      run.results.map((r) => ({
+        url: r.url,
+        title: r.title,
+        domain: r.domain,
+        snippet: r.snippet,
+      })),
+    );
+  };
   const thinkingTokensByMessage = createMemo(() => {
     const byMessage = new Map<string, { seq: number; tokens: number }>();
     for (const row of allMessageParts() as MessagePart[]) {
@@ -718,7 +843,8 @@ export default function Home() {
     message.role === "assistant" &&
     (activitiesForMessage(message.id).length > 0 ||
       isWaitingForVisibleAnswer(message) ||
-      thinkingTokens(message.id) != null);
+      thinkingTokens(message.id) != null ||
+      traceRunsForMessage(message.id).length > 0);
   const hasAssistantStats = (message: any) =>
     message.role === "assistant" &&
     (thinkingTokens(message.id) != null ||
@@ -731,7 +857,6 @@ export default function Home() {
     (Boolean(message.text?.trim()) ||
       message.status === "failed" ||
       (searchRunsMemo().get(message.id)?.length ?? 0) > 0 ||
-      traceRunsForMessage(message.id).length > 0 ||
       hasAssistantStats(message));
   const thinkingLabel = (messageId: string) => {
     const tokens = thinkingTokens(messageId);
@@ -751,6 +876,9 @@ export default function Home() {
     }
     if (tokens != null) {
       parts.push(`${formatTokenCount(tokens)} thinking tokens`);
+    }
+    if (traceRunsForMessage(message.id).length > 0) {
+      parts.push(`trace ${traceRunsForMessage(message.id).length}`);
     }
     if (isWaitingForVisibleAnswer(message)) {
       parts.push("live");
@@ -921,27 +1049,68 @@ export default function Home() {
                       <Show when={activitiesForMessage(message().id).length > 0}>
                         <div class="assistant-progress">
                           <Index each={activitiesForMessage(message().id)}>
-                            {(activity) => (
-                              <div
-                                classList={{
-                                  "assistant-progress-item": true,
-                                  "is-active": activity().state === "active",
-                                  "is-failed": activity().state === "failed",
-                                }}
-                              >
-                                <span class="assistant-progress-marker" aria-hidden="true" />
-                                <div class="assistant-progress-copy">
-                                  <span>{activity().label}</span>
-                                  <Show
-                                    when={assistantProgressFailureSummary(message(), activity())}
-                                  >
-                                    {(summary) => (
-                                      <span class="assistant-progress-detail">{summary()}</span>
-                                    )}
-                                  </Show>
+                            {(activity) => {
+                              const searchRunResults = () => {
+                                if (activity().state !== "completed" || activity().step == null)
+                                  return null;
+                                const runs = searchRunsMemo().get(message().id) ?? [];
+                                const run = runs.find((r) => r.step === activity().step);
+                                if (!run || run.results.length === 0) return null;
+                                let offset = 0;
+                                for (const r of runs) {
+                                  if (r.step < run.step) offset += r.results.length;
+                                }
+                                return { results: run.results, startIndex: offset + 1 };
+                              };
+
+                              return (
+                                <div
+                                  classList={{
+                                    "assistant-progress-item": true,
+                                    "is-active": activity().state === "active",
+                                    "is-failed": activity().state === "failed",
+                                  }}
+                                >
+                                  <span class="assistant-progress-marker" aria-hidden="true" />
+                                  <div class="assistant-progress-copy">
+                                    <span>{activity().label}</span>
+                                    <Show
+                                      when={assistantProgressFailureSummary(message(), activity())}
+                                    >
+                                      {(summary) => (
+                                        <span class="assistant-progress-detail">{summary()}</span>
+                                      )}
+                                    </Show>
+                                    <Show when={searchRunResults()}>
+                                      {(data) => (
+                                        <div class="search-results-inline">
+                                          <Index each={data().results}>
+                                            {(result, idx) => (
+                                              <a
+                                                class="search-result-link"
+                                                href={result().url}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                              >
+                                                <span class="search-result-num">
+                                                  {data().startIndex + idx}
+                                                </span>
+                                                <span class="search-result-title">
+                                                  {result().title}
+                                                </span>
+                                                <span class="search-result-domain">
+                                                  {result().domain}
+                                                </span>
+                                              </a>
+                                            )}
+                                          </Index>
+                                        </div>
+                                      )}
+                                    </Show>
+                                  </div>
                                 </div>
-                              </div>
-                            )}
+                              );
+                            }}
                           </Index>
                         </div>
                       </Show>
@@ -973,6 +1142,72 @@ export default function Home() {
                           <span>{thinkingLabel(message().id)}</span>
                         </div>
                       </Show>
+                      <Show when={traceRunsForMessage(message().id).length > 0}>
+                        <div class="trace-shell">
+                          <button
+                            type="button"
+                            class="trace-toggle"
+                            aria-expanded={!isTraceCollapsed(message().id)}
+                            aria-controls={`trace-drawer-${message().id}`}
+                            onClick={() => toggleTraceDrawer(message().id)}
+                          >
+                            <span class="trace-toggle-copy">
+                              <span class="trace-toggle-label">Trace</span>
+                              <span class="trace-toggle-meta">
+                                {traceTreesForMessage(message().id)[0]?.run
+                                  ? `${formatTraceStatus(traceTreesForMessage(message().id)[0]!.run.status)} • ${shortTraceId(traceTreesForMessage(message().id)[0]!.run.traceId)}`
+                                  : "Developer trace"}
+                              </span>
+                            </span>
+                            <span
+                              classList={{
+                                "assistant-progress-toggle-chevron": true,
+                                "is-collapsed": isTraceCollapsed(message().id),
+                              }}
+                              aria-hidden="true"
+                            >
+                              ▾
+                            </span>
+                          </button>
+                          <Show when={!isTraceCollapsed(message().id)}>
+                            <div class="trace-drawer" id={`trace-drawer-${message().id}`}>
+                              <For each={traceTreesForMessage(message().id)}>
+                                {(trace) => (
+                                  <div class="trace-run-card">
+                                    <div class="trace-run-header">
+                                      <span class="trace-run-id">
+                                        trace {shortTraceId(trace.run.traceId)}
+                                      </span>
+                                      <span class="trace-run-badges">
+                                        <span>{formatTraceStatus(trace.run.status)}</span>
+                                        <Show when={trace.run.modelId}>
+                                          <span>{trace.run.modelId}</span>
+                                        </Show>
+                                        <Show when={trace.attrs.searchEnabled === true}>
+                                          <span>search</span>
+                                        </Show>
+                                        <Show when={trace.run.durationMs != null}>
+                                          <span>{formatDuration(trace.run.durationMs!)}</span>
+                                        </Show>
+                                      </span>
+                                    </div>
+                                    <Show when={trace.run.errorMessage}>
+                                      <div class="trace-run-error">{trace.run.errorMessage}</div>
+                                    </Show>
+                                    <Show when={trace.spans.length > 0}>
+                                      <div class="trace-tree">
+                                        <For each={trace.spans}>
+                                          {(span) => <TraceSpanTree span={span} />}
+                                        </For>
+                                      </div>
+                                    </Show>
+                                  </div>
+                                )}
+                              </For>
+                            </div>
+                          </Show>
+                        </div>
+                      </Show>
                     </div>
                   </Show>
                 </div>
@@ -980,38 +1215,17 @@ export default function Home() {
               <Show when={hasAssistantAnswerCard(message())}>
                 <div class="assistant-answer-card">
                   <Show when={message().text?.trim()}>
-                    <Show
-                      when={message().status === "streaming"}
-                      fallback={<Markdown text={message().text} />}
-                    >
-                      <Markdown text={message().text} streaming />
-                    </Show>
-                  </Show>
-                  <Show when={searchRunsMemo().get(message().id)?.length}>
-                    <div class="search-results">
-                      <span class="sr-label">Web search</span>
-                      <Index each={searchRunsMemo().get(message().id) ?? []}>
-                        {(run) => (
-                          <div>
-                            <span class="sr-label">
-                              #{run().step} {run().query}
-                            </span>
-                            <Show
-                              when={run().results.length > 0}
-                              fallback={<p>{run().previewText || run().status}</p>}
-                            >
-                              <Index each={run().results}>
-                                {(result) => (
-                                  <a href={result().url} target="_blank" rel="noreferrer">
-                                    {result().title}
-                                  </a>
-                                )}
-                              </Index>
-                            </Show>
-                          </div>
-                        )}
-                      </Index>
-                    </div>
+                    {(() => {
+                      const cites = () => citationsForMessage(message().id);
+                      return (
+                        <Show
+                          when={message().status === "streaming"}
+                          fallback={<Markdown text={message().text} citations={cites()} />}
+                        >
+                          <Markdown text={message().text} streaming citations={cites()} />
+                        </Show>
+                      );
+                    })()}
                   </Show>
                   <Show when={message().status === "failed"}>
                     <div class="assistant-error-card" role="alert">
@@ -1062,71 +1276,8 @@ export default function Home() {
                           tok/s
                         </span>
                       </Show>
-                    </div>
-                  </Show>
-                  <Show when={traceRunsForMessage(message().id).length > 0}>
-                    <div class="trace-shell">
-                      <button
-                        type="button"
-                        class="trace-toggle"
-                        aria-expanded={!isTraceCollapsed(message().id)}
-                        aria-controls={`trace-drawer-${message().id}`}
-                        onClick={() => toggleTraceDrawer(message().id)}
-                      >
-                        <span class="trace-toggle-copy">
-                          <span class="trace-toggle-label">Trace</span>
-                          <span class="trace-toggle-meta">
-                            {traceTreesForMessage(message().id)[0]?.run
-                              ? `${formatTraceStatus(traceTreesForMessage(message().id)[0]!.run.status)} • ${shortTraceId(traceTreesForMessage(message().id)[0]!.run.traceId)}`
-                              : "Developer trace"}
-                          </span>
-                        </span>
-                        <span
-                          classList={{
-                            "assistant-progress-toggle-chevron": true,
-                            "is-collapsed": isTraceCollapsed(message().id),
-                          }}
-                          aria-hidden="true"
-                        >
-                          ▾
-                        </span>
-                      </button>
-                      <Show when={!isTraceCollapsed(message().id)}>
-                        <div class="trace-drawer" id={`trace-drawer-${message().id}`}>
-                          <For each={traceTreesForMessage(message().id)}>
-                            {(trace) => (
-                              <div class="trace-run-card">
-                                <div class="trace-run-header">
-                                  <span class="trace-run-id">
-                                    trace {shortTraceId(trace.run.traceId)}
-                                  </span>
-                                  <span class="trace-run-badges">
-                                    <span>{formatTraceStatus(trace.run.status)}</span>
-                                    <Show when={trace.run.modelId}>
-                                      <span>{trace.run.modelId}</span>
-                                    </Show>
-                                    <Show when={trace.attrs.searchEnabled === true}>
-                                      <span>search</span>
-                                    </Show>
-                                    <Show when={trace.run.durationMs != null}>
-                                      <span>{formatDuration(trace.run.durationMs!)}</span>
-                                    </Show>
-                                  </span>
-                                </div>
-                                <Show when={trace.run.errorMessage}>
-                                  <div class="trace-run-error">{trace.run.errorMessage}</div>
-                                </Show>
-                                <Show when={trace.spans.length > 0}>
-                                  <div class="trace-tree">
-                                    <For each={trace.spans}>
-                                      {(span) => <TraceSpanTree span={span} />}
-                                    </For>
-                                  </div>
-                                </Show>
-                              </div>
-                            )}
-                          </For>
-                        </div>
+                      <Show when={message().modelId}>
+                        <span class="msg-stats-model">{message().modelId}</span>
                       </Show>
                     </div>
                   </Show>
@@ -1148,15 +1299,23 @@ export default function Home() {
 
   const createNewWorkspace = async () => {
     createWorkspaceAction(`Workspace ${workspaces().length + 1}`, {
-      defaultModelId: composer.modelId || models()?.models?.[0]?.id || "auto",
-      defaultReasoningLevel: composer.reasoningLevel,
-      defaultSearchMode: composer.search,
+      defaultModelId: composerModelId() || models()?.models?.[0]?.id || "auto",
+      defaultReasoningLevel: composerReasoningLevel(),
+      defaultSearchMode: composerSearch(),
     });
   };
 
   const createNewThread = async () => {
-    if (!activeWorkspace()) return;
-    createThreadAction(activeWorkspace()!.id);
+    const workspace = activeWorkspace();
+    if (!workspace) return;
+    ensureWorkspaceDraft({
+      workspace,
+      modelId: composerModelId() || workspace.defaultModelId || models()?.models?.[0]?.id || "auto",
+      reasoningLevel: composerReasoningLevel(),
+      search: composerSearch(),
+    });
+    activateWorkspaceDraftView(workspace.id);
+    setSidebarOpen(false);
   };
 
   const deleteThread = async (threadId: string) => {
@@ -1240,27 +1399,54 @@ export default function Home() {
   };
 
   const handleModelChange = (modelId: string) => {
-    setComposer("modelId", modelId);
+    const workspace = activeWorkspace();
+    if (workspace && isDraftViewActive()) {
+      updateWorkspaceDraft(workspace.id, (draft) => ({
+        ...draft,
+        modelId,
+        updatedAt: nowIso(),
+      }));
+    } else {
+      setComposer("modelId", modelId);
+    }
     updateWorkspacePreferences({ defaultModelId: modelId });
   };
 
   const handleSearchChange = (search: boolean) => {
-    setComposer("search", search);
+    const workspace = activeWorkspace();
+    if (workspace && isDraftViewActive()) {
+      updateWorkspaceDraft(workspace.id, (draft) => ({
+        ...draft,
+        search,
+        updatedAt: nowIso(),
+      }));
+    } else {
+      setComposer("search", search);
+    }
     updateWorkspacePreferences({ defaultSearchMode: search });
   };
 
   const handleReasoningChange = (reasoningLevel: ReasoningLevel) => {
-    setComposer("reasoningLevel", reasoningLevel);
+    const workspace = activeWorkspace();
+    if (workspace && isDraftViewActive()) {
+      updateWorkspaceDraft(workspace.id, (draft) => ({
+        ...draft,
+        reasoningLevel,
+        updatedAt: nowIso(),
+      }));
+    } else {
+      setComposer("reasoningLevel", reasoningLevel);
+    }
     updateWorkspacePreferences({ defaultReasoningLevel: reasoningLevel });
   };
 
   const retryMessage = (msg: any) => {
-    if (!activeThread() || !msg.text?.trim()) return;
+    if (!selectedConversationThread() || !msg.text?.trim()) return;
     const attachmentIds = userAttachments(msg.id)
       .filter((attachment) => attachment.status === "ready")
       .map((attachment) => attachment.id);
     sendMessageAction({
-      thread: activeThread()!,
+      thread: selectedConversationThread()!,
       text: msg.text.trim(),
       modelId:
         msg.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto",
@@ -1271,51 +1457,57 @@ export default function Home() {
   };
 
   const sendMessage = async () => {
+    const thread = selectedConversationThread();
+    const workspace = activeWorkspace();
+    const draftMode = isDraftViewActive();
     console.log("[send] attempt", {
-      activeThread: activeThread(),
-      activeWorkspace: activeWorkspace(),
-      text: composer.text.trim(),
-      attachments: composer.attachments.length,
+      activeThread: thread,
+      activeWorkspace: workspace,
+      text: composerText().trim(),
+      attachments: composerAttachments().length,
       sending: composer.sending,
       workspacesCount: workspaces().length,
       threadsCount: threads().length,
     });
     if (
-      !activeThread() ||
-      (!composer.text.trim() && composer.attachments.length === 0) ||
+      !thread ||
+      (!composerText().trim() && composerAttachments().length === 0) ||
       composer.sending
     ) {
       console.log("[send] blocked", {
-        noThread: !activeThread(),
-        noContent: !composer.text.trim() && composer.attachments.length === 0,
+        noThread: !thread,
+        noContent: !composerText().trim() && composerAttachments().length === 0,
         alreadySending: composer.sending,
       });
       return;
     }
     setComposer("sending", true);
     try {
-      const text = composer.text.trim();
-      const attachmentIds = composer.attachments
+      const text = composerText().trim();
+      const attachmentIds = composerAttachments()
         .filter((a) => a.status === "ready" && a.attachmentId)
         .map((a) => a.attachmentId!);
       sendMessageAction({
-        thread: activeThread()!,
+        thread,
         text,
         modelId:
-          composer.modelId ||
-          activeWorkspace()?.defaultModelId ||
-          models()?.models?.[0]?.id ||
-          "auto",
+          composerModelId() || workspace?.defaultModelId || models()?.models?.[0]?.id || "auto",
         modelInterleavedField: selectedModelInterleavedField(),
         reasoningLevel: effectiveComposerReasoningLevel(),
-        search: composer.search,
+        search: composerSearch(),
         attachmentIds,
       });
-      for (const att of composer.attachments) {
+      for (const att of composerAttachments()) {
         if (att.previewUrl) URL.revokeObjectURL(att.previewUrl);
       }
-      setComposer("text", "");
-      setComposer("attachments", []);
+      if (draftMode && workspace) {
+        finalizeWorkspaceDraft(workspace.id);
+        activateWorkspaceThreadView(workspace.id);
+        setActiveThreadId(thread.id);
+      } else {
+        setComposer("text", "");
+        setComposer("attachments", []);
+      }
     } finally {
       setComposer("sending", false);
     }
@@ -1446,9 +1638,13 @@ export default function Home() {
                   <For each={group.threads}>
                     {(thread) => (
                       <div
-                        classList={{ "nav-item": true, active: thread.id === activeThread()?.id }}
+                        classList={{
+                          "nav-item": true,
+                          active: !isDraftViewActive() && thread.id === activeThread()?.id,
+                        }}
                         onClick={() => {
                           if (editingThreadId() === thread.id) return;
+                          activateWorkspaceThreadView(thread.workspaceId);
                           setActiveThreadId(thread.id);
                           setSidebarOpen(false);
                         }}
@@ -1595,7 +1791,7 @@ export default function Home() {
                 ☰
               </button>
               <span class="workspace-label">{activeWorkspace()?.name}</span>
-              <h2>{activeThread()?.title ?? "New Chat"}</h2>
+              <h2>{selectedConversationThread()?.title ?? "New Chat"}</h2>
               <Show when={activeWorkspace()?.systemPrompt}>
                 <span class="system-prompt" title={activeWorkspace()?.systemPrompt}>
                   {activeWorkspace()?.systemPrompt}
@@ -1629,9 +1825,9 @@ export default function Home() {
               onDragOver={handleDragOver}
               onDrop={handleDrop}
             >
-              <Show when={composer.attachments.length > 0}>
+              <Show when={composerAttachments().length > 0}>
                 <div class="attachment-strip">
-                  <For each={composer.attachments}>
+                  <For each={composerAttachments()}>
                     {(att) => (
                       <div
                         class="attachment-chip"
@@ -1667,12 +1863,12 @@ export default function Home() {
                 </div>
               </Show>
               <textarea
-                value={composer.text}
-                onInput={(event) => setComposer("text", event.currentTarget.value)}
+                value={composerText()}
+                onInput={(event) => setComposerTextValue(event.currentTarget.value)}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
                 placeholder={
-                  composer.attachments.length > 0 ? "Add a message (optional)..." : "Message..."
+                  composerAttachments().length > 0 ? "Add a message (optional)..." : "Message..."
                 }
               />
               <div class="composer-bar">
@@ -1692,7 +1888,7 @@ export default function Home() {
                   onChange={(e) => handleFileSelect(e.currentTarget.files)}
                 />
                 <select
-                  value={composer.modelId}
+                  value={composerModelId()}
                   onChange={(event) => handleModelChange(event.currentTarget.value)}
                 >
                   <For each={models()?.models ?? []}>
@@ -1701,7 +1897,7 @@ export default function Home() {
                 </select>
                 <Show when={selectedModelSupportsReasoning()}>
                   <select
-                    value={composer.reasoningLevel}
+                    value={composerReasoningLevel()}
                     title="Reasoning level"
                     aria-label="Reasoning level"
                     onChange={(event) =>
@@ -1716,7 +1912,7 @@ export default function Home() {
                 <label class="search-toggle">
                   <input
                     type="checkbox"
-                    checked={composer.search}
+                    checked={composerSearch()}
                     onChange={(event) => handleSearchChange(event.currentTarget.checked)}
                   />
                   Search
@@ -1725,7 +1921,8 @@ export default function Home() {
                 <button
                   class="btn btn-primary"
                   disabled={
-                    composer.sending || composer.attachments.some((a) => a.status === "uploading")
+                    composer.sending ||
+                    composerAttachments().some((attachment) => attachment.status === "uploading")
                   }
                   onClick={sendMessage}
                 >

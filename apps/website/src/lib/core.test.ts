@@ -27,6 +27,17 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { explainAssistantError } from "./assistant-errors";
 import { sendMessageAction } from "./actions";
 import { applyLocalInsert, messages, resetCollections, threads, workspaces } from "./collections";
+import {
+  activateWorkspaceDraftView,
+  clearAllDraftState,
+  consumePendingDraftAttachmentCleanup,
+  ensureWorkspaceDraft,
+  getWorkspaceConversationView,
+  getWorkspaceDraft,
+  reconcileDraftState,
+  removeWorkspaceDraftAttachment,
+  updateWorkspaceDraft,
+} from "./draft-state";
 import { resetPendingOps } from "./pending-ops";
 import { processEnvelopes } from "./sync-adapter";
 import { normalizeAssistantError } from "../server/error-normalization";
@@ -34,6 +45,7 @@ import { normalizeAssistantError } from "../server/error-normalization";
 beforeEach(() => {
   resetCollections();
   resetPendingOps();
+  clearAllDraftState();
   if (typeof localStorage !== "undefined") {
     localStorage.clear();
   }
@@ -184,6 +196,31 @@ describe("domain helpers", () => {
     ]);
   });
 
+  it("materializes a draft thread on first send", () => {
+    const workspace = createWorkspace({
+      name: "Writing",
+      defaultModelId: "openai/gpt-4.1",
+    });
+    const draftThread = createThread({ workspaceId: workspace.id });
+
+    applyLocalInsert("workspaces", workspace);
+
+    expect(threads.get(draftThread.id)).toBeUndefined();
+
+    sendMessageAction({
+      thread: draftThread,
+      text: "draft hello",
+      modelId: workspace.defaultModelId,
+      reasoningLevel: "off",
+      search: false,
+    });
+
+    expect(threads.get(draftThread.id)?.title).toBe("draft hello");
+    expect(
+      [...messages.state.values()].filter((message) => message.threadId === draftThread.id),
+    ).toHaveLength(2);
+  });
+
   it("applies authoritative upserts over optimistic rows without duplicate-key errors", () => {
     const workspace = createWorkspace({
       name: "Writing",
@@ -222,6 +259,118 @@ describe("domain helpers", () => {
 
     expect(workspaces.get(workspace.id)?.id).toBe(workspace.id);
     expect(threads.get(originalThread.id)?.title).toBe("what time is it?");
+  });
+
+  it("reuses the same draft for a workspace", () => {
+    const workspace = createWorkspace({
+      name: "Writing",
+      defaultModelId: "openai/gpt-4.1",
+    });
+
+    const first = ensureWorkspaceDraft({
+      workspace,
+      modelId: workspace.defaultModelId,
+      reasoningLevel: "low",
+      search: true,
+    });
+    const second = ensureWorkspaceDraft({
+      workspace,
+      modelId: "other-model",
+      reasoningLevel: "high",
+      search: false,
+    });
+
+    expect(second.thread.id).toBe(first.thread.id);
+    expect(getWorkspaceDraft(workspace.id)?.search).toBe(true);
+  });
+
+  it("removes invalid workspace drafts during reconciliation", () => {
+    const workspace = createWorkspace({
+      name: "Writing",
+      defaultModelId: "openai/gpt-4.1",
+    });
+
+    ensureWorkspaceDraft({
+      workspace,
+      modelId: workspace.defaultModelId,
+      reasoningLevel: "off",
+      search: false,
+    });
+    activateWorkspaceDraftView(workspace.id);
+
+    reconcileDraftState([], []);
+
+    expect(getWorkspaceDraft(workspace.id)).toBeNull();
+    expect(getWorkspaceConversationView(workspace.id)).toBe("thread");
+  });
+
+  it("drops a draft when the workspace is archived by sync", () => {
+    const workspace = createWorkspace({
+      name: "Writing",
+      defaultModelId: "openai/gpt-4.1",
+    });
+    const thread = createThread({ workspaceId: workspace.id });
+
+    applyLocalInsert("workspaces", workspace);
+    applyLocalInsert("threads", thread);
+    ensureWorkspaceDraft({
+      workspace,
+      modelId: workspace.defaultModelId,
+      reasoningLevel: "off",
+      search: false,
+    });
+    activateWorkspaceDraftView(workspace.id);
+
+    processEnvelopes([
+      {
+        type: "event",
+        serverSeq: 1,
+        eventId: "evt_workspace_archived",
+        eventType: "workspace_archived",
+        payload: {
+          id: workspace.id,
+          archivedAt: "2026-04-16T00:00:00.000Z",
+          updatedAt: "2026-04-16T00:00:00.000Z",
+        },
+        causedByOpId: "op_workspace_archived",
+      },
+    ]);
+
+    expect(getWorkspaceDraft(workspace.id)).toBeNull();
+  });
+
+  it("removes ready attachments from a draft before first send", () => {
+    const workspace = createWorkspace({
+      name: "Writing",
+      defaultModelId: "openai/gpt-4.1",
+    });
+    const draft = ensureWorkspaceDraft({
+      workspace,
+      modelId: workspace.defaultModelId,
+      reasoningLevel: "off",
+      search: false,
+    });
+
+    updateWorkspaceDraft(workspace.id, (current) => ({
+      ...current,
+      attachments: [
+        {
+          localId: "local_att",
+          attachmentId: "att_ready",
+          threadId: draft.thread.id,
+          fileName: "cat.png",
+          mimeType: "image/png",
+          sizeBytes: 10,
+          status: "ready",
+        },
+      ],
+    }));
+
+    const removed = removeWorkspaceDraftAttachment(workspace.id, "local_att");
+
+    expect(removed?.attachmentId).toBe("att_ready");
+    expect(getWorkspaceDraft(workspace.id)?.attachments).toHaveLength(0);
+    expect(consumePendingDraftAttachmentCleanup()).toHaveLength(0);
   });
 });
 

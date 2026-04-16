@@ -46,14 +46,84 @@ const marked = new Marked(
 );
 marked.use({ renderer });
 
-const Markdown: Component<{ text: string; streaming?: boolean }> = (props) => {
+/* ── Inline citation injection ────────────────────── */
+
+export interface Citation {
+  url: string;
+  title: string;
+  domain: string;
+  snippet: string;
+}
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * Replace `[N]` markers in rendered HTML with interactive citation badges.
+ * Skips replacements inside <code>, <pre>, and <a> elements.
+ */
+function injectCitations(html: string, citations: Citation[]): string {
+  if (!citations.length) return html;
+
+  let codeDepth = 0;
+  let linkDepth = 0;
+
+  return html.replace(
+    /(<\/?(?:code|pre|a)(?:\s[^>]*)?>)|(\[(\d+)\])/gi,
+    (match, tag, _cite, numStr) => {
+      if (tag) {
+        if (/^<(?:code|pre)[\s>]/i.test(tag)) codeDepth++;
+        if (/^<\/(?:code|pre)>/i.test(tag)) codeDepth = Math.max(0, codeDepth - 1);
+        if (/^<a[\s>]/i.test(tag)) linkDepth++;
+        if (/^<\/a>/i.test(tag)) linkDepth = Math.max(0, linkDepth - 1);
+        return tag;
+      }
+      if (codeDepth > 0 || linkDepth > 0) return match;
+
+      const idx = parseInt(numStr, 10) - 1;
+      if (idx < 0 || idx >= citations.length) return match;
+
+      const cite = citations[idx];
+      const t = escapeHtml(cite.title);
+      const d = escapeHtml(cite.domain);
+      const u = escapeHtml(cite.url);
+
+      return (
+        `<a class="cite-ref" href="${u}" target="_blank" rel="noreferrer">` +
+        `<sup>${numStr}</sup>` +
+        `<span class="cite-tip">` +
+        `<span class="cite-tip-title">${t}</span>` +
+        `<span class="cite-tip-domain">${d}</span>` +
+        `</span></a>`
+      );
+    },
+  );
+}
+
+const Markdown: Component<{
+  text: string;
+  streaming?: boolean;
+  citations?: Citation[];
+}> = (props) => {
   const html = createMemo(() => {
     const raw = props.text || "";
     const rendered = marked.parse(raw, { async: false }) as string;
     const sanitized = DOMPurify.sanitize(rendered, { ADD_ATTR: ["data-code"] });
-    return sanitized
+    let result = sanitized
       .replace(/<table>/g, '<div class="table-wrap"><table>')
       .replace(/<\/table>/g, "</table></div>");
+
+    if (props.citations?.length) {
+      result = injectCitations(result, props.citations);
+    }
+
+    return result;
   });
 
   const handleClick = (e: MouseEvent) => {

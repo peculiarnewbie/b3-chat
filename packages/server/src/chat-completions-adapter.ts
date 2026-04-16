@@ -125,12 +125,12 @@ function extractReasoningTokens(usage: unknown): number | null {
 
 /**
  * Converts TanStack AI ModelMessage format to OpenAI chat/completions message format.
- * Optionally includes reasoning_content from cache for models that require it.
+ * Optionally includes reasoning_content for models that require it (e.g., Kimi K2.5).
  */
 function convertToOpenAIMessages(
   messages: ModelMessage[],
   systemPrompts: string[] = [],
-  reasoningContentCache?: Map<string, string>,
+  pendingReasoningContent?: string | null,
 ): Array<Record<string, unknown>> {
   const result: Array<Record<string, unknown>> = [];
 
@@ -144,8 +144,21 @@ function convertToOpenAIMessages(
     }
   }
 
+  // Find the index of the last assistant message with tool_calls
+  // This is the one that needs reasoning_content attached for continuation
+  let lastToolCallAssistantIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role === "assistant" && msg.toolCalls?.length) {
+      lastToolCallAssistantIndex = i;
+      break;
+    }
+  }
+
   // Convert each message
-  for (const message of messages) {
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+
     if (message.role === "tool") {
       const content = convertMessageContent(message.content);
       result.push({
@@ -175,16 +188,10 @@ function convertToOpenAIMessages(
         },
       }));
 
-      // Look up and include reasoning_content for interleaved thinking models (e.g., Kimi K2.5)
-      if (reasoningContentCache) {
-        const toolCallIds = message.toolCalls.map((tc) => tc.id).sort();
-        const cacheKey = toolCallIds.join(",");
-        const cachedReasoning = reasoningContentCache.get(cacheKey);
-        if (cachedReasoning) {
-          convertedMessage.reasoning_content = cachedReasoning;
-          // Clean up cache after use to prevent memory leaks
-          reasoningContentCache.delete(cacheKey);
-        }
+      // Include reasoning_content for the last assistant message with tool_calls
+      // This is required for models that return reasoning_content alongside tool calls (e.g., Kimi K2.5)
+      if (pendingReasoningContent && i === lastToolCallAssistantIndex) {
+        convertedMessage.reasoning_content = pendingReasoningContent;
       }
     }
 
@@ -322,11 +329,19 @@ export class ChatCompletionsAdapter {
   private readonly config: ChatCompletionsAdapterConfig;
 
   /**
-   * Stores reasoning_content from assistant responses that have tool calls.
-   * Keyed by a hash of the tool call IDs to correlate with subsequent messages.
+   * Stores the last reasoning_content from an assistant response that had tool calls.
    * This is needed for models like Kimi K2.5 that require reasoning context replay.
+   * Since the adapter instance is reused within a single TanStack AI chat() loop,
+   * we can use a simple instance variable instead of a complex keyed cache.
    */
-  private reasoningContentCache = new Map<string, string>();
+  private pendingReasoningContent: string | null = null;
+
+  /**
+   * Stores modelOptions from the first request to ensure they're applied
+   * to all subsequent requests in a tool call loop. TanStack AI may not
+   * preserve these across iterations.
+   */
+  private persistedModelOptions: Record<string, unknown> | null = null;
 
   constructor(config: ChatCompletionsAdapterConfig, modelId: string) {
     this.config = config;
@@ -337,10 +352,21 @@ export class ChatCompletionsAdapter {
    * Streaming chat completion that yields AG-UI events.
    */
   async *chatStream(options: TextOptions): AsyncIterable<ExtendedStreamChunk> {
+    // Include any pending reasoning_content from a previous tool call turn
+    const reasoningToInclude = this.pendingReasoningContent;
+    this.pendingReasoningContent = null; // Clear after use
+
+    // Store modelOptions from the first request to ensure they're applied consistently
+    // TanStack AI may not preserve these across tool call iterations
+    if (options.modelOptions && !this.persistedModelOptions) {
+      this.persistedModelOptions = options.modelOptions;
+    }
+    const effectiveModelOptions = options.modelOptions ?? this.persistedModelOptions;
+
     const messages = convertToOpenAIMessages(
       options.messages ?? [],
       options.systemPrompts,
-      this.reasoningContentCache,
+      reasoningToInclude,
     );
     const tools = convertToOpenAITools(options.tools);
     const trace =
@@ -394,7 +420,7 @@ export class ChatCompletionsAdapter {
               ...(options.maxTokens !== undefined && {
                 max_tokens: options.maxTokens,
               }),
-              ...options.modelOptions,
+              ...effectiveModelOptions,
             }),
             signal: request.signal,
           }),
@@ -596,11 +622,10 @@ export class ChatCompletionsAdapter {
         } as ExtendedStreamChunk;
       }
 
-      // Cache reasoning_content for tool call continuations (needed for Kimi K2.5 and similar)
+      // Store reasoning_content for tool call continuations (needed for Kimi K2.5 and similar)
+      // This will be included in the next request when TanStack AI continues with tool results
       if (toolCalls.size > 0 && reasoningContent) {
-        const toolCallIds = [...toolCalls.values()].map((tc) => tc.toolCallId).sort();
-        const cacheKey = toolCallIds.join(",");
-        this.reasoningContentCache.set(cacheKey, reasoningContent);
+        this.pendingReasoningContent = reasoningContent;
       }
 
       // Emit RUN_FINISHED with usage (including custom _reasoningTokens field)

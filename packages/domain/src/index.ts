@@ -288,6 +288,10 @@ export type CompleteAttachmentPayload = {
   attachment: Attachment;
 };
 
+export type UpdateAttachmentPayload = {
+  attachment: Attachment;
+};
+
 export type DeleteAttachmentPayload = {
   id: string;
 };
@@ -312,6 +316,7 @@ export type SyncCommandPayloadMap = {
   cancel_assistant_turn: CancelAssistantTurnPayload;
   register_attachment: RegisterAttachmentPayload;
   complete_attachment: CompleteAttachmentPayload;
+  update_attachment: UpdateAttachmentPayload;
   delete_attachment: DeleteAttachmentPayload;
   set_search_mode: SetSearchModePayload;
   reset_storage: ResetStoragePayload;

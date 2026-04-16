@@ -22,6 +22,7 @@ import {
   resetCollections,
   TABLE_TO_COLLECTION,
 } from "./collections";
+import { reconcileDraftState } from "./draft-state";
 import { confirmOp, rollbackOp } from "./actions";
 
 // ---------------------------------------------------------------------------
@@ -385,6 +386,7 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
 
   if (needsSelectionCheck) {
     const { workspaces: ws, threads: ts } = collectWorkspacesAndThreads();
+    reconcileDraftState(ws, ts);
     console.log("[sync] ensureActiveSelection", {
       workspaceCount: ws.length,
       threadCount: ts.length,
