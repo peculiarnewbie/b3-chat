@@ -588,7 +588,7 @@ describe("server helpers", () => {
 
     expect(result.models).toHaveLength(1);
     expect(result.models[0]?.id).toBe("openai/gpt-4.1");
-    expect(result.models[0]?.reasoning).toBe(false);
+    expect(result.models[0]?.reasoning).toBe(true);
     expect(result.models[0]?.toolCall).toBe(true);
     expect(result.models[0]?.interleaved?.field).toBe("reasoning_content");
     expect(result.models[0]?.family).toBe("unknown");
@@ -641,7 +641,7 @@ describe("server helpers", () => {
     });
 
     expect(explained.summary).toContain("thinking mode is incompatible");
-    expect(explained.explanation).toContain("Kimi K2.5 requires hidden reasoning context");
+    expect(explained.explanation).toContain("does attempt to preserve that field now");
   });
 
   it("normalizes provider reasoning incompatibility on the server", () => {

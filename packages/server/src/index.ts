@@ -276,7 +276,11 @@ export function filterModelsCatalog(raw: any, env: AppEnv) {
       id: model.id,
       name: model.name ?? model.id,
       attachment: !!model.attachment || model.modalities?.input?.includes("image"),
-      reasoning: !!model.reasoning,
+      reasoning:
+        !!model.reasoning ||
+        (model.interleaved &&
+          typeof model.interleaved === "object" &&
+          model.interleaved.field === "reasoning_content"),
       toolCall: !!model.tool_call,
       interleaved:
         model.interleaved && typeof model.interleaved === "object"

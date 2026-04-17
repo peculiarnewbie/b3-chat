@@ -688,11 +688,15 @@ export default function Home() {
   const effectiveComposerReasoningLevel = createMemo<ReasoningLevel>(() =>
     selectedModelSupportsReasoning() ? composerReasoningLevel() : "off",
   );
+  const unsupportedInterleavedReasoningField = createMemo(
+    () =>
+      selectedModelInterleavedField() && selectedModelInterleavedField() !== "reasoning_content",
+  );
   const willDisableReasoningForToolTurn = createMemo(
     () =>
       composerSearch() &&
       effectiveComposerReasoningLevel() !== "off" &&
-      Boolean(selectedModelInterleavedField()),
+      Boolean(unsupportedInterleavedReasoningField()),
   );
 
   createEffect(() => {
@@ -2038,7 +2042,9 @@ export default function Home() {
                 <p class="composer-note">
                   Thinking will be disabled for this turn because this model requires interleaved
                   reasoning replay
-                  {selectedModelInterleavedField() ? ` (${selectedModelInterleavedField()})` : ""}
+                  {unsupportedInterleavedReasoningField()
+                    ? ` (${unsupportedInterleavedReasoningField()})`
+                    : ""}
                   across tool calls, and this app does not preserve that field.
                 </p>
               </Show>

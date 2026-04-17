@@ -193,7 +193,7 @@ export function explainAssistantError(input: {
       title: "Response failed",
       summary: "This model's thinking mode is incompatible with tool use in this flow.",
       explanation:
-        "Kimi K2.5 requires hidden reasoning context to be replayed across tool calls. This app does not preserve that field, so the request was rejected after the search tool completed.",
+        "The provider rejected the tool continuation because it said the required hidden reasoning replay field was missing. This app does attempt to preserve that field now, so this usually points to a provider incompatibility or an unsupported response shape.",
       details: facts.rawMessage,
       retryable: false,
       category: "invalid_request",
