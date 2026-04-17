@@ -73,7 +73,6 @@ import {
 } from "../lib/draft-state";
 import { start as startConnection } from "../lib/ws-connection";
 import { init as initSyncAdapter } from "../lib/sync-adapter";
-import { createClientLogger, previewText, serializeError } from "../lib/debug-log";
 
 type SessionPayload = {
   user?: {
@@ -111,8 +110,6 @@ type ParsedTraceSpan = TraceSpan & {
   events: Record<string, unknown>[];
   children: ParsedTraceSpan[];
 };
-
-const logger = createClientLogger("home-route");
 
 const REASONING_OPTIONS: Array<{ value: ReasoningLevel; label: string }> = [
   { value: "off", label: "Off" },
@@ -348,55 +345,19 @@ function getInitialTheme(): Theme {
 }
 
 const fetchSession = async () => {
-  const startedAt = performance.now();
-  logger.log("fetch_session_start");
   const response = await fetch("/api/session");
-  if (response.status === 401) {
-    logger.warn("fetch_session_unauthorized", {
-      status: response.status,
-      durationMs: Math.round(performance.now() - startedAt),
-    });
-    return null;
-  }
+  if (response.status === 401) return null;
   if (!response.ok) {
     const message = await response.text().catch(() => response.statusText);
-    logger.error("fetch_session_failed", {
-      status: response.status,
-      statusText: response.statusText,
-      durationMs: Math.round(performance.now() - startedAt),
-      message,
-    });
     throw new Error(message || "Failed to load session");
   }
-  const payload = (await response.json()) as SessionPayload;
-  logger.log("fetch_session_success", {
-    status: response.status,
-    durationMs: Math.round(performance.now() - startedAt),
-    email: payload.user?.email ?? null,
-  });
-  return payload;
+  return (await response.json()) as SessionPayload;
 };
 
 const fetchModels = async () => {
-  const startedAt = performance.now();
-  logger.log("fetch_models_start");
   const response = await fetch("/api/models");
-  if (!response.ok) {
-    logger.error("fetch_models_failed", {
-      status: response.status,
-      statusText: response.statusText,
-      durationMs: Math.round(performance.now() - startedAt),
-    });
-    throw new Error("Failed to load models");
-  }
-  const payload = (await response.json()) as ModelsPayload;
-  logger.log("fetch_models_success", {
-    status: response.status,
-    durationMs: Math.round(performance.now() - startedAt),
-    modelCount: payload.models.length,
-    modelIds: payload.models.map((model) => model.id),
-  });
-  return payload;
+  if (!response.ok) throw new Error("Failed to load models");
+  return (await response.json()) as ModelsPayload;
 };
 
 export default function Home() {
@@ -405,11 +366,6 @@ export default function Home() {
 
   // Initialize sync layer
   onMount(() => {
-    logger.log("mount", {
-      buildVersion: BUILD_INFO.version,
-      buildLabel: BUILD_INFO.label,
-      href: window.location.href,
-    });
     initSyncAdapter();
     startConnection();
   });
@@ -541,39 +497,11 @@ export default function Home() {
     const thread = selectedConversationThread();
     const workspace = activeWorkspace();
     const draftMode = isDraftViewActive();
-    logger.log("handle_file_select", {
-      fileCount: files?.length ?? 0,
-      threadId: thread?.id ?? null,
-      workspaceId: workspace?.id ?? null,
-      draftMode,
-    });
-    if (!files || !thread || !workspace) {
-      logger.warn("handle_file_select_blocked", {
-        hasFiles: Boolean(files),
-        threadId: thread?.id ?? null,
-        workspaceId: workspace?.id ?? null,
-      });
-      return;
-    }
+    if (!files || !thread || !workspace) return;
     for (const file of Array.from(files)) {
-      if (!isAllowedFile(file)) {
-        logger.warn("file_rejected", {
-          fileName: file.name,
-          mimeType: file.type || "application/octet-stream",
-          sizeBytes: file.size,
-        });
-        continue;
-      }
+      if (!isAllowedFile(file)) continue;
       const localId = createId("local");
       const previewUrl = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined;
-      logger.log("file_queued", {
-        localId,
-        fileName: file.name,
-        mimeType: file.type || "application/octet-stream",
-        sizeBytes: file.size,
-        previewReady: Boolean(previewUrl),
-        threadId: thread.id,
-      });
 
       const draftAttachment = {
         localId,
@@ -597,17 +525,7 @@ export default function Home() {
 
       try {
         const result = await uploadFile(file, thread.id);
-        logger.log("file_upload_success", {
-          localId,
-          attachmentId: result.attachment.id,
-          objectKey: result.attachment.objectKey,
-          threadId: thread.id,
-        });
         if (removedUploadLocalIds.delete(localId)) {
-          logger.warn("file_removed_during_upload", {
-            localId,
-            attachmentId: result.attachment.id,
-          });
           deleteAttachmentAction(result.attachment.id);
           continue;
         }
@@ -633,19 +551,9 @@ export default function Home() {
         }
       } catch (err) {
         if (removedUploadLocalIds.delete(localId)) {
-          logger.warn("file_upload_ignored_after_remove", {
-            localId,
-            ...serializeError(err),
-          });
           continue;
         }
         console.error("Upload failed:", err);
-        logger.error("file_upload_failed", {
-          localId,
-          fileName: file.name,
-          threadId: thread.id,
-          ...serializeError(err),
-        });
         if (draftMode) {
           updateWorkspaceDraft(workspace.id, (draft) => ({
             ...draft,
@@ -670,13 +578,6 @@ export default function Home() {
   const removeAttachment = (localId: string) => {
     const workspace = activeWorkspace();
     const att = composerAttachments().find((attachment) => attachment.localId === localId);
-    logger.log("remove_attachment", {
-      localId,
-      workspaceId: workspace?.id ?? null,
-      attachmentId: att?.attachmentId ?? null,
-      draftMode: isDraftViewActive(),
-      status: att?.status ?? null,
-    });
     if (att?.previewUrl) URL.revokeObjectURL(att.previewUrl);
     if (att?.attachmentId) {
       deleteAttachmentAction(att.attachmentId);
@@ -773,23 +674,6 @@ export default function Home() {
   });
 
   createEffect(() => {
-    const workspace = activeWorkspace();
-    const thread = activeThread();
-    const draft = activeDraft();
-    const conversationThread = selectedConversationThread();
-    logger.log("selection_state", {
-      workspaceId: workspace?.id ?? null,
-      workspaceName: workspace?.name ?? null,
-      activeThreadId: thread?.id ?? null,
-      draftThreadId: draft?.thread.id ?? null,
-      draftView: isDraftViewActive(),
-      conversationThreadId: conversationThread?.id ?? null,
-      conversationHeadMessageId: conversationThread?.headMessageId ?? null,
-      composerSending: composer.sending,
-    });
-  });
-
-  createEffect(() => {
     const modelList = models()?.models ?? [];
     const workspace = activeWorkspace();
     if (!workspace) {
@@ -824,20 +708,6 @@ export default function Home() {
       effectiveComposerReasoningLevel() !== "off" &&
       selectedModelInterleavedField() === "reasoning_content",
   );
-
-  createEffect(() => {
-    const model = selectedModel();
-    logger.log("composer_model_state", {
-      selectedModelId: model?.id ?? null,
-      selectedModelName: model?.name ?? null,
-      supportsReasoning: Boolean(model?.reasoning),
-      interleavedField: selectedModelInterleavedField(),
-      composerReasoningLevel: composerReasoningLevel(),
-      effectiveReasoningLevel: effectiveComposerReasoningLevel(),
-      search: composerSearch(),
-      willDisableReasoningForToolTurn: willDisableReasoningForToolTurn(),
-    });
-  });
 
   createEffect(() => {
     pendingDraftAttachmentCleanupTick();
@@ -2027,7 +1897,6 @@ export default function Home() {
   };
 
   const signIn = async () => {
-    logger.log("sign_in_start");
     await authClient.signIn.social({
       provider: "google",
       callbackURL: "/",
@@ -2035,12 +1904,6 @@ export default function Home() {
   };
 
   const createNewWorkspace = async () => {
-    logger.log("create_new_workspace_click", {
-      nextIndex: workspaces().length + 1,
-      defaultModelId: composerModelId() || models()?.models?.[0]?.id || "auto",
-      defaultReasoningLevel: composerReasoningLevel(),
-      defaultSearchMode: composerSearch(),
-    });
     createWorkspaceAction(`Workspace ${workspaces().length + 1}`, {
       defaultModelId: composerModelId() || models()?.models?.[0]?.id || "auto",
       defaultReasoningLevel: composerReasoningLevel(),
@@ -2050,18 +1913,7 @@ export default function Home() {
 
   const createNewThread = async () => {
     const workspace = activeWorkspace();
-    if (!workspace) {
-      logger.warn("create_new_thread_blocked_no_workspace");
-      return;
-    }
-    logger.log("create_new_thread_click", {
-      workspaceId: workspace.id,
-      workspaceName: workspace.name,
-      defaultModelId:
-        composerModelId() || workspace.defaultModelId || models()?.models?.[0]?.id || "auto",
-      defaultReasoningLevel: composerReasoningLevel(),
-      defaultSearchMode: composerSearch(),
-    });
+    if (!workspace) return;
     ensureWorkspaceDraft({
       workspace,
       modelId: composerModelId() || workspace.defaultModelId || models()?.models?.[0]?.id || "auto",
@@ -2073,7 +1925,6 @@ export default function Home() {
   };
 
   const deleteThread = async (threadId: string) => {
-    logger.log("delete_thread_click", { threadId });
     archiveThreadAction(threadId);
   };
 
@@ -2089,10 +1940,6 @@ export default function Home() {
   const confirmWorkspaceDelete = () => {
     const target = workspaceDeleteTarget();
     if (!target) return;
-    logger.log("confirm_workspace_delete", {
-      workspaceId: target.id,
-      workspaceName: target.name,
-    });
     if (editingWorkspaceId() === target.id) {
       setEditingWorkspaceId(null);
       setEditValue("");
@@ -2113,11 +1960,6 @@ export default function Home() {
     if (!newTitle || newTitle === "") return;
     const row = threadsCollection.get(threadId) as Thread | undefined;
     if (!row || row.title === newTitle) return;
-    logger.log("commit_thread_rename", {
-      threadId,
-      previousTitle: row.title,
-      nextTitle: newTitle,
-    });
     updateThreadAction({ ...row, title: newTitle, updatedAt: nowIso() });
   };
 
@@ -2132,11 +1974,6 @@ export default function Home() {
     if (!newName || newName === "") return;
     const row = workspacesCollection.get(workspaceId) as Workspace | undefined;
     if (!row || row.name === newName) return;
-    logger.log("commit_workspace_rename", {
-      workspaceId,
-      previousName: row.name,
-      nextName: newName,
-    });
     updateWorkspaceAction({ ...row, name: newName, updatedAt: nowIso() });
   };
 
@@ -2145,11 +1982,6 @@ export default function Home() {
     if (!workspace) return;
     const row = workspacesCollection.get(workspace.id) as Workspace | undefined;
     if (!row) return;
-    logger.log("save_system_prompt", {
-      workspaceId: workspace.id,
-      promptLength: systemPromptDraft().length,
-      promptPreview: previewText(systemPromptDraft()),
-    });
     updateWorkspaceAction({
       ...row,
       systemPrompt: systemPromptDraft(),
@@ -2165,10 +1997,6 @@ export default function Home() {
   ) => {
     const workspace = activeWorkspace();
     if (!workspace) return;
-    logger.log("update_workspace_preferences", {
-      workspaceId: workspace.id,
-      changes,
-    });
     updateWorkspaceAction({
       ...workspace,
       ...changes,
@@ -2179,12 +2007,6 @@ export default function Home() {
   const handleModelChange = (modelId: string) => {
     const workspace = activeWorkspace();
     const thread = activeThread();
-    logger.log("handle_model_change", {
-      workspaceId: workspace?.id ?? null,
-      threadId: thread?.id ?? null,
-      modelId,
-      draftView: isDraftViewActive(),
-    });
     if (workspace && isDraftViewActive()) {
       updateWorkspaceDraft(workspace.id, (draft) => ({
         ...draft,
@@ -2203,11 +2025,6 @@ export default function Home() {
 
   const handleSearchChange = (search: boolean) => {
     const workspace = activeWorkspace();
-    logger.log("handle_search_change", {
-      workspaceId: workspace?.id ?? null,
-      search,
-      draftView: isDraftViewActive(),
-    });
     if (workspace && isDraftViewActive()) {
       updateWorkspaceDraft(workspace.id, (draft) => ({
         ...draft,
@@ -2223,12 +2040,6 @@ export default function Home() {
   const handleReasoningChange = (reasoningLevel: ReasoningLevel) => {
     const workspace = activeWorkspace();
     const thread = activeThread();
-    logger.log("handle_reasoning_change", {
-      workspaceId: workspace?.id ?? null,
-      threadId: thread?.id ?? null,
-      reasoningLevel,
-      draftView: isDraftViewActive(),
-    });
     if (workspace && isDraftViewActive()) {
       updateWorkspaceDraft(workspace.id, (draft) => ({
         ...draft,
@@ -2250,42 +2061,8 @@ export default function Home() {
     return thread ? streamingThreadIds().has(thread.id) : false;
   });
 
-  createEffect(() => {
-    const thread = selectedConversationThread();
-    const ids = messageIds();
-    const conversationMessages = ids
-      .map((messageId) => messageById(messageId))
-      .filter((message): message is Message => Boolean(message));
-    logger.log("conversation_state", {
-      threadId: thread?.id ?? null,
-      headMessageId: thread?.headMessageId ?? null,
-      messageCount: conversationMessages.length,
-      pendingCount: conversationMessages.filter((message) =>
-        ["queued", "pending", "streaming"].includes(message.status ?? ""),
-      ).length,
-      failedCount: conversationMessages.filter((message) => message.status === "failed").length,
-      lastMessageStatuses: conversationMessages.slice(-4).map((message) => ({
-        id: message.id,
-        role: message.role,
-        status: message.status,
-        textLength: message.text.length,
-        updatedAt: message.updatedAt,
-      })),
-    });
-  });
-
   const startEditingUserMessage = (msg: Message) => {
-    if (isSelectedThreadBusy()) {
-      logger.warn("start_editing_user_message_blocked_busy", {
-        messageId: msg.id,
-      });
-      return;
-    }
-    logger.log("start_editing_user_message", {
-      messageId: msg.id,
-      threadId: msg.threadId,
-      textPreview: previewText(msg.text),
-    });
+    if (isSelectedThreadBusy()) return;
     setEditingUserMessageId(msg.id);
     setEditingUserMessageText(msg.text);
   };
@@ -2299,30 +2076,12 @@ export default function Home() {
     const thread = selectedConversationThread();
     const text = editingUserMessageText().trim();
     cancelEditingUserMessage();
-    if (!thread || !text || text === msg.text.trim()) {
-      logger.warn("commit_user_message_edit_blocked", {
-        messageId: msg.id,
-        hasThread: Boolean(thread),
-        hasText: Boolean(text),
-        textChanged: text !== msg.text.trim(),
-      });
-      return;
-    }
+    if (!thread || !text || text === msg.text.trim()) return;
     const modelId =
       msg.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto";
     const attachmentIds = userAttachments(msg.id)
       .filter((attachment) => attachment.status === "ready")
       .map((attachment) => attachment.id);
-    logger.log("commit_user_message_edit", {
-      messageId: msg.id,
-      sourceThreadId: msg.threadId,
-      selectedThreadId: thread.id,
-      modelId,
-      reasoningLevel: msg.reasoningLevel ?? "off",
-      search: Boolean(msg.searchEnabled),
-      attachmentCount: attachmentIds.length,
-      textPreview: previewText(text),
-    });
     editUserMessageAction({
       thread,
       sourceMessage: msg,
@@ -2337,25 +2096,9 @@ export default function Home() {
 
   const retryMessage = (msg: Message) => {
     const thread = selectedConversationThread();
-    if (!thread || !msg.text?.trim() || isSelectedThreadBusy()) {
-      logger.warn("retry_message_blocked", {
-        messageId: msg.id,
-        hasThread: Boolean(thread),
-        hasText: Boolean(msg.text?.trim()),
-        busy: isSelectedThreadBusy(),
-      });
-      return;
-    }
+    if (!thread || !msg.text?.trim() || isSelectedThreadBusy()) return;
     const modelId =
       msg.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto";
-    logger.log("retry_message", {
-      messageId: msg.id,
-      threadId: thread.id,
-      modelId,
-      reasoningLevel: msg.reasoningLevel ?? "off",
-      search: Boolean(msg.searchEnabled),
-      textPreview: previewText(msg.text),
-    });
     retryMessageAction({
       thread,
       userMessage: msg,
@@ -2370,16 +2113,11 @@ export default function Home() {
     const thread = selectedConversationThread();
     const workspace = activeWorkspace();
     const draftMode = isDraftViewActive();
-    logger.log("send_message_attempt", {
-      threadId: thread?.id ?? null,
-      workspaceId: workspace?.id ?? null,
-      draftMode,
-      textLength: composerText().trim().length,
-      textPreview: previewText(composerText()),
-      attachmentCount: composerAttachments().length,
-      readyAttachmentCount: composerAttachments().filter(
-        (attachment) => attachment.status === "ready",
-      ).length,
+    console.log("[send] attempt", {
+      activeThread: thread,
+      activeWorkspace: workspace,
+      text: composerText().trim(),
+      attachments: composerAttachments().length,
       sending: composer.sending,
       workspacesCount: workspaces().length,
       threadsCount: threads().length,
@@ -2389,7 +2127,7 @@ export default function Home() {
       (!composerText().trim() && composerAttachments().length === 0) ||
       composer.sending
     ) {
-      logger.warn("send_message_blocked", {
+      console.log("[send] blocked", {
         noThread: !thread,
         noContent: !composerText().trim() && composerAttachments().length === 0,
         alreadySending: composer.sending,
@@ -2404,16 +2142,6 @@ export default function Home() {
       const attachmentIds = composerAttachments()
         .filter((a) => a.status === "ready" && a.attachmentId)
         .map((a) => a.attachmentId!);
-      logger.log("send_message_commit", {
-        threadId: thread.id,
-        workspaceId: workspace?.id ?? null,
-        draftMode,
-        modelId,
-        reasoningLevel: effectiveComposerReasoningLevel(),
-        search: composerSearch(),
-        attachmentIds,
-        textPreview: previewText(text),
-      });
       sendMessageAction({
         thread,
         text,
@@ -2427,10 +2155,6 @@ export default function Home() {
         if (att.previewUrl) URL.revokeObjectURL(att.previewUrl);
       }
       if (draftMode && workspace) {
-        logger.log("send_message_finalize_draft", {
-          workspaceId: workspace.id,
-          threadId: thread.id,
-        });
         finalizeWorkspaceDraft(workspace.id);
         activateWorkspaceThreadView(workspace.id);
         setActiveThreadId(thread.id);
@@ -2438,10 +2162,6 @@ export default function Home() {
         setComposer("text", "");
         setComposer("attachments", []);
       }
-      logger.log("send_message_done", {
-        threadId: thread.id,
-        workspaceId: workspace?.id ?? null,
-      });
     } finally {
       setComposer("sending", false);
     }

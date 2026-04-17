@@ -1,6 +1,5 @@
 import { createSignal } from "solid-js";
 import type { Workspace, Thread } from "@b3-chat/domain";
-import { createClientLogger } from "./debug-log";
 
 // ---------------------------------------------------------------------------
 // Persisted signals
@@ -11,25 +10,13 @@ function readString(key: string, fallback: string): string {
   return localStorage.getItem(key) ?? fallback;
 }
 
-const logger = createClientLogger("ui-state");
-
 function createPersistedSignal(key: string, fallback = "") {
   const [value, rawSet] = createSignal(readString(key, fallback));
-  logger.log("hydrate_signal", {
-    key,
-    value: value(),
-  });
   const set = (next: string) => {
-    const previous = value();
     rawSet(next);
     if (typeof localStorage !== "undefined") {
       localStorage.setItem(key, next);
     }
-    logger.log("set_signal", {
-      key,
-      previous,
-      next,
-    });
   };
   return [value, set] as const;
 }
@@ -62,15 +49,6 @@ export function ensureActiveSelection(workspaces: Workspace[], threads: Thread[]
   );
   const currentThreadId = activeThreadId();
   const nextThread = validThreads.find((t) => t.id === currentThreadId) ?? validThreads[0];
-
-  logger.log("ensure_active_selection", {
-    currentWorkspaceId,
-    nextWorkspaceId: nextWorkspace?.id ?? null,
-    currentThreadId,
-    nextThreadId: nextThread?.id ?? null,
-    workspaceIds: validWorkspaces.map((workspace) => workspace.id),
-    threadIds: validThreads.map((thread) => thread.id),
-  });
 
   if (nextThread && currentThreadId !== nextThread.id) {
     setActiveThreadId(nextThread.id);

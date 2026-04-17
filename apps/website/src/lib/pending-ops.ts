@@ -6,10 +6,8 @@ import {
   type SyncCommandPayloadMap,
   type SyncCommandType,
 } from "@b3-chat/domain";
-import { createClientLogger } from "./debug-log";
 
 const PENDING_OPS_KEY = "b3.pendingOps";
-const logger = createClientLogger("pending-ops");
 
 function readJson<T>(key: string, fallback: T): T {
   if (typeof localStorage === "undefined") return fallback;
@@ -34,11 +32,6 @@ const ops = new Map<string, TrackedOp>(
   ]),
 );
 
-logger.log("hydrate", {
-  opCount: ops.size,
-  opIds: [...ops.keys()],
-});
-
 function persist() {
   if (typeof localStorage === "undefined") return;
   const plain: Record<string, PendingSyncOp> = {};
@@ -51,10 +44,6 @@ function persist() {
     };
   }
   localStorage.setItem(PENDING_OPS_KEY, JSON.stringify(plain));
-  logger.log("persist", {
-    opCount: ops.size,
-    opIds: [...ops.keys()],
-  });
 }
 
 /** Send function, set by ws-connection after init. */
@@ -62,27 +51,10 @@ let sendFn: ((msg: object) => void) | null = null;
 
 export function setSendFn(fn: (msg: object) => void) {
   sendFn = fn;
-  logger.log("set_send_fn", {
-    hasSendFn: true,
-    pendingCount: ops.size,
-  });
 }
 
 function sendOp(op: PendingSyncOp) {
-  if (!sendFn) {
-    logger.warn("send_skipped_no_send_fn", {
-      opId: op.opId,
-      commandType: op.commandType,
-    });
-    return;
-  }
-  logger.log("send", {
-    opId: op.opId,
-    commandType: op.commandType,
-    clientTs: op.clientTs,
-    payloadKeys:
-      op.payload && typeof op.payload === "object" ? Object.keys(op.payload as object) : [],
-  });
+  if (!sendFn) return;
   sendFn({
     type: "command",
     opId: op.opId,
@@ -115,12 +87,6 @@ export function dispatch<T extends SyncCommandType>(
     reject = (reason: string) => rej(new Error(reason));
   });
   ops.set(opId, { ...op, resolve: resolve!, reject: reject! });
-  logger.log("dispatch", {
-    opId,
-    commandType,
-    pendingCount: ops.size,
-    payloadKeys: payload && typeof payload === "object" ? Object.keys(payload as object) : [],
-  });
   persist();
   sendOp(op);
   return { opId, promise };
@@ -129,15 +95,7 @@ export function dispatch<T extends SyncCommandType>(
 /** Called by sync-adapter when server acknowledges an op. */
 export function resolve(opId: string) {
   const op = ops.get(opId);
-  if (!op) {
-    logger.warn("resolve_missing", { opId });
-    return;
-  }
-  logger.log("resolve", {
-    opId,
-    commandType: op.commandType,
-    pendingCountBefore: ops.size,
-  });
+  if (!op) return;
   op.resolve();
   ops.delete(opId);
   persist();
@@ -146,16 +104,7 @@ export function resolve(opId: string) {
 /** Called by sync-adapter when server rejects an op. Returns the opId for rollback. */
 export function reject(opId: string, reason: string) {
   const op = ops.get(opId);
-  if (!op) {
-    logger.warn("reject_missing", { opId, reason });
-    return;
-  }
-  logger.warn("reject", {
-    opId,
-    commandType: op.commandType,
-    reason,
-    pendingCountBefore: ops.size,
-  });
+  if (!op) return;
   op.reject(reason);
   ops.delete(opId);
   persist();
@@ -163,10 +112,6 @@ export function reject(opId: string, reason: string) {
 
 /** Re-send all pending ops after reconnect handshake. */
 export function flushAll() {
-  logger.log("flush_all", {
-    pendingCount: ops.size,
-    opIds: [...ops.keys()],
-  });
   for (const op of ops.values()) {
     sendOp(op);
   }
@@ -174,10 +119,6 @@ export function flushAll() {
 
 /** Clear all pending ops (on non-initial sync_reset). */
 export function clear() {
-  logger.warn("clear", {
-    pendingCount: ops.size,
-    opIds: [...ops.keys()],
-  });
   for (const op of ops.values()) {
     op.reject("sync_reset");
   }
@@ -187,19 +128,11 @@ export function clear() {
 
 /** Test helper: drop pending ops without rejecting in-flight promises. */
 export function resetPendingOps() {
-  logger.warn("reset_pending_ops", {
-    pendingCount: ops.size,
-  });
   ops.clear();
   persist();
 }
 
 /** Get all unacked opIds for the hello handshake. */
 export function unackedOpIds(): string[] {
-  const opIds = [...ops.keys()];
-  logger.log("unacked_op_ids", {
-    pendingCount: opIds.length,
-    opIds,
-  });
-  return opIds;
+  return [...ops.keys()];
 }
