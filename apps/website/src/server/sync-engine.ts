@@ -135,18 +135,30 @@ const SEARCH_TOOL_SYSTEM_PROMPT = [
 
 function getProviderModelOptions(
   modelId: string,
-  _toolCount: number,
+  toolCount: number,
   reasoningLevel: ReasoningLevel,
   modelInterleavedField?: string | null,
 ) {
   const provider = modelId.split("/")[0]?.toLowerCase() ?? "";
-  const effectiveReasoningLevel = reasoningLevel;
-  const overrideReason: string | null = null;
+  let effectiveReasoningLevel = reasoningLevel;
+  let overrideReason: string | null = null;
 
   // Models with interleaved thinking (e.g., Kimi K2.5) use reasoning_content field.
+  //
   // The adapter replays the provider-shaped assistant tool call message across
-  // tool continuations so the upstream can keep reasoning continuity.
+  // tool continuations so the upstream can keep reasoning continuity, but the
+  // upstream can still reject requests when reasoning_content and tools mix —
+  // the replay is best-effort and depends on the upstream accepting our shape.
+  //
+  // To make tool use reliable on reasoning_content models, force thinking off
+  // on any request that includes tools. This sacrifices interleaved reasoning
+  // for tool turns but avoids the "reasoning_content is missing / thinking is
+  // enabled but reasoning_content is missing" class of upstream errors.
   if (modelInterleavedField === "reasoning_content") {
+    if (toolCount > 0 && effectiveReasoningLevel !== "off") {
+      effectiveReasoningLevel = "off";
+      overrideReason = "tool_turn_disables_interleaved_reasoning";
+    }
     return {
       effectiveReasoningLevel,
       overrideReason,
@@ -1228,6 +1240,12 @@ export class SyncEngineDurableObject {
         },
         reportActivity,
         messageId: payload.assistantMessage.id,
+        // If the request ran with reasoning off — either because the user
+        // selected "Off" or because we forced it off on a tool turn for a
+        // reasoning_content model — drop any reasoning tokens the upstream
+        // leaks so the UI doesn't show a Reasoning chip the user never
+        // asked for.
+        suppressReasoningTokens: providerOptions.effectiveReasoningLevel === "off",
         log: syncLog,
         trace: (name, kind, attrs, run) => traceAsync(name, kind, attrs, run),
       };

@@ -660,10 +660,23 @@ export class ChatCompletionsAdapter {
       }
 
       // Store reasoning_content for tool call continuations (needed for Kimi K2.5 and similar)
-      // This will be included in the next request when TanStack AI continues with tool results
+      // This will be included in the next request when TanStack AI continues with tool results.
+      //
+      // If thinking is explicitly disabled in the current modelOptions, we do
+      // NOT cache reasoning_content even if the upstream leaked some —
+      // replaying it on the continuation request would contradict the
+      // thinking=disabled flag and cause the upstream to reject with
+      // "reasoning_content is missing / thinking is enabled but
+      // reasoning_content is missing" in subsequent assistant messages.
+      const thinking = (effectiveModelOptions as { thinking?: { type?: string } } | undefined)
+        ?.thinking;
+      const thinkingDisabled = thinking?.type === "disabled";
       if (toolCalls.size > 0) {
-        if (reasoningContent) {
+        const shouldReplayReasoning = !thinkingDisabled && !!reasoningContent;
+        if (shouldReplayReasoning) {
           this.pendingReasoningContent = reasoningContent;
+        } else {
+          this.pendingReasoningContent = null;
         }
         this.pendingAssistantToolCallMessage = {
           role: "assistant",
@@ -676,7 +689,7 @@ export class ChatCompletionsAdapter {
               arguments: toolCall.args,
             },
           })),
-          ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+          ...(shouldReplayReasoning ? { reasoning_content: reasoningContent } : {}),
         };
       }
 

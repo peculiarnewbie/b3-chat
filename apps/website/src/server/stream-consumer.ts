@@ -59,6 +59,14 @@ export type StreamConsumerDeps = {
   reportActivity: (event: SearchProgressEvent) => Promise<void>;
   /** The assistant message ID being streamed */
   messageId: string;
+  /**
+   * When true, reasoning/thinking tokens observed in the stream are dropped
+   * rather than emitted as `thinking_tokens` parts. Used when the request
+   * ran with reasoning disabled (either via user selection or our own
+   * tool-turn override) to avoid exposing reasoning output that the upstream
+   * produced despite being asked not to.
+   */
+  suppressReasoningTokens?: boolean;
   /** Logging function */
   log?: (message: string, details?: Record<string, unknown>) => void;
   /** Optional tracing wrapper for stream sub-operations */
@@ -104,6 +112,7 @@ export async function consumeAssistantStream(
   deps: StreamConsumerDeps,
 ): Promise<StreamConsumerResult> {
   const { appendServerEvent, broadcast, appendMessagePart, reportActivity, messageId, log } = deps;
+  const suppressReasoningTokens = deps.suppressReasoningTokens === true;
   /**
    * Raw append bypasses the auto-commit wrapper. When our commitPendingText
    * helper emits a `text` part, it must not recurse. If the caller did not
@@ -305,6 +314,17 @@ export async function consumeAssistantStream(
       return;
     }
     lastReportedReasoningTokens = tokens;
+    // When reasoning was disabled for this request, don't surface the
+    // thinking_tokens part to the client even if the upstream sent any.
+    // We still track the count for telemetry (reasoningTokens in the
+    // result) but the UI-facing chip stays hidden.
+    if (suppressReasoningTokens) {
+      log?.("assistant_turn_thinking_tokens_suppressed", {
+        assistantMessageId: messageId,
+        thinkingTokens: tokens,
+      });
+      return;
+    }
     const part = await appendMessagePart("thinking_tokens", {
       text: String(tokens),
       json: JSON.stringify({ tokens }),

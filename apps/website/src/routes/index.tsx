@@ -1,7 +1,9 @@
 import {
   For,
   Index,
+  Match,
   Show,
+  Switch,
   createEffect,
   createMemo,
   createResource,
@@ -1321,155 +1323,182 @@ export default function Home() {
                     </div>
                   </Show>
                   <Index each={assistantTimeline(message().id)}>
-                    {(item) => (
-                      <Show when={item()}>
-                        {(item) => {
-                          const data = item();
-                          if (data.kind === "markdown") {
-                            const cites = () => citationsForMessage(message().id);
-                            return (
-                              <Show
-                                when={data.streaming}
-                                fallback={<Markdown text={data.text} citations={cites()} />}
-                              >
-                                <Markdown text={data.text} streaming citations={cites()} />
-                              </Show>
-                            );
-                          }
-                          if (data.kind === "search") {
-                            const collapsed = () => isChipCollapsed(message().id, data.key);
-                            const resultsData = () => searchResultsForStep(message().id, data.step);
-                            const hasResults = () => (resultsData()?.run.results.length ?? 0) > 0;
-                            const statusLabel = () => {
-                              if (data.status === "failed") return "Search failed";
-                              if (data.status === "active") return "Searching the web";
-                              return "Searched the web";
-                            };
-                            const countLabel = () => {
-                              const count = resultsData()?.run.results.length ?? data.resultCount;
-                              if (!count) return null;
-                              return `${count} result${count === 1 ? "" : "s"}`;
-                            };
-                            return (
-                              <div
-                                classList={{
-                                  "assistant-chip": true,
-                                  "assistant-chip-search": true,
-                                  "is-active": data.status === "active",
-                                  "is-failed": data.status === "failed",
-                                }}
-                              >
-                                <button
-                                  type="button"
-                                  class="assistant-chip-toggle"
-                                  aria-expanded={!collapsed()}
-                                  onClick={() => toggleChipCollapse(message().id, data.key)}
-                                  disabled={!hasResults() && data.status !== "failed"}
-                                >
-                                  <span class="assistant-chip-icon" aria-hidden="true">
-                                    <Show
-                                      when={data.status === "active"}
-                                      fallback={
-                                        <svg
-                                          width="12"
-                                          height="12"
-                                          viewBox="0 0 24 24"
-                                          fill="none"
-                                          stroke="currentColor"
-                                          stroke-width="2"
-                                          stroke-linecap="round"
-                                          stroke-linejoin="round"
+                    {(row) => (
+                      <Show when={row()}>
+                        {(item) => (
+                          <Switch>
+                            <Match
+                              when={
+                                item().kind === "markdown"
+                                  ? (item() as Extract<TimelineItem, { kind: "markdown" }>)
+                                  : null
+                              }
+                            >
+                              {(data) => {
+                                const cites = () => citationsForMessage(message().id);
+                                return (
+                                  <Show
+                                    when={data().streaming}
+                                    fallback={<Markdown text={data().text} citations={cites()} />}
+                                  >
+                                    <Markdown text={data().text} streaming citations={cites()} />
+                                  </Show>
+                                );
+                              }}
+                            </Match>
+                            <Match
+                              when={
+                                item().kind === "search"
+                                  ? (item() as Extract<TimelineItem, { kind: "search" }>)
+                                  : null
+                              }
+                            >
+                              {(data) => {
+                                const collapsed = () => isChipCollapsed(message().id, data().key);
+                                const resultsData = () =>
+                                  searchResultsForStep(message().id, data().step);
+                                const hasResults = () =>
+                                  (resultsData()?.run.results.length ?? 0) > 0;
+                                const statusLabel = () => {
+                                  if (data().status === "failed") return "Search failed";
+                                  if (data().status === "active") return "Searching the web";
+                                  return "Searched the web";
+                                };
+                                const countLabel = () => {
+                                  const count =
+                                    resultsData()?.run.results.length ?? data().resultCount;
+                                  if (!count) return null;
+                                  return `${count} result${count === 1 ? "" : "s"}`;
+                                };
+                                return (
+                                  <div
+                                    classList={{
+                                      "assistant-chip": true,
+                                      "assistant-chip-search": true,
+                                      "is-active": data().status === "active",
+                                      "is-failed": data().status === "failed",
+                                    }}
+                                  >
+                                    <button
+                                      type="button"
+                                      class="assistant-chip-toggle"
+                                      aria-expanded={!collapsed()}
+                                      onClick={() => toggleChipCollapse(message().id, data().key)}
+                                      disabled={!hasResults() && data().status !== "failed"}
+                                    >
+                                      <span class="assistant-chip-icon" aria-hidden="true">
+                                        <Show
+                                          when={data().status === "active"}
+                                          fallback={
+                                            <svg
+                                              width="12"
+                                              height="12"
+                                              viewBox="0 0 24 24"
+                                              fill="none"
+                                              stroke="currentColor"
+                                              stroke-width="2"
+                                              stroke-linecap="round"
+                                              stroke-linejoin="round"
+                                            >
+                                              <circle cx="11" cy="11" r="8" />
+                                              <path d="m21 21-4.3-4.3" />
+                                            </svg>
+                                          }
                                         >
-                                          <circle cx="11" cy="11" r="8" />
-                                          <path d="m21 21-4.3-4.3" />
-                                        </svg>
+                                          <span class="thinking-spinner" />
+                                        </Show>
+                                      </span>
+                                      <span class="assistant-chip-label">{statusLabel()}</span>
+                                      <Show when={data().query}>
+                                        <span class="assistant-chip-detail">"{data().query}"</span>
+                                      </Show>
+                                      <Show when={countLabel()}>
+                                        {(label) => (
+                                          <span class="assistant-chip-meta">{label()}</span>
+                                        )}
+                                      </Show>
+                                      <Show when={hasResults() || data().status === "failed"}>
+                                        <span
+                                          classList={{
+                                            "assistant-chip-chevron": true,
+                                            "is-collapsed": collapsed(),
+                                          }}
+                                          aria-hidden="true"
+                                        >
+                                          ▾
+                                        </span>
+                                      </Show>
+                                    </button>
+                                    <Show when={!collapsed() && hasResults()}>
+                                      <Show when={resultsData()}>
+                                        {(d) => (
+                                          <div class="search-results-inline">
+                                            <Index each={d().run.results}>
+                                              {(result, idx) => (
+                                                <a
+                                                  class="search-result-link"
+                                                  href={result().url}
+                                                  target="_blank"
+                                                  rel="noreferrer"
+                                                >
+                                                  <span class="search-result-num">
+                                                    {d().startIndex + idx}
+                                                  </span>
+                                                  <span class="search-result-title">
+                                                    {result().title}
+                                                  </span>
+                                                  <span class="search-result-domain">
+                                                    {result().domain}
+                                                  </span>
+                                                </a>
+                                              )}
+                                            </Index>
+                                          </div>
+                                        )}
+                                      </Show>
+                                    </Show>
+                                    <Show
+                                      when={
+                                        !collapsed() && data().status === "failed" && data().detail
                                       }
                                     >
-                                      <span class="thinking-spinner" />
+                                      <div class="assistant-chip-error">{data().detail}</div>
                                     </Show>
-                                  </span>
-                                  <span class="assistant-chip-label">{statusLabel()}</span>
-                                  <Show when={data.query}>
-                                    <span class="assistant-chip-detail">"{data.query}"</span>
-                                  </Show>
-                                  <Show when={countLabel()}>
-                                    {(label) => <span class="assistant-chip-meta">{label()}</span>}
-                                  </Show>
-                                  <Show when={hasResults() || data.status === "failed"}>
-                                    <span
-                                      classList={{
-                                        "assistant-chip-chevron": true,
-                                        "is-collapsed": collapsed(),
-                                      }}
-                                      aria-hidden="true"
+                                  </div>
+                                );
+                              }}
+                            </Match>
+                            <Match
+                              when={
+                                item().kind === "thinking"
+                                  ? (item() as Extract<TimelineItem, { kind: "thinking" }>)
+                                  : null
+                              }
+                            >
+                              {(data) => (
+                                <div class="assistant-chip assistant-chip-thinking">
+                                  <span class="assistant-chip-icon" aria-hidden="true">
+                                    <svg
+                                      width="12"
+                                      height="12"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      stroke-width="2"
+                                      stroke-linecap="round"
+                                      stroke-linejoin="round"
                                     >
-                                      ▾
-                                    </span>
-                                  </Show>
-                                </button>
-                                <Show when={!collapsed() && hasResults()}>
-                                  {(() => {
-                                    const d = resultsData()!;
-                                    return (
-                                      <div class="search-results-inline">
-                                        <Index each={d.run.results}>
-                                          {(result, idx) => (
-                                            <a
-                                              class="search-result-link"
-                                              href={result().url}
-                                              target="_blank"
-                                              rel="noreferrer"
-                                            >
-                                              <span class="search-result-num">
-                                                {d.startIndex + idx}
-                                              </span>
-                                              <span class="search-result-title">
-                                                {result().title}
-                                              </span>
-                                              <span class="search-result-domain">
-                                                {result().domain}
-                                              </span>
-                                            </a>
-                                          )}
-                                        </Index>
-                                      </div>
-                                    );
-                                  })()}
-                                </Show>
-                                <Show
-                                  when={!collapsed() && data.status === "failed" && data.detail}
-                                >
-                                  <div class="assistant-chip-error">{data.detail}</div>
-                                </Show>
-                              </div>
-                            );
-                          }
-                          if (data.kind === "thinking") {
-                            return (
-                              <div class="assistant-chip assistant-chip-thinking">
-                                <span class="assistant-chip-icon" aria-hidden="true">
-                                  <svg
-                                    width="12"
-                                    height="12"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    stroke-width="2"
-                                    stroke-linecap="round"
-                                    stroke-linejoin="round"
-                                  >
-                                    <path d="M9.663 17h4.673M12 3v1M5.64 5.64l.71.71M3 12h1M20 12h1M18.36 5.64l-.71.71M12 18a6 6 0 0 0 3.5-10.9A6 6 0 0 0 8.5 7.1 6 6 0 0 0 12 18Z" />
-                                  </svg>
-                                </span>
-                                <span class="assistant-chip-label">Reasoning</span>
-                                <span class="assistant-chip-meta">
-                                  {formatTokenCount(data.tokens)} tokens
-                                </span>
-                              </div>
-                            );
-                          }
-                          if (data.kind === "failure") {
-                            return (
+                                      <path d="M9.663 17h4.673M12 3v1M5.64 5.64l.71.71M3 12h1M20 12h1M18.36 5.64l-.71.71M12 18a6 6 0 0 0 3.5-10.9A6 6 0 0 0 8.5 7.1 6 6 0 0 0 12 18Z" />
+                                    </svg>
+                                  </span>
+                                  <span class="assistant-chip-label">Reasoning</span>
+                                  <span class="assistant-chip-meta">
+                                    {formatTokenCount(data().tokens)} tokens
+                                  </span>
+                                </div>
+                              )}
+                            </Match>
+                            <Match when={item().kind === "failure"}>
                               <div class="assistant-error-card" role="alert">
                                 <div class="assistant-error-title">
                                   {assistantError(message()).title}
@@ -1485,10 +1514,9 @@ export default function Home() {
                                   <pre>{assistantError(message()).details}</pre>
                                 </details>
                               </div>
-                            );
-                          }
-                          return null;
-                        }}
+                            </Match>
+                          </Switch>
+                        )}
                       </Show>
                     )}
                   </Index>
