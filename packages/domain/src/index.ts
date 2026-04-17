@@ -85,7 +85,7 @@ export const MessageRow = Schema.Struct({
   ...OptionalOptimisticRowFields,
 });
 
-export const MessagePartKind = Schema.Literals(["activity", "thinking_tokens"]);
+export const MessagePartKind = Schema.Literals(["activity", "thinking_tokens", "text"]);
 
 export const MessagePartRow = Schema.Struct({
   id: Schema.String,

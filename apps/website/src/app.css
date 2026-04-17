@@ -787,6 +787,130 @@ a {
   color: var(--text-secondary);
 }
 
+/* ── Interleaved (T3-style) assistant message body ────────
+ * Used when a message has `text`-kind message_parts. Activity
+ * chips (search, reasoning) render inline between text chunks
+ * rather than inside a separate "Model activity" card. */
+.assistant-interleaved-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.assistant-chip {
+  display: inline-flex;
+  flex-direction: column;
+  align-self: flex-start;
+  max-width: 100%;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 88%, var(--bg));
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  transition: background 120ms;
+}
+
+.assistant-chip:has(.assistant-chip-toggle[aria-expanded="true"]) {
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--bg));
+}
+
+.assistant-chip.is-active .assistant-chip-label {
+  color: var(--text);
+}
+
+.assistant-chip.is-failed {
+  color: #b94a48;
+  border-color: rgba(185, 74, 72, 0.24);
+}
+
+.assistant-chip-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.assistant-chip-toggle:disabled {
+  cursor: default;
+}
+
+.assistant-chip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+
+.assistant-chip-icon .thinking-spinner {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
+}
+
+.assistant-chip-label {
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.assistant-chip-detail {
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  max-width: 30ch;
+}
+
+.assistant-chip-meta {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.assistant-chip-chevron {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  transition: transform 160ms ease;
+  font-size: 0.7rem;
+  margin-left: 2px;
+}
+
+.assistant-chip-chevron.is-collapsed {
+  transform: rotate(-90deg);
+}
+
+.assistant-chip-search .search-results-inline {
+  margin-top: 0;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.assistant-chip-error {
+  font-size: 0.72rem;
+  color: #b94a48;
+  padding-top: 4px;
+  border-top: 1px solid rgba(185, 74, 72, 0.18);
+}
+
+.assistant-chip-thinking {
+  flex-direction: row;
+  align-items: center;
+}
+
 .assistant-progress-stack {
   display: flex;
   flex-direction: column;

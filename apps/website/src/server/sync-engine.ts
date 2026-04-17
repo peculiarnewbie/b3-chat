@@ -1071,8 +1071,17 @@ export class SyncEngineDurableObject {
     childTraceContext.modelId = modelId;
     let seq = 0;
 
-    const appendMessagePart = async (
-      kind: "activity" | "thinking_tokens",
+    /**
+     * Callback the stream-consumer wires up. When invoked, it flushes any
+     * buffered text deltas and appends a `text` message_part covering the
+     * text accumulated since the last commit. We call this before every
+     * non-text message_part so that text and activities interleave in the
+     * correct seq order (T3-style inline activity chips).
+     */
+    let commitPendingText: () => Promise<void> = async () => {};
+
+    const rawAppendMessagePart = async (
+      kind: "activity" | "thinking_tokens" | "text",
       input: {
         text?: string;
         json?: string | null;
@@ -1088,6 +1097,19 @@ export class SyncEngineDurableObject {
       const event = await this.appendServerEvent(null, "message_part_appended", { row: part });
       this.broadcast(event);
       return part;
+    };
+
+    const appendMessagePart = async (
+      kind: "activity" | "thinking_tokens" | "text",
+      input: {
+        text?: string;
+        json?: string | null;
+      },
+    ) => {
+      if (kind !== "text") {
+        await commitPendingText();
+      }
+      return rawAppendMessagePart(kind, input);
     };
 
     const reportActivity = async (activity: SearchProgressEvent) => {
@@ -1200,6 +1222,10 @@ export class SyncEngineDurableObject {
           this.appendServerEvent(opId, eventType as any, eventPayload as any),
         broadcast: (envelope) => this.broadcast(envelope as any),
         appendMessagePart,
+        rawAppendMessagePart,
+        setCommitPendingText: (fn) => {
+          commitPendingText = fn;
+        },
         reportActivity,
         messageId: payload.assistantMessage.id,
         log: syncLog,

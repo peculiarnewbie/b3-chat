@@ -29,11 +29,32 @@ export type StreamConsumerDeps = {
   }>;
   /** Broadcasts an event to all connected clients */
   broadcast: (envelope: Record<string, unknown>) => void;
-  /** Appends a message part (activity, thinking tokens, etc.) */
+  /**
+   * Appends a message part (activity, thinking tokens, text).
+   *
+   * When `kind !== "text"`, this will first flush any buffered text deltas
+   * and commit a `text` part covering text accumulated since the last
+   * commit — so activity chips interleave with text in seq order.
+   */
   appendMessagePart: (
-    kind: "activity" | "thinking_tokens",
+    kind: "activity" | "thinking_tokens" | "text",
     input: { text?: string; json?: string | null },
   ) => Promise<MessagePart>;
+  /**
+   * Raw append that bypasses the auto-commit wrapper. Used internally by
+   * the stream consumer's own text-commit helper to avoid recursion.
+   */
+  rawAppendMessagePart?: (
+    kind: "activity" | "thinking_tokens" | "text",
+    input: { text?: string; json?: string | null },
+  ) => Promise<MessagePart>;
+  /**
+   * Registers the consumer's commitPendingText function with the caller.
+   * The caller invokes this before appending any non-text message_part so
+   * that buffered text is flushed and committed as a text part first,
+   * preserving seq ordering between text and activities.
+   */
+  setCommitPendingText?: (commit: () => Promise<void>) => void;
   /** Reports activity progress events */
   reportActivity: (event: SearchProgressEvent) => Promise<void>;
   /** The assistant message ID being streamed */
@@ -83,6 +104,13 @@ export async function consumeAssistantStream(
   deps: StreamConsumerDeps,
 ): Promise<StreamConsumerResult> {
   const { appendServerEvent, broadcast, appendMessagePart, reportActivity, messageId, log } = deps;
+  /**
+   * Raw append bypasses the auto-commit wrapper. When our commitPendingText
+   * helper emits a `text` part, it must not recurse. If the caller did not
+   * supply a raw variant, fall back to appendMessagePart (safe because the
+   * wrapper skips commit for `kind === "text"`).
+   */
+  const rawAppendMessagePart = deps.rawAppendMessagePart ?? appendMessagePart;
   const trace =
     deps.trace ??
     ((_: string, __: TraceSpanKind, ___: Record<string, unknown>, run: () => Promise<any>) =>
@@ -92,6 +120,8 @@ export async function consumeAssistantStream(
   let firstTokenAt: number | null = null;
   let accumulated = "";
   let pendingDelta = "";
+  /** Number of accumulated chars already committed as `text` message_parts. */
+  let committedTextLength = 0;
   let chunkCount = 0;
   let deltaCount = 0;
   let promptTokens = 0;
@@ -150,7 +180,32 @@ export async function consumeAssistantStream(
     );
   };
 
+  /**
+   * Commits any text accumulated since the last commit as a `text`
+   * message_part. Called automatically before each non-text part is
+   * appended (via the sync-engine wrapper) so that text and activity
+   * chips interleave in the correct seq order in the UI.
+   *
+   * Uses `rawAppendMessagePart` to skip the auto-commit wrapper and
+   * avoid infinite recursion.
+   */
+  const commitPendingText = async () => {
+    await flushDelta();
+    if (accumulated.length <= committedTextLength) return;
+    const chunk = accumulated.slice(committedTextLength);
+    committedTextLength = accumulated.length;
+    await rawAppendMessagePart("text", { text: chunk });
+  };
+
+  deps.setCommitPendingText?.(commitPendingText);
+
   const completeMessage = async () => {
+    // Commit any remaining text as a final text part before emitting the
+    // terminal `message_completed` event, so the interleaved-layout client
+    // sees all text persisted as parts by the time the message is marked
+    // completed.
+    await commitPendingText();
+
     const durationMs = Date.now() - streamStartedAt;
     const ttftMs = firstTokenAt !== null ? firstTokenAt - streamStartedAt : null;
 
@@ -195,6 +250,9 @@ export async function consumeAssistantStream(
   };
 
   const failMessage = async (normalizedError: ReturnType<typeof normalizeAssistantError>) => {
+    // Commit any partial text so it renders before the failure chip in
+    // the interleaved layout.
+    await commitPendingText();
     return trace(
       "assistant.message.fail",
       "sync",
@@ -259,6 +317,14 @@ export async function consumeAssistantStream(
   };
 
   try {
+    /**
+     * Emit an empty `text` message_part up front so the client can detect
+     * new-format (interleaved) messages immediately, even before the first
+     * token arrives. Pre-existing messages never have this part and fall
+     * through to the legacy grouped-activity layout.
+     */
+    await rawAppendMessagePart("text", { text: "" });
+
     for await (const chunk of stream) {
       chunkCount += 1;
 
@@ -410,6 +476,9 @@ export async function consumeAssistantStream(
 
     // Stream ended without RUN_FINISHED or RUN_ERROR - treat as unexpected completion
     await flushDelta();
+    // Commit any remaining uncommitted text as a final text part so the
+    // interleaved-layout client renders the complete response.
+    await commitPendingText();
     const durationMs = Date.now() - streamStartedAt;
     const ttftMs = firstTokenAt !== null ? firstTokenAt - streamStartedAt : null;
 

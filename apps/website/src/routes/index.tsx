@@ -389,6 +389,13 @@ export default function Home() {
   const [collapsedTraceByMessage, setCollapsedTraceByMessage] = createStore<
     Record<string, boolean>
   >({});
+  /**
+   * Per-chip collapse state for the interleaved-layout message parts
+   * (search chips, thinking chips). Keys are `${messageId}:${chipId}`.
+   * Chips default to collapsed; users can click to expand details like
+   * search results.
+   */
+  const [collapsedChipByKey, setCollapsedChipByKey] = createStore<Record<string, boolean>>({});
   const [composer, setComposer] = createStore({
     text: "",
     modelId: "",
@@ -810,6 +817,179 @@ export default function Home() {
     }
     return byMessage;
   });
+  /** All message parts (any kind) grouped by messageId, sorted by seq. */
+  const messagePartsByMessage = createMemo(() => {
+    const byMessage = new Map<string, MessagePart[]>();
+    for (const row of allMessageParts() as MessagePart[]) {
+      const list = byMessage.get(row.messageId) ?? [];
+      list.push(row);
+      byMessage.set(row.messageId, list);
+    }
+    for (const list of byMessage.values()) {
+      list.sort((a, b) => a.seq - b.seq);
+    }
+    return byMessage;
+  });
+  const messagePartsForMessage = (messageId: string) =>
+    messagePartsByMessage().get(messageId) ?? [];
+  /**
+   * A message uses the new interleaved (T3-style) layout if it has at least
+   * one `text` message_part. The server emits an empty `text` part at the
+   * start of every new streaming turn as a format marker, so this flips
+   * true as soon as streaming begins. Legacy messages (before this
+   * refactor) never have text parts and fall through to the grouped-
+   * activity layout.
+   */
+  const isInterleavedMessage = (messageId: string) =>
+    messagePartsForMessage(messageId).some((part) => part.kind === "text");
+
+  /**
+   * Items that make up the interleaved timeline for an assistant message.
+   * Produced by walking `message_parts` in seq order and grouping adjacent
+   * text chunks / same-step search activities.
+   */
+  type TimelineItem =
+    | { kind: "markdown"; text: string; streaming: boolean; key: string }
+    | {
+        kind: "search";
+        step: number;
+        query: string;
+        status: "active" | "completed" | "failed";
+        resultCount: number;
+        detail: string | null;
+        key: string;
+      }
+    | { kind: "thinking"; tokens: number; key: string }
+    | { kind: "failure"; key: string };
+
+  const assistantTimelineByMessage = createMemo(() => {
+    const byMessage = new Map<string, TimelineItem[]>();
+    const searchRunsByMsg = searchRunsMemo();
+
+    for (const [messageId, parts] of messagePartsByMessage()) {
+      const items: TimelineItem[] = [];
+      let pendingText = "";
+      let pendingTextSeq = -1;
+
+      const flushText = (streaming: boolean) => {
+        if (!pendingText) return;
+        items.push({
+          kind: "markdown",
+          text: pendingText,
+          streaming,
+          key: `text:${pendingTextSeq}`,
+        });
+        pendingText = "";
+        pendingTextSeq = -1;
+      };
+
+      /** Track the latest activity seen for each search step so we can
+       *  collapse (Searching…, Found X results) into a single chip. */
+      const renderedSearchSteps = new Set<number>();
+
+      for (const part of parts) {
+        if (part.kind === "text") {
+          if (pendingTextSeq < 0) pendingTextSeq = part.seq;
+          pendingText += part.text;
+          continue;
+        }
+
+        if (part.kind === "activity") {
+          const activity = parseAssistantActivity(part);
+          if (!activity) continue;
+
+          // Suppress the lifecycle chips in the interleaved layout —
+          // streaming text itself is sufficient feedback.
+          if (activity.label === "Response streaming") continue;
+          if (activity.label === "Response complete") continue;
+
+          if (activity.label === "Response failed" || activity.state === "failed") {
+            flushText(false);
+            items.push({ kind: "failure", key: `failure:${part.seq}` });
+            continue;
+          }
+
+          if (activity.step != null) {
+            if (renderedSearchSteps.has(activity.step)) continue;
+            renderedSearchSteps.add(activity.step);
+            flushText(false);
+            const run = (searchRunsByMsg.get(messageId) ?? []).find(
+              (r) => r.step === activity.step,
+            );
+            items.push({
+              kind: "search",
+              step: activity.step,
+              query: activity.query ?? run?.query ?? "",
+              status: run ? run.status : activity.state,
+              resultCount: run?.resultCount ?? 0,
+              detail: activity.detail,
+              key: `search:${activity.step}`,
+            });
+            continue;
+          }
+
+          // Uncategorized activity without a step — render as a thinking-
+          // like chip so it still shows up, but without extra UI.
+          flushText(false);
+          // Currently nothing else falls through here; skip for cleanliness.
+          continue;
+        }
+
+        if (part.kind === "thinking_tokens") {
+          const tokens = parseThinkingTokens(part);
+          if (tokens == null) continue;
+          flushText(false);
+          items.push({ kind: "thinking", tokens, key: `thinking:${part.seq}` });
+          continue;
+        }
+      }
+
+      // Anything beyond the last committed text part is "live" streaming
+      // tail. We compute how much text has been committed as parts and
+      // show the remainder as a trailing markdown block.
+      const message = messagesById().get(messageId);
+      if (message?.role === "assistant") {
+        const committedLength = parts
+          .filter((part) => part.kind === "text")
+          .reduce((sum, part) => sum + (part.text?.length ?? 0), 0);
+        const fullText = message.text ?? "";
+        const tail = fullText.slice(committedLength);
+        if (tail) {
+          pendingText += tail;
+          if (pendingTextSeq < 0) pendingTextSeq = Number.MAX_SAFE_INTEGER;
+        }
+        const streaming =
+          message.status === "streaming" ||
+          message.status === "pending" ||
+          message.status === "queued";
+        flushText(streaming);
+      } else {
+        flushText(false);
+      }
+
+      byMessage.set(messageId, items);
+    }
+    return byMessage;
+  });
+
+  const assistantTimeline = (messageId: string) =>
+    assistantTimelineByMessage().get(messageId) ?? [];
+  const searchResultsForStep = (messageId: string, step: number) => {
+    const runs = searchRunsMemo().get(messageId) ?? [];
+    const run = runs.find((r) => r.step === step);
+    if (!run) return null;
+    let offset = 0;
+    for (const r of runs) {
+      if (r.step < step) offset += r.results.length;
+    }
+    return { run, startIndex: offset + 1 };
+  };
+  const chipCollapseKey = (messageId: string, key: string) => `${messageId}:${key}`;
+  const isChipCollapsed = (messageId: string, key: string) =>
+    collapsedChipByKey[chipCollapseKey(messageId, key)] ?? true;
+  const toggleChipCollapse = (messageId: string, key: string) => {
+    setCollapsedChipByKey(chipCollapseKey(messageId, key), !isChipCollapsed(messageId, key));
+  };
 
   // Auto-scroll only when user is already near the bottom
   createEffect(() => {
@@ -859,6 +1039,7 @@ export default function Home() {
     !message.text?.trim();
   const hasAssistantPrelude = (message: any) =>
     message.role === "assistant" &&
+    !isInterleavedMessage(message.id) &&
     (activitiesForMessage(message.id).length > 0 ||
       isWaitingForVisibleAnswer(message) ||
       thinkingTokens(message.id) != null ||
@@ -872,10 +1053,18 @@ export default function Home() {
       message.completionTokens != null);
   const hasAssistantAnswerCard = (message: any) =>
     message.role === "assistant" &&
+    !isInterleavedMessage(message.id) &&
     (Boolean(message.text?.trim()) ||
       message.status === "failed" ||
       (searchRunsMemo().get(message.id)?.length ?? 0) > 0 ||
       hasAssistantStats(message));
+  /**
+   * True when an assistant message should render with the new interleaved
+   * T3-style layout (text + inline activity chips in seq order). Controls
+   * which rendering branch runs inside `renderMessage`.
+   */
+  const hasAssistantInterleavedBody = (message: any) =>
+    message.role === "assistant" && isInterleavedMessage(message.id);
   const thinkingLabel = (messageId: string) => {
     const tokens = thinkingTokens(messageId);
     return tokens != null ? `${formatTokenCount(tokens)} thinking tokens` : "Thinking…";
@@ -1098,6 +1287,300 @@ export default function Home() {
                 </div>
               }
             >
+              <Show when={hasAssistantInterleavedBody(message())}>
+                <div class="assistant-interleaved-body">
+                  <Show
+                    when={
+                      isWaitingForVisibleAnswer(message()) &&
+                      assistantTimeline(message().id).length === 0
+                    }
+                  >
+                    <div class="thinking-indicator">
+                      <span class="thinking-spinner" />
+                      <span>Thinking…</span>
+                    </div>
+                  </Show>
+                  <Index each={assistantTimeline(message().id)}>
+                    {(item) => (
+                      <Show when={item()}>
+                        {(item) => {
+                          const data = item();
+                          if (data.kind === "markdown") {
+                            const cites = () => citationsForMessage(message().id);
+                            return (
+                              <Show
+                                when={data.streaming}
+                                fallback={<Markdown text={data.text} citations={cites()} />}
+                              >
+                                <Markdown text={data.text} streaming citations={cites()} />
+                              </Show>
+                            );
+                          }
+                          if (data.kind === "search") {
+                            const collapsed = () => isChipCollapsed(message().id, data.key);
+                            const resultsData = () => searchResultsForStep(message().id, data.step);
+                            const hasResults = () => (resultsData()?.run.results.length ?? 0) > 0;
+                            const statusLabel = () => {
+                              if (data.status === "failed") return "Search failed";
+                              if (data.status === "active") return "Searching the web";
+                              return "Searched the web";
+                            };
+                            const countLabel = () => {
+                              const count = resultsData()?.run.results.length ?? data.resultCount;
+                              if (!count) return null;
+                              return `${count} result${count === 1 ? "" : "s"}`;
+                            };
+                            return (
+                              <div
+                                classList={{
+                                  "assistant-chip": true,
+                                  "assistant-chip-search": true,
+                                  "is-active": data.status === "active",
+                                  "is-failed": data.status === "failed",
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  class="assistant-chip-toggle"
+                                  aria-expanded={!collapsed()}
+                                  onClick={() => toggleChipCollapse(message().id, data.key)}
+                                  disabled={!hasResults() && data.status !== "failed"}
+                                >
+                                  <span class="assistant-chip-icon" aria-hidden="true">
+                                    <Show
+                                      when={data.status === "active"}
+                                      fallback={
+                                        <svg
+                                          width="12"
+                                          height="12"
+                                          viewBox="0 0 24 24"
+                                          fill="none"
+                                          stroke="currentColor"
+                                          stroke-width="2"
+                                          stroke-linecap="round"
+                                          stroke-linejoin="round"
+                                        >
+                                          <circle cx="11" cy="11" r="8" />
+                                          <path d="m21 21-4.3-4.3" />
+                                        </svg>
+                                      }
+                                    >
+                                      <span class="thinking-spinner" />
+                                    </Show>
+                                  </span>
+                                  <span class="assistant-chip-label">{statusLabel()}</span>
+                                  <Show when={data.query}>
+                                    <span class="assistant-chip-detail">"{data.query}"</span>
+                                  </Show>
+                                  <Show when={countLabel()}>
+                                    {(label) => <span class="assistant-chip-meta">{label()}</span>}
+                                  </Show>
+                                  <Show when={hasResults() || data.status === "failed"}>
+                                    <span
+                                      classList={{
+                                        "assistant-chip-chevron": true,
+                                        "is-collapsed": collapsed(),
+                                      }}
+                                      aria-hidden="true"
+                                    >
+                                      ▾
+                                    </span>
+                                  </Show>
+                                </button>
+                                <Show when={!collapsed() && hasResults()}>
+                                  {(() => {
+                                    const d = resultsData()!;
+                                    return (
+                                      <div class="search-results-inline">
+                                        <Index each={d.run.results}>
+                                          {(result, idx) => (
+                                            <a
+                                              class="search-result-link"
+                                              href={result().url}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                            >
+                                              <span class="search-result-num">
+                                                {d.startIndex + idx}
+                                              </span>
+                                              <span class="search-result-title">
+                                                {result().title}
+                                              </span>
+                                              <span class="search-result-domain">
+                                                {result().domain}
+                                              </span>
+                                            </a>
+                                          )}
+                                        </Index>
+                                      </div>
+                                    );
+                                  })()}
+                                </Show>
+                                <Show
+                                  when={!collapsed() && data.status === "failed" && data.detail}
+                                >
+                                  <div class="assistant-chip-error">{data.detail}</div>
+                                </Show>
+                              </div>
+                            );
+                          }
+                          if (data.kind === "thinking") {
+                            return (
+                              <div class="assistant-chip assistant-chip-thinking">
+                                <span class="assistant-chip-icon" aria-hidden="true">
+                                  <svg
+                                    width="12"
+                                    height="12"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    stroke-width="2"
+                                    stroke-linecap="round"
+                                    stroke-linejoin="round"
+                                  >
+                                    <path d="M9.663 17h4.673M12 3v1M5.64 5.64l.71.71M3 12h1M20 12h1M18.36 5.64l-.71.71M12 18a6 6 0 0 0 3.5-10.9A6 6 0 0 0 8.5 7.1 6 6 0 0 0 12 18Z" />
+                                  </svg>
+                                </span>
+                                <span class="assistant-chip-label">Reasoning</span>
+                                <span class="assistant-chip-meta">
+                                  {formatTokenCount(data.tokens)} tokens
+                                </span>
+                              </div>
+                            );
+                          }
+                          if (data.kind === "failure") {
+                            return (
+                              <div class="assistant-error-card" role="alert">
+                                <div class="assistant-error-title">
+                                  {assistantError(message()).title}
+                                </div>
+                                <div class="assistant-error-summary">
+                                  {assistantError(message()).summary}
+                                </div>
+                                <p class="assistant-error-explanation">
+                                  {assistantError(message()).explanation}
+                                </p>
+                                <details class="assistant-error-details">
+                                  <summary>Technical details</summary>
+                                  <pre>{assistantError(message()).details}</pre>
+                                </details>
+                              </div>
+                            );
+                          }
+                          return null;
+                        }}
+                      </Show>
+                    )}
+                  </Index>
+                  <Show when={hasAssistantStats(message())}>
+                    <div class="msg-stats">
+                      <Show when={thinkingTokens(message().id)}>
+                        <span>
+                          {formatTokenCount(thinkingTokens(message().id)!)} thinking tokens
+                        </span>
+                      </Show>
+                      <Show when={getTotalTokens(message()) != null}>
+                        <span>{formatTokenCount(getTotalTokens(message())!)} total tokens</span>
+                      </Show>
+                      <Show when={message().promptTokens != null}>
+                        <span>{formatTokenCount(message().promptTokens!)} prompt</span>
+                      </Show>
+                      <Show when={message().completionTokens != null}>
+                        <span>{formatTokenCount(message().completionTokens!)} output</span>
+                      </Show>
+                      <Show when={message().ttftMs != null}>
+                        <span>TTFT {message().ttftMs}ms</span>
+                      </Show>
+                      <Show when={message().durationMs != null}>
+                        <span>{formatDuration(message().durationMs!)}</span>
+                      </Show>
+                      <Show
+                        when={
+                          message().completionTokens != null &&
+                          message().durationMs != null &&
+                          message().durationMs! > 0
+                        }
+                      >
+                        <span>
+                          {((message().completionTokens! / message().durationMs!) * 1000).toFixed(
+                            1,
+                          )}{" "}
+                          tok/s
+                        </span>
+                      </Show>
+                      <Show when={message().modelId}>
+                        <span class="msg-stats-model">{message().modelId}</span>
+                      </Show>
+                    </div>
+                  </Show>
+                  <Show when={traceRunsForMessage(message().id).length > 0}>
+                    <div class="trace-shell">
+                      <button
+                        type="button"
+                        class="trace-toggle"
+                        aria-expanded={!isTraceCollapsed(message().id)}
+                        aria-controls={`trace-drawer-${message().id}`}
+                        onClick={() => toggleTraceDrawer(message().id)}
+                      >
+                        <span class="trace-toggle-copy">
+                          <span class="trace-toggle-label">Trace</span>
+                          <span class="trace-toggle-meta">
+                            {traceTreesForMessage(message().id)[0]?.run
+                              ? `${formatTraceStatus(traceTreesForMessage(message().id)[0]!.run.status)} • ${shortTraceId(traceTreesForMessage(message().id)[0]!.run.traceId)}`
+                              : "Developer trace"}
+                          </span>
+                        </span>
+                        <span
+                          classList={{
+                            "assistant-progress-toggle-chevron": true,
+                            "is-collapsed": isTraceCollapsed(message().id),
+                          }}
+                          aria-hidden="true"
+                        >
+                          ▾
+                        </span>
+                      </button>
+                      <Show when={!isTraceCollapsed(message().id)}>
+                        <div class="trace-drawer" id={`trace-drawer-${message().id}`}>
+                          <For each={traceTreesForMessage(message().id)}>
+                            {(trace) => (
+                              <div class="trace-run-card">
+                                <div class="trace-run-header">
+                                  <span class="trace-run-id">
+                                    trace {shortTraceId(trace.run.traceId)}
+                                  </span>
+                                  <span class="trace-run-badges">
+                                    <span>{formatTraceStatus(trace.run.status)}</span>
+                                    <Show when={trace.run.modelId}>
+                                      <span>{trace.run.modelId}</span>
+                                    </Show>
+                                    <Show when={trace.attrs.searchEnabled === true}>
+                                      <span>search</span>
+                                    </Show>
+                                    <Show when={trace.run.durationMs != null}>
+                                      <span>{formatDuration(trace.run.durationMs!)}</span>
+                                    </Show>
+                                  </span>
+                                </div>
+                                <Show when={trace.run.errorMessage}>
+                                  <div class="trace-run-error">{trace.run.errorMessage}</div>
+                                </Show>
+                                <Show when={trace.spans.length > 0}>
+                                  <div class="trace-tree">
+                                    <For each={trace.spans}>
+                                      {(span) => <TraceSpanTree span={span} />}
+                                    </For>
+                                  </div>
+                                </Show>
+                              </div>
+                            )}
+                          </For>
+                        </div>
+                      </Show>
+                    </div>
+                  </Show>
+                </div>
+              </Show>
               <Show when={hasAssistantPrelude(message())}>
                 <div class="assistant-progress-shell">
                   <button
