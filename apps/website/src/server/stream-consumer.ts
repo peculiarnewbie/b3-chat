@@ -6,7 +6,7 @@
  * activity reporting, etc.).
  */
 
-import type { ExtendedStreamChunk } from "@b3-chat/server";
+import { REASONING_CONTENT_EVENT, type ExtendedStreamChunk } from "@b3-chat/server";
 import { nowIso, type MessagePart, type TraceSpanKind } from "@b3-chat/domain";
 import type { SearchProgressEvent } from "./search";
 import { normalizeAssistantError } from "./error-normalization";
@@ -37,7 +37,7 @@ export type StreamConsumerDeps = {
    * commit — so activity chips interleave with text in seq order.
    */
   appendMessagePart: (
-    kind: "activity" | "thinking_tokens" | "text",
+    kind: "activity" | "thinking_tokens" | "text" | "reasoning",
     input: { text?: string; json?: string | null },
   ) => Promise<MessagePart>;
   /**
@@ -45,7 +45,7 @@ export type StreamConsumerDeps = {
    * the stream consumer's own text-commit helper to avoid recursion.
    */
   rawAppendMessagePart?: (
-    kind: "activity" | "thinking_tokens" | "text",
+    kind: "activity" | "thinking_tokens" | "text" | "reasoning",
     input: { text?: string; json?: string | null },
   ) => Promise<MessagePart>;
   /**
@@ -131,6 +131,12 @@ export async function consumeAssistantStream(
   let pendingDelta = "";
   /** Number of accumulated chars already committed as `text` message_parts. */
   let committedTextLength = 0;
+  /**
+   * Buffer of reasoning chars yet to be flushed to a `reasoning`
+   * message_part. Batched just like the main text stream so the UI
+   * doesn't get hammered with one part per delta.
+   */
+  let pendingReasoning = "";
   let chunkCount = 0;
   let deltaCount = 0;
   let promptTokens = 0;
@@ -206,9 +212,39 @@ export async function consumeAssistantStream(
     await rawAppendMessagePart("text", { text: chunk });
   };
 
-  deps.setCommitPendingText?.(commitPendingText);
+  /**
+   * Flushes buffered reasoning text as a `reasoning` message_part.
+   * Each call appends a new part; the UI groups consecutive `reasoning`
+   * parts into a single collapsible chip, so the text appears to
+   * stream in live as chunks arrive.
+   *
+   * When `suppressReasoningTokens` is set, reasoning content is
+   * dropped entirely to match the behavior we already use for
+   * `thinking_tokens` counts on reasoning-disabled turns.
+   */
+  const flushPendingReasoning = async () => {
+    if (!pendingReasoning) return;
+    if (suppressReasoningTokens) {
+      pendingReasoning = "";
+      return;
+    }
+    const chunk = pendingReasoning;
+    pendingReasoning = "";
+    await rawAppendMessagePart("reasoning", { text: chunk });
+  };
+
+  deps.setCommitPendingText?.(async () => {
+    // Ensure reasoning is flushed before text so the interleaved
+    // timeline keeps correct seq order when reasoning chunks
+    // precede the next text commit.
+    await flushPendingReasoning();
+    await commitPendingText();
+  });
 
   const completeMessage = async () => {
+    // Commit any remaining reasoning chunk first so the final timeline
+    // shows a closed "Reasoning" chip before the text that followed it.
+    await flushPendingReasoning();
     // Commit any remaining text as a final text part before emitting the
     // terminal `message_completed` event, so the interleaved-layout client
     // sees all text persisted as parts by the time the message is marked
@@ -259,8 +295,9 @@ export async function consumeAssistantStream(
   };
 
   const failMessage = async (normalizedError: ReturnType<typeof normalizeAssistantError>) => {
-    // Commit any partial text so it renders before the failure chip in
-    // the interleaved layout.
+    // Flush partial reasoning + text so the user sees whatever the model
+    // managed to produce before the failure chip renders.
+    await flushPendingReasoning();
     await commitPendingText();
     return trace(
       "assistant.message.fail",
@@ -372,6 +409,13 @@ export async function consumeAssistantStream(
             });
           }
 
+          // A fresh text delta closes any reasoning segment that was
+          // streaming immediately before it: commit the reasoning part
+          // so the timeline order is reasoning → text in seq.
+          if (pendingReasoning) {
+            await flushPendingReasoning();
+          }
+
           // Batch deltas and flush at threshold
           pendingDelta += delta;
           if (pendingDelta.length >= DELTA_FLUSH_THRESHOLD || /\n/.test(pendingDelta)) {
@@ -386,10 +430,51 @@ export async function consumeAssistantStream(
           break;
         }
 
+        case "CUSTOM": {
+          // The AG-UI spec reserves `CUSTOM` for extensions. We use it
+          // to carry reasoning-content deltas from the adapter so the
+          // UI can render a live Reasoning chip. Any other custom
+          // events fall through and are ignored.
+          const customChunk = chunk as { name?: string; value?: unknown };
+          if (customChunk.name !== REASONING_CONTENT_EVENT) break;
+          const value = customChunk.value as { delta?: string } | undefined;
+          const delta = value?.delta;
+          if (!delta) continue;
+          if (suppressReasoningTokens) {
+            // Reasoning is disabled for this turn; drop the chunk
+            // without materializing a message_part.
+            break;
+          }
+          // Count reasoning deltas as TTFT — they're genuine output
+          // from the model and the UI renders them immediately.
+          if (firstTokenAt === null) {
+            firstTokenAt = Date.now();
+          }
+          if (!responseStartedReported) {
+            responseStartedReported = true;
+            await reportActivity({
+              label: "Response streaming",
+              state: "completed",
+            });
+          }
+          // Batch reasoning deltas on the same threshold as text so
+          // the client sees a smooth stream rather than one part per
+          // upstream event. Newlines flush immediately so paragraph
+          // breaks in the reasoning show up promptly.
+          pendingReasoning += delta;
+          if (pendingReasoning.length >= DELTA_FLUSH_THRESHOLD || /\n/.test(pendingReasoning)) {
+            await flushPendingReasoning();
+          }
+          break;
+        }
+
         case "TOOL_CALL_START": {
           toolCallsStarted += 1;
           const toolName = (chunk as { toolName?: string }).toolName;
           if (toolName) toolNamesSeen.add(toolName);
+          // A tool call marks the end of the current reasoning segment:
+          // flush so the "Reasoning" chip closes before the tool chip.
+          await flushPendingReasoning();
           log?.("assistant_turn_tool_call_start", {
             assistantMessageId: messageId,
             toolName: toolName ?? null,
@@ -453,6 +538,9 @@ export async function consumeAssistantStream(
               elapsedMs: Date.now() - streamStartedAt,
             });
             await flushDelta();
+            // Close the reasoning segment before the next iteration so
+            // each tool-calling round renders its own chip.
+            await flushPendingReasoning();
             if (sawReasoningTokens && reasoningTokens !== lastReportedReasoningTokens) {
               await flushThinkingTokens(reasoningTokens);
             }
@@ -496,6 +584,7 @@ export async function consumeAssistantStream(
 
     // Stream ended without RUN_FINISHED or RUN_ERROR - treat as unexpected completion
     await flushDelta();
+    await flushPendingReasoning();
     // Commit any remaining uncommitted text as a final text part so the
     // interleaved-layout client renders the complete response.
     await commitPendingText();

@@ -859,6 +859,18 @@ export default function Home() {
         key: string;
       }
     | { kind: "thinking"; tokens: number; key: string }
+    | {
+        kind: "reasoning";
+        /** Concatenated text across consecutive `reasoning` parts. */
+        text: string;
+        /** True while the model is still streaming reasoning for this
+         *  segment (i.e., the segment has not been closed by a
+         *  subsequent text/tool part and the message is not finished). */
+        streaming: boolean;
+        /** Stable key derived from the first part's seq so the DOM
+         *  node is preserved across streaming updates. */
+        key: string;
+      }
     | { kind: "failure"; key: string };
 
   const assistantTimelineByMessage = createMemo(() => {
@@ -869,6 +881,18 @@ export default function Home() {
       const items: TimelineItem[] = [];
       let pendingText = "";
       let pendingTextSeq = -1;
+      /** Accumulator for a run of consecutive `reasoning` parts. We
+       *  collapse them into a single collapsible chip so the UI shows
+       *  one "Reasoning" pill per segment rather than one per chunk. */
+      let pendingReasoning = "";
+      let pendingReasoningSeq = -1;
+      /** When a message has any real `reasoning` parts, we suppress
+       *  the token-count-only `thinking_tokens` summary chip — the
+       *  text-bearing Reasoning chip already communicates that the
+       *  model thought about the answer. The token count chip remains
+       *  for legacy messages (and providers) that don't surface the
+       *  underlying reasoning text. */
+      const hasReasoningParts = parts.some((part) => part.kind === "reasoning");
 
       const flushText = (streaming: boolean) => {
         if (!pendingText) return;
@@ -882,14 +906,37 @@ export default function Home() {
         pendingTextSeq = -1;
       };
 
+      const flushReasoning = (streaming: boolean) => {
+        if (!pendingReasoning) return;
+        items.push({
+          kind: "reasoning",
+          text: pendingReasoning,
+          streaming,
+          key: `reasoning:${pendingReasoningSeq}`,
+        });
+        pendingReasoning = "";
+        pendingReasoningSeq = -1;
+      };
+
       /** Track the latest activity seen for each search step so we can
        *  collapse (Searching…, Found X results) into a single chip. */
       const renderedSearchSteps = new Set<number>();
 
       for (const part of parts) {
         if (part.kind === "text") {
+          // Text closes any open reasoning segment before it.
+          flushReasoning(false);
           if (pendingTextSeq < 0) pendingTextSeq = part.seq;
           pendingText += part.text;
+          continue;
+        }
+
+        if (part.kind === "reasoning") {
+          // Reasoning closes any open text run before it so the
+          // reasoning chip renders at the correct seq position.
+          flushText(false);
+          if (pendingReasoningSeq < 0) pendingReasoningSeq = part.seq;
+          pendingReasoning += part.text;
           continue;
         }
 
@@ -908,6 +955,7 @@ export default function Home() {
           // emit a "Response failed" activity when a stream ends in error,
           // and the card reads its text from message.errorMessage anyway.
           if (activity.label === "Response failed") {
+            flushReasoning(false);
             flushText(false);
             if (!items.some((item) => item.kind === "failure")) {
               items.push({ kind: "failure", key: `failure:${part.seq}` });
@@ -922,6 +970,7 @@ export default function Home() {
             // the search run row, which reflects the latest state.
             if (renderedSearchSteps.has(activity.step)) continue;
             renderedSearchSteps.add(activity.step);
+            flushReasoning(false);
             flushText(false);
             const run = (searchRunsByMsg.get(messageId) ?? []).find(
               (r) => r.step === activity.step,
@@ -942,6 +991,7 @@ export default function Home() {
           // level failure marker (e.g. budget reached). Dedupe across a
           // message as above.
           if (activity.state === "failed") {
+            flushReasoning(false);
             flushText(false);
             if (!items.some((item) => item.kind === "failure")) {
               items.push({ kind: "failure", key: `failure:${part.seq}` });
@@ -955,8 +1005,12 @@ export default function Home() {
         }
 
         if (part.kind === "thinking_tokens") {
+          // Legacy summary pill: skip when the message already carries
+          // real reasoning text to avoid a duplicate "Reasoning" chip.
+          if (hasReasoningParts) continue;
           const tokens = parseThinkingTokens(part);
           if (tokens == null) continue;
+          flushReasoning(false);
           flushText(false);
           items.push({ kind: "thinking", tokens, key: `thinking:${part.seq}` });
           continue;
@@ -974,6 +1028,9 @@ export default function Home() {
         const fullText = message.text ?? "";
         const tail = fullText.slice(committedLength);
         if (tail) {
+          // Text tail closes an in-flight reasoning segment — the model
+          // has moved from thinking to answering.
+          flushReasoning(false);
           pendingText += tail;
           if (pendingTextSeq < 0) pendingTextSeq = Number.MAX_SAFE_INTEGER;
         }
@@ -981,8 +1038,13 @@ export default function Home() {
           message.status === "streaming" ||
           message.status === "pending" ||
           message.status === "queued";
+        // If reasoning is still open and the message is mid-stream,
+        // leave the chip in its streaming state so the user sees live
+        // updates. Once the status flips to completed/failed it closes.
+        flushReasoning(streaming && !pendingText && !items.some((it) => it.kind === "markdown"));
         flushText(streaming);
       } else {
+        flushReasoning(false);
         flushText(false);
       }
 
@@ -1008,6 +1070,18 @@ export default function Home() {
     collapsedChipByKey[chipCollapseKey(messageId, key)] ?? true;
   const toggleChipCollapse = (messageId: string, key: string) => {
     setCollapsedChipByKey(chipCollapseKey(messageId, key), !isChipCollapsed(messageId, key));
+  };
+  /**
+   * Reasoning chips follow a different default than search chips: while
+   * the model is actively streaming thoughts we auto-expand so the user
+   * can follow along (like t3-chat). Once the user explicitly toggles
+   * the chip we honor that choice forever after, including after
+   * streaming completes.
+   */
+  const isReasoningCollapsed = (messageId: string, key: string, streaming: boolean) => {
+    const explicit = collapsedChipByKey[chipCollapseKey(messageId, key)];
+    if (explicit !== undefined) return explicit;
+    return !streaming;
   };
 
   // Auto-scroll only when user is already near the bottom
@@ -1460,6 +1534,80 @@ export default function Home() {
                                       }
                                     >
                                       <div class="assistant-chip-error">{data().detail}</div>
+                                    </Show>
+                                  </div>
+                                );
+                              }}
+                            </Match>
+                            <Match
+                              when={
+                                item().kind === "reasoning"
+                                  ? (item() as Extract<TimelineItem, { kind: "reasoning" }>)
+                                  : null
+                              }
+                            >
+                              {(data) => {
+                                const collapsed = () =>
+                                  isReasoningCollapsed(message().id, data().key, data().streaming);
+                                return (
+                                  <div
+                                    classList={{
+                                      "assistant-chip": true,
+                                      "assistant-chip-reasoning": true,
+                                      "is-active": data().streaming,
+                                    }}
+                                  >
+                                    <button
+                                      type="button"
+                                      class="assistant-chip-toggle"
+                                      aria-expanded={!collapsed()}
+                                      onClick={() => toggleChipCollapse(message().id, data().key)}
+                                    >
+                                      <span class="assistant-chip-icon" aria-hidden="true">
+                                        <Show
+                                          when={data().streaming}
+                                          fallback={
+                                            <svg
+                                              width="12"
+                                              height="12"
+                                              viewBox="0 0 24 24"
+                                              fill="none"
+                                              stroke="currentColor"
+                                              stroke-width="2"
+                                              stroke-linecap="round"
+                                              stroke-linejoin="round"
+                                            >
+                                              <path d="M12 2a4.5 4.5 0 0 0-4.5 4.5c0 .9.27 1.75.73 2.46A4.5 4.5 0 0 0 8 17.5V19a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-1.5a4.5 4.5 0 0 0-.23-8.54A4.5 4.5 0 0 0 16.5 6.5 4.5 4.5 0 0 0 12 2Z" />
+                                              <path d="M12 2v19" />
+                                              <path d="M9 7h.01" />
+                                              <path d="M15 7h.01" />
+                                            </svg>
+                                          }
+                                        >
+                                          <span class="thinking-spinner" />
+                                        </Show>
+                                      </span>
+                                      <span class="assistant-chip-label">Reasoning</span>
+                                      <span
+                                        classList={{
+                                          "assistant-chip-chevron": true,
+                                          "is-collapsed": collapsed(),
+                                        }}
+                                        aria-hidden="true"
+                                      >
+                                        ▾
+                                      </span>
+                                    </button>
+                                    <Show when={!collapsed()}>
+                                      <div class="assistant-chip-reasoning-text">
+                                        {data().text}
+                                        <Show when={data().streaming}>
+                                          <span
+                                            class="assistant-chip-reasoning-caret"
+                                            aria-hidden="true"
+                                          />
+                                        </Show>
+                                      </div>
                                     </Show>
                                   </div>
                                 );

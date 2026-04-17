@@ -930,6 +930,53 @@ a {
   align-items: center;
 }
 
+/*
+ * Reasoning chip — mirrors the search chip but renders the full
+ * thinking text inline when expanded. While `is-active` (model is
+ * still streaming reasoning), the label gets the same emphasis the
+ * active search label does so the user can tell something live is
+ * happening above the fold.
+ */
+.assistant-chip-reasoning.is-active .assistant-chip-label {
+  color: var(--text);
+}
+
+.assistant-chip-reasoning .assistant-chip-reasoning-text {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+/* Blinking caret shown while reasoning is still streaming so the
+   user can tell more text may arrive. */
+.assistant-chip-reasoning-caret {
+  display: inline-block;
+  width: 2px;
+  height: 0.9em;
+  margin-left: 2px;
+  background: currentColor;
+  vertical-align: text-bottom;
+  animation: reasoning-caret 1s steps(1) infinite;
+}
+
+@keyframes reasoning-caret {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
+}
+
 .assistant-progress-stack {
   display: flex;
   flex-direction: column;

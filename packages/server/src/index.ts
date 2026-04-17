@@ -1,6 +1,7 @@
 export {
   ChatCompletionsAdapter,
   createChatCompletionsAdapter,
+  REASONING_CONTENT_EVENT,
   type ChatCompletionsAdapterConfig,
   type ChatCompletionsUsage,
   type ModelMessage,

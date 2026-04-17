@@ -27,10 +27,22 @@ export type ChatCompletionsUsage = {
   reasoningTokens: number | null;
 };
 
-// Extended StreamChunk with custom metadata for reasoning tokens
+// Extended StreamChunk with custom metadata for reasoning tokens.
+// Reasoning content deltas ride on the AG-UI CUSTOM event with
+// `name === REASONING_CONTENT_EVENT` — see emission/consumption sites.
 export type ExtendedStreamChunk = StreamChunk & {
   _reasoningTokens?: number;
 };
+
+/**
+ * Name used on AG-UI `CUSTOM` events that carry a chunk of the model's
+ * reasoning/thinking output. Emitted by providers that expose
+ * `reasoning_content` on streaming deltas (e.g., OpenAI o-series,
+ * Kimi K2.5, Anthropic via reasoning_content bridge). The stream
+ * consumer batches these and flushes them as `reasoning` message_parts
+ * so the UI can render a live, T3-style Reasoning chip.
+ */
+export const REASONING_CONTENT_EVENT = "reasoning_content" as const;
 
 // Re-export types for consumers
 export type { ModelMessage, ContentPart, StreamChunk };
@@ -539,6 +551,22 @@ export class ChatCompletionsAdapter {
           const reasoningDelta = extractReasoningChunk(choice);
           if (reasoningDelta) {
             reasoningContent += reasoningDelta;
+            // Surface the reasoning chunk to the consumer via the AG-UI
+            // `CUSTOM` event extension point so the UI can render a live
+            // Reasoning chip alongside the main answer. The adapter also
+            // continues accumulating `reasoningContent` locally for
+            // tool-call continuations (Kimi K2.5, see below).
+            yield {
+              type: "CUSTOM",
+              name: REASONING_CONTENT_EVENT,
+              value: {
+                messageId,
+                delta: reasoningDelta,
+              },
+              timestamp: Date.now(),
+              model: this.model,
+              rawEvent: parsed,
+            } as ExtendedStreamChunk;
           }
 
           const toolCallDeltas = Array.isArray(choice?.delta?.tool_calls)

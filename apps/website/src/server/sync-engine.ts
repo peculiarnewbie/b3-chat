@@ -1093,7 +1093,7 @@ export class SyncEngineDurableObject {
     let commitPendingText: () => Promise<void> = async () => {};
 
     const rawAppendMessagePart = async (
-      kind: "activity" | "thinking_tokens" | "text",
+      kind: "activity" | "thinking_tokens" | "text" | "reasoning",
       input: {
         text?: string;
         json?: string | null;
@@ -1112,7 +1112,7 @@ export class SyncEngineDurableObject {
     };
 
     const appendMessagePart = async (
-      kind: "activity" | "thinking_tokens" | "text",
+      kind: "activity" | "thinking_tokens" | "text" | "reasoning",
       input: {
         text?: string;
         json?: string | null;
