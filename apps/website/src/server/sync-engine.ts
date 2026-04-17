@@ -50,6 +50,7 @@ import {
   type AppEnv,
   type ModelMessage,
 } from "@b3-chat/server";
+import { combineStrategies, maxIterations, untilFinishReason } from "@tanstack/ai";
 import {
   createStructuredLogger,
   decodeAppEnv,
@@ -98,8 +99,39 @@ function looksLikeMissingRealtimeAccess(text: string) {
   );
 }
 
-const SEARCH_TOOL_SYSTEM_PROMPT =
-  "You have access to the exa_web_search tool for current or external information. Use it when the answer depends on up-to-date facts, live information, or verification outside the conversation. If the tool is available, do not claim you lack access to current information without trying it when it is relevant.";
+/**
+ * System prompt that governs how models use exa_web_search.
+ *
+ * This is tuned for the failure modes we've observed:
+ *  1. Thinking models re-issuing the same query multiple times. → explicit
+ *     rule about not repeating queries.
+ *  2. Models writing natural-language full-sentence queries that return
+ *     poor Exa results. → explicit keyword-dense style guidance with
+ *     good/bad examples.
+ *  3. Models over-searching (4+ searches for a single question). → explicit
+ *     budget and "stop once you have enough" directive.
+ *  4. Models claiming they can't access real-time info instead of using
+ *     the tool. → explicit "don't refuse without trying".
+ *  5. Models sending tool results verbatim to the user. → unchanged from the
+ *     grounding block's own instructions but reinforced here.
+ */
+const SEARCH_TOOL_SYSTEM_PROMPT = [
+  "You have access to the exa_web_search tool for current or external information.",
+  "Call it whenever the answer depends on facts that may have changed since your training, anything user-specific, recent events, live data, or any claim the user would expect you to verify. Do not refuse by claiming you lack real-time access — try the tool first.",
+  "",
+  "How to write good queries:",
+  "- Keyword-dense, not conversational. Good: `Oscar Piastri 2026 F1 WDC points`. Bad: `Who is currently leading the 2026 Formula 1 Drivers Championship?`.",
+  "- Include concrete entities (names, years, versions, locations). Include the current year for anything time-sensitive.",
+  "- For multi-part questions, issue separate focused searches rather than one combined query.",
+  "",
+  "Budget and loop control:",
+  "- At most a few searches per turn (hard cap: 4). Stop once you have enough to answer.",
+  "- Never repeat an identical or near-identical query — the tool will refuse duplicates. If the first query was weak, reformulate with *different* keywords.",
+  "- If the tool returns `{ ok: false, ... }`, read the `hint` field and follow it. Do not retry the same failed query.",
+  "- After searching, write the final answer. Do not keep searching to be exhaustive.",
+  "",
+  "How to use results: cite inline by source number when relevant. Do not mention the search tool, the query, or that a search happened unless the user asks.",
+].join("\n");
 
 function getProviderModelOptions(
   modelId: string,
@@ -1174,12 +1206,30 @@ export class SyncEngineDurableObject {
         trace: (name, kind, attrs, run) => traceAsync(name, kind, attrs, run),
       };
 
+      // Agent loop strategy:
+      //   - With tools, cap at 5 iterations AND stop immediately if the
+      //     model finishes with "stop", "length", or "content_filter".
+      //     The `untilFinishReason` guard is defensive: TanStack AI
+      //     already stops on non-tool_calls reasons, but combining it
+      //     makes the intent explicit and protects against future changes.
+      //   - Without tools, the loop is a single model pass anyway, but
+      //     a 1-iteration cap keeps behavior predictable and prevents
+      //     accidental continuation if a provider emits tool_calls for
+      //     a tool we didn't send.
+      const agentLoopStrategy = searchTool
+        ? combineStrategies([
+            maxIterations(5),
+            untilFinishReason(["stop", "length", "content_filter"]),
+          ])
+        : maxIterations(1);
+
       // Stream using TanStack AI's chat() function
       // Cast messages to work around strict ConstrainedModelMessage type constraints
       const stream = chat({
         adapter,
         messages: modelMessages as any,
         systemPrompts,
+        agentLoopStrategy,
         ...(modelOptions ? { modelOptions } : {}),
         ...(searchTool ? { tools: [searchTool.tool] } : {}),
       });
@@ -1192,6 +1242,8 @@ export class SyncEngineDurableObject {
       // Log completion metrics
       syncLog("assistant_turn_search_summary", {
         assistantMessageId: payload.assistantMessage.id,
+        toolCallIterations: result.toolCallIterations,
+        toolNamesUsed: result.toolNamesUsed,
         searchRuns: searchRuns.map((run) => ({
           step: run.step,
           query: run.query,
@@ -1202,6 +1254,7 @@ export class SyncEngineDurableObject {
       syncLog("assistant_turn_answer_sanity", {
         assistantMessageId: payload.assistantMessage.id,
         searched: searchRuns.length > 0,
+        toolCallIterations: result.toolCallIterations,
         likelyIgnoredGrounding:
           searchRuns.length > 0 && looksLikeMissingRealtimeAccess(result.text),
         answerPreview: previewText(result.text),
@@ -1211,6 +1264,7 @@ export class SyncEngineDurableObject {
         status: "completed",
         attrs: {
           searchRunCount: searchRuns.length,
+          toolCallIterations: result.toolCallIterations,
           answerPreview: previewText(result.text),
         },
       });

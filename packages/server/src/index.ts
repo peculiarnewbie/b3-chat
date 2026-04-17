@@ -86,6 +86,15 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_EXA_RESULTS = 5;
 const MIN_EXA_RESULTS = 3;
 const MAX_EXA_RESULTS = 8;
+/** Max time for a single Exa API HTTP call. Search hangs are the #1 source of
+ *  stuck tool loops — a tight timeout here keeps the agent loop moving. */
+const EXA_REQUEST_TIMEOUT_MS = 15_000;
+/** Max time for the Exa MCP fallback. Slightly larger because MCP does more work
+ *  (autoprompt + livecrawl fallback). */
+const EXA_MCP_REQUEST_TIMEOUT_MS = 20_000;
+/** One quick retry for transient network errors / 5xx. Never retry on 4xx. */
+const EXA_MAX_ATTEMPTS = 2;
+const EXA_RETRY_BACKOFF_MS = 500;
 const encoder = new TextEncoder();
 
 type ExaSearchResult = {
@@ -93,12 +102,15 @@ type ExaSearchResult = {
   url: string;
   highlights?: string[];
   text?: string;
+  summary?: string | null;
   publishedDate?: string | null;
   highlightScores?: number[];
+  score?: number | null;
 };
 
 type ExaSearchResponse = {
   results?: ExaSearchResult[];
+  autopromptString?: string | null;
 };
 
 type InternalCommandResponse = {
@@ -305,38 +317,202 @@ export function clampExaResults(value: number | null | undefined) {
   return Math.min(MAX_EXA_RESULTS, Math.max(MIN_EXA_RESULTS, Math.round(Number(value))));
 }
 
+/**
+ * Custom error that signals we timed out waiting on Exa.
+ * The tool handler uses this to return a user-friendly failure to the model
+ * instead of a generic "AbortError" that is confusing for both the model
+ * and for downstream error normalization.
+ */
+export class ExaSearchError extends Error {
+  readonly status: number | null;
+  readonly retryable: boolean;
+  readonly reason: "timeout" | "network" | "http" | "empty" | "auth" | "rate_limited";
+  constructor(
+    message: string,
+    init: {
+      status?: number | null;
+      retryable: boolean;
+      reason: "timeout" | "network" | "http" | "empty" | "auth" | "rate_limited";
+    },
+  ) {
+    super(message);
+    this.name = "ExaSearchError";
+    this.status = init.status ?? null;
+    this.retryable = init.retryable;
+    this.reason = init.reason;
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function toExaError(error: unknown, fallbackReason: "timeout" | "network"): ExaSearchError {
+  if (error instanceof ExaSearchError) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+  if (
+    lower.includes("abort") ||
+    lower.includes("timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("deadline")
+  ) {
+    return new ExaSearchError("Exa search timed out", {
+      status: null,
+      retryable: true,
+      reason: "timeout",
+    });
+  }
+  return new ExaSearchError(`Exa network error: ${message.slice(0, 200)}`, {
+    status: null,
+    retryable: true,
+    reason: fallbackReason,
+  });
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new Error(`Request timed out after ${timeoutMs}ms`)),
+    timeoutMs,
+  );
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runExaSearchRequest(
+  apiKey: string,
+  query: string,
+  numResults: number,
+): Promise<ExaSearchResponse> {
+  let lastError: ExaSearchError | null = null;
+  for (let attempt = 1; attempt <= EXA_MAX_ATTEMPTS; attempt++) {
+    try {
+      const response = await fetchWithTimeout(
+        "https://api.exa.ai/search",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-api-key": apiKey,
+          },
+          body: JSON.stringify({
+            query,
+            numResults,
+            // Let Exa rewrite the raw LLM query into something tuned for its
+            // neural index. Without this, Exa receives whatever verbose
+            // natural-language phrasing the model came up with and quality
+            // drops significantly.
+            useAutoprompt: true,
+            // "auto" picks between neural and keyword per-query.
+            type: "auto",
+            contents: {
+              // Highlights give us ranked snippets; text is a safety net.
+              highlights: {
+                numSentences: 3,
+                highlightsPerUrl: 1,
+                query,
+              },
+              // A short LLM-generated summary when available produces
+              // much better grounding than raw text dumps.
+              summary: { query },
+              // Hard cap on the text fallback to keep the context small.
+              text: { maxCharacters: 1200 },
+              livecrawl: "fallback",
+            },
+          }),
+        },
+        EXA_REQUEST_TIMEOUT_MS,
+      );
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => "");
+        const status = response.status;
+        const retryable = status >= 500 || status === 429;
+        const reason: ExaSearchError["reason"] =
+          status === 401 || status === 403 ? "auth" : status === 429 ? "rate_limited" : "http";
+        const err = new ExaSearchError(
+          `Exa search failed: HTTP ${status}${bodyText ? ` — ${bodyText.slice(0, 160)}` : ""}`,
+          { status, retryable, reason },
+        );
+        if (!retryable || attempt === EXA_MAX_ATTEMPTS) throw err;
+        lastError = err;
+        await sleep(EXA_RETRY_BACKOFF_MS * attempt);
+        continue;
+      }
+      const json = (await response.json()) as ExaSearchResponse;
+      return json;
+    } catch (error) {
+      const err = toExaError(error, "network");
+      if (!err.retryable || attempt === EXA_MAX_ATTEMPTS) throw err;
+      lastError = err;
+      await sleep(EXA_RETRY_BACKOFF_MS * attempt);
+    }
+  }
+  throw (
+    lastError ??
+    new ExaSearchError("Exa search failed after retries", {
+      retryable: true,
+      reason: "network",
+    })
+  );
+}
+
+function extractExaSnippet(result: ExaSearchResult): string {
+  const highlight = result.highlights?.[0]?.trim();
+  if (highlight) return highlight;
+  const summary = result.summary?.trim();
+  if (summary) return summary.slice(0, 700);
+  const text = result.text?.trim();
+  if (text) return text.slice(0, 500);
+  return "";
+}
+
+function safeDomain(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
 export async function exaSearch(env: AppEnv, query: string, numResults = DEFAULT_EXA_RESULTS) {
   const apiKey = env.EXA_API_KEY?.trim();
   if (!apiKey) {
-    throw new Error("Exa API key missing");
+    throw new ExaSearchError("Exa API key missing", {
+      status: null,
+      retryable: false,
+      reason: "auth",
+    });
   }
-  const response = await fetch("https://api.exa.ai/search", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-    },
-    body: JSON.stringify({
-      query,
-      numResults: clampExaResults(numResults),
-      contents: {
-        highlights: {
-          maxCharacters: 700,
-        },
-      },
-    }),
-  });
-  if (!response.ok) throw new Error(`Exa search failed: ${response.status}`);
-  const json = (await response.json()) as ExaSearchResponse;
-  return (json.results ?? []).map((result: any) => ({
-    id: createId("src"),
-    title: result.title ?? result.url,
-    url: result.url,
-    snippet: result.highlights?.[0] ?? result.text?.slice(0, 500) ?? "",
-    publishedAt: result.publishedDate ?? null,
-    domain: new URL(result.url).hostname,
-    score: Number(result.highlightScores?.[0] ?? 0),
-  }));
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) {
+    throw new ExaSearchError("Exa search query is empty", {
+      status: null,
+      retryable: false,
+      reason: "empty",
+    });
+  }
+  const clampedResults = clampExaResults(numResults);
+  const json = await runExaSearchRequest(apiKey, trimmedQuery, clampedResults);
+  const results = (json.results ?? [])
+    .filter((result) => typeof result?.url === "string" && result.url)
+    .map((result) => ({
+      id: createId("src"),
+      title: result.title ?? result.url,
+      url: result.url,
+      snippet: extractExaSnippet(result),
+      publishedAt: result.publishedDate ?? null,
+      domain: safeDomain(result.url),
+      score: Number(result.score ?? result.highlightScores?.[0] ?? 0),
+    }));
+  return results;
 }
 
 export function extractChatCompletionText(
@@ -406,32 +582,79 @@ export function parseExaMcpTextResponse(responseText: string) {
 }
 
 export async function exaMcpSearchRawText(query: string, numResults = DEFAULT_EXA_RESULTS) {
-  const response = await fetch("https://mcp.exa.ai/mcp", {
-    method: "POST",
-    headers: {
-      accept: "application/json, text/event-stream",
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: {
-        name: "web_search_exa",
-        arguments: {
-          query,
-          type: "auto",
-          numResults: clampExaResults(numResults),
-          livecrawl: "fallback",
-          contextMaxCharacters: 3500,
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) {
+    throw new ExaSearchError("Exa MCP query is empty", {
+      status: null,
+      retryable: false,
+      reason: "empty",
+    });
+  }
+  let lastError: ExaSearchError | null = null;
+  for (let attempt = 1; attempt <= EXA_MAX_ATTEMPTS; attempt++) {
+    try {
+      const response = await fetchWithTimeout(
+        "https://mcp.exa.ai/mcp",
+        {
+          method: "POST",
+          headers: {
+            accept: "application/json, text/event-stream",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: {
+              name: "web_search_exa",
+              arguments: {
+                query: trimmedQuery,
+                type: "auto",
+                numResults: clampExaResults(numResults),
+                livecrawl: "fallback",
+                contextMaxCharacters: 3500,
+              },
+            },
+          }),
         },
-      },
-    }),
-  });
-  if (!response.ok) throw new Error(`Exa MCP search failed: ${response.status}`);
-  const text = parseExaMcpTextResponse(await response.text());
-  if (!text) throw new Error("Exa MCP search returned no content");
-  return text;
+        EXA_MCP_REQUEST_TIMEOUT_MS,
+      );
+      if (!response.ok) {
+        const status = response.status;
+        const retryable = status >= 500 || status === 429;
+        const err = new ExaSearchError(`Exa MCP search failed: HTTP ${status}`, {
+          status,
+          retryable,
+          reason: status === 429 ? "rate_limited" : "http",
+        });
+        if (!retryable || attempt === EXA_MAX_ATTEMPTS) throw err;
+        lastError = err;
+        await sleep(EXA_RETRY_BACKOFF_MS * attempt);
+        continue;
+      }
+      const text = parseExaMcpTextResponse(await response.text());
+      if (!text) {
+        throw new ExaSearchError("Exa MCP search returned no content", {
+          status: response.status,
+          retryable: false,
+          reason: "empty",
+        });
+      }
+      return text;
+    } catch (error) {
+      const err = toExaError(error, "network");
+      if (!err.retryable || attempt === EXA_MAX_ATTEMPTS) throw err;
+      lastError = err;
+      await sleep(EXA_RETRY_BACKOFF_MS * attempt);
+    }
+  }
+  throw (
+    lastError ??
+    new ExaSearchError("Exa MCP search failed after retries", {
+      retryable: true,
+      reason: "network",
+    })
+  );
 }
 
 export async function completeTextAttachment(env: AppEnv, objectKey: string) {

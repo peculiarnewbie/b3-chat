@@ -66,6 +66,10 @@ export type StreamConsumerResult = {
   success: boolean;
   /** Error message if the stream failed */
   errorMessage?: string;
+  /** Number of tool-call iterations observed in this turn (0 if no tools used) */
+  toolCallIterations: number;
+  /** Tool names actually invoked this turn */
+  toolNamesUsed: string[];
 };
 
 /**
@@ -97,6 +101,19 @@ export async function consumeAssistantStream(
   let sawReasoningTokens = false;
   let lastReportedReasoningTokens: number | null = null;
   let responseStartedReported = false;
+  /**
+   * Count of completed tool-call iterations observed from the adapter.
+   * We bump this on each RUN_FINISHED with finishReason "tool_calls".
+   * This is our primary observability signal for "stuck" agent loops —
+   * if a user reports a hang, the log will show how many iterations ran
+   * and with which tools.
+   */
+  let toolCallIterations = 0;
+  /** Track tool calls started / ended per iteration, to spot adapter-level
+   *  issues (e.g., stream ended without TOOL_CALL_END). */
+  let toolCallsStarted = 0;
+  let toolCallsEnded = 0;
+  const toolNamesSeen = new Set<string>();
 
   const flushDelta = async () => {
     if (!pendingDelta) return;
@@ -150,6 +167,8 @@ export async function consumeAssistantStream(
       chunkCount,
       deltaCount,
       totalChars: accumulated.length,
+      toolCallIterations,
+      toolNamesUsed: [...toolNamesSeen],
       preview: accumulated.replace(/\s+/g, " ").trim().slice(0, 160),
     });
 
@@ -161,6 +180,8 @@ export async function consumeAssistantStream(
       completionTokens: sawUsage ? completionTokens : null,
       reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
       success: true,
+      toolCallIterations,
+      toolNamesUsed: [...toolNamesSeen],
     } satisfies StreamConsumerResult;
   };
 
@@ -188,6 +209,8 @@ export async function consumeAssistantStream(
           assistantMessageId: messageId,
           chunkCount,
           deltaCount,
+          toolCallIterations,
+          toolNamesUsed: [...toolNamesSeen],
           error: normalizedError.errorMessage,
           normalizedErrorCode: normalizedError.errorCode,
           providerName: normalizedError.providerName,
@@ -203,6 +226,8 @@ export async function consumeAssistantStream(
           reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
           success: false,
           errorMessage: normalizedError.errorMessage,
+          toolCallIterations,
+          toolNamesUsed: [...toolNamesSeen],
         } satisfies StreamConsumerResult;
       },
     );
@@ -266,6 +291,31 @@ export async function consumeAssistantStream(
           break;
         }
 
+        case "TOOL_CALL_START": {
+          toolCallsStarted += 1;
+          const toolName = (chunk as { toolName?: string }).toolName;
+          if (toolName) toolNamesSeen.add(toolName);
+          log?.("assistant_turn_tool_call_start", {
+            assistantMessageId: messageId,
+            toolName: toolName ?? null,
+            iteration: toolCallIterations + 1,
+            started: toolCallsStarted,
+          });
+          break;
+        }
+
+        case "TOOL_CALL_END": {
+          toolCallsEnded += 1;
+          const toolName = (chunk as { toolName?: string }).toolName;
+          log?.("assistant_turn_tool_call_end", {
+            assistantMessageId: messageId,
+            toolName: toolName ?? null,
+            iteration: toolCallIterations + 1,
+            ended: toolCallsEnded,
+          });
+          break;
+        }
+
         case "RUN_FINISHED": {
           // Extract usage from the event
           const finishedChunk = chunk as {
@@ -287,6 +337,15 @@ export async function consumeAssistantStream(
           }
 
           if (finishedChunk.finishReason === "tool_calls") {
+            toolCallIterations += 1;
+            log?.("assistant_turn_tool_iteration_finished", {
+              assistantMessageId: messageId,
+              iteration: toolCallIterations,
+              toolNames: [...toolNamesSeen],
+              toolCallsStarted,
+              toolCallsEnded,
+              elapsedMs: Date.now() - streamStartedAt,
+            });
             await flushDelta();
             if (sawReasoningTokens && reasoningTokens !== lastReportedReasoningTokens) {
               await flushThinkingTokens(reasoningTokens);
@@ -301,6 +360,14 @@ export async function consumeAssistantStream(
           if (reasoningTokens != null && reasoningTokens !== lastReportedReasoningTokens) {
             await flushThinkingTokens(reasoningTokens);
           }
+
+          log?.("assistant_turn_run_finished", {
+            assistantMessageId: messageId,
+            finishReason: finishedChunk.finishReason ?? null,
+            toolCallIterations,
+            toolNames: [...toolNamesSeen],
+            elapsedMs: Date.now() - streamStartedAt,
+          });
 
           return completeMessage();
         }
@@ -342,6 +409,16 @@ export async function consumeAssistantStream(
       });
     }
 
+    log?.("assistant_turn_stream_ended_without_finish", {
+      assistantMessageId: messageId,
+      chunkCount,
+      deltaCount,
+      toolCallIterations,
+      toolNamesUsed: [...toolNamesSeen],
+      totalChars: accumulated.length,
+      durationMs,
+    });
+
     return {
       text: accumulated,
       durationMs,
@@ -350,6 +427,8 @@ export async function consumeAssistantStream(
       completionTokens: sawUsage ? completionTokens : null,
       reasoningTokens: sawReasoningTokens ? reasoningTokens : null,
       success: true,
+      toolCallIterations,
+      toolNamesUsed: [...toolNamesSeen],
     };
   } catch (error) {
     const normalizedError = normalizeAssistantError({

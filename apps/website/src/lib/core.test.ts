@@ -14,6 +14,8 @@ import {
   chat,
   clampExaResults,
   createChatCompletionsAdapter,
+  exaSearch,
+  ExaSearchError,
   extractReasoningTokens,
   extractChatCompletionText,
   filterModelsCatalog,
@@ -24,6 +26,7 @@ import {
   parseExaMcpTextResponse,
   verifyUploadToken,
 } from "@b3-chat/server";
+import { createExaSearchTool } from "../server/search";
 import { toolDefinition } from "@tanstack/ai";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { explainAssistantError } from "./assistant-errors";
@@ -899,5 +902,227 @@ describe("server helpers", () => {
     expect(payload?.action).toBe("read_attachment");
     expect(payload?.objectKey).toBe("thd_123/cat.png");
     expect(Number(payload?.expiresAt)).toBeGreaterThan(Date.now());
+  });
+
+  it("sends useAutoprompt and contents options to the Exa API", async () => {
+    const originalFetch = globalThis.fetch;
+    let captured: { url: string; body: Record<string, unknown> } | null = null;
+    globalThis.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      captured = {
+        url: typeof url === "string" ? url : url instanceof URL ? url.href : url.url,
+        body: JSON.parse(typeof init?.body === "string" ? init.body : "{}"),
+      };
+      return new Response(
+        JSON.stringify({
+          results: [
+            {
+              title: "Example",
+              url: "https://example.com",
+              highlights: ["hello world"],
+              publishedDate: "2026-04-10",
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const results = await exaSearch(env as any, "Oscar Piastri 2026 F1 standings", 5);
+      expect(results).toHaveLength(1);
+      expect(results[0].snippet).toBe("hello world");
+      expect(results[0].domain).toBe("example.com");
+      expect(captured).not.toBeNull();
+      expect(captured!.url).toBe("https://api.exa.ai/search");
+      expect(captured!.body.useAutoprompt).toBe(true);
+      expect(captured!.body.type).toBe("auto");
+      expect(captured!.body.numResults).toBe(5);
+      expect(captured!.body.contents).toBeTruthy();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("classifies Exa HTTP failures with retry and reason metadata", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = vi.fn(async () => {
+      calls += 1;
+      return new Response("nope", { status: 429 });
+    }) as typeof fetch;
+
+    try {
+      await expect(exaSearch(env as any, "anything", 5)).rejects.toMatchObject({
+        name: "ExaSearchError",
+        reason: "rate_limited",
+        retryable: true,
+      });
+      // Retries once on 429 before giving up.
+      expect(calls).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("does not retry Exa 4xx non-rate-limited failures", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = vi.fn(async () => {
+      calls += 1;
+      return new Response("bad request", { status: 400 });
+    }) as typeof fetch;
+
+    try {
+      await expect(exaSearch(env as any, "anything", 5)).rejects.toBeInstanceOf(ExaSearchError);
+      expect(calls).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("search tool returns structured grounding on success", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            results: [
+              {
+                title: "F1 Standings",
+                url: "https://f1.example.com/standings",
+                highlights: ["Piastri leads with 89 points"],
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    ) as typeof fetch;
+
+    try {
+      const { tool, state } = createExaSearchTool({
+        env: env as any,
+        assistantMessageId: "msg_1",
+      });
+      const result = (await (tool as any).execute({
+        query: "Piastri 2026 F1 WDC standings",
+      })) as Record<string, unknown>;
+
+      expect(result.ok).toBe(true);
+      expect(result.resultCount).toBe(1);
+      expect(String(result.context)).toContain("Tool: exa_web_search");
+      expect(String(result.context)).toContain("Piastri leads with 89 points");
+      expect(state.searchRuns).toHaveLength(1);
+      expect(state.searchRuns[0]?.status).toBe("completed");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("search tool refuses duplicate queries instead of re-fetching", async () => {
+    const originalFetch = globalThis.fetch;
+    let fetchCount = 0;
+    globalThis.fetch = vi.fn(async () => {
+      fetchCount += 1;
+      return new Response(
+        JSON.stringify({
+          results: [{ title: "x", url: "https://x.example.com", highlights: ["result"] }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const { tool } = createExaSearchTool({
+        env: env as any,
+        assistantMessageId: "msg_1",
+      });
+      const first = (await (tool as any).execute({
+        query: "Piastri 2026 F1 standings",
+      })) as any;
+      expect(first.ok).toBe(true);
+      // Near-duplicate: different whitespace / punctuation / case.
+      const second = (await (tool as any).execute({
+        query: "  PIASTRI 2026 f1 standings!  ",
+      })) as any;
+      expect(second.ok).toBe(false);
+      expect(second.reason).toBe("duplicate_query");
+      expect(fetchCount).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("search tool enforces the per-turn budget", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            results: [{ title: "t", url: "https://example.com", highlights: ["s"] }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    ) as typeof fetch;
+
+    try {
+      const { tool, state } = createExaSearchTool({
+        env: env as any,
+        assistantMessageId: "msg_budget",
+      });
+      // Issue 4 distinct queries — this should exactly fill the budget.
+      for (let i = 0; i < 4; i++) {
+        const ok = (await (tool as any).execute({ query: `alpha query ${i}` })) as any;
+        expect(ok.ok).toBe(true);
+      }
+      expect(state.searchRuns).toHaveLength(4);
+      // 5th must be rejected with max_searches_reached.
+      const rejected = (await (tool as any).execute({ query: "alpha query 5" })) as any;
+      expect(rejected.ok).toBe(false);
+      expect(rejected.reason).toBe("max_searches_reached");
+      // Budget rejection does NOT add a search run.
+      expect(state.searchRuns).toHaveLength(4);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("search tool returns a structured failure instead of throwing on Exa errors", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(
+      async () => new Response("upstream fail", { status: 500 }),
+    ) as typeof fetch;
+
+    try {
+      const { tool, state } = createExaSearchTool({
+        env: env as any,
+        assistantMessageId: "msg_err",
+      });
+      const result = (await (tool as any).execute({
+        query: "whatever query terms",
+      })) as any;
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("exa_http");
+      expect(typeof result.hint).toBe("string");
+      expect(result.hint.length).toBeGreaterThan(0);
+      // Records the failed run for debugging.
+      expect(state.searchRuns).toHaveLength(1);
+      expect(state.searchRuns[0]?.status).toBe("failed");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("search tool rejects empty and too-short queries", async () => {
+    const { tool } = createExaSearchTool({
+      env: env as any,
+      assistantMessageId: "msg_short",
+    });
+    const empty = (await (tool as any).execute({ query: "" })) as any;
+    expect(empty.ok).toBe(false);
+    expect(empty.reason).toBe("empty_query");
+
+    const short = (await (tool as any).execute({ query: "a" })) as any;
+    expect(short.ok).toBe(false);
+    expect(short.reason).toBe("query_too_short");
   });
 });
