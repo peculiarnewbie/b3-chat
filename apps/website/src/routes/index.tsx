@@ -650,12 +650,17 @@ export default function Home() {
 
   createEffect(() => {
     const workspace = activeWorkspace();
+    const thread = activeThread();
     if (!workspace) return;
     if (getWorkspaceConversationView(workspace.id) === "draft" && getWorkspaceDraft(workspace.id)) {
       return;
     }
-    setComposer("modelId", workspace.defaultModelId);
-    setComposer("reasoningLevel", workspace.defaultReasoningLevel ?? "off");
+    // Use thread-level preferences if set, otherwise fall back to workspace defaults
+    setComposer("modelId", thread?.modelId ?? workspace.defaultModelId);
+    setComposer(
+      "reasoningLevel",
+      thread?.reasoningLevel ?? workspace.defaultReasoningLevel ?? "off",
+    );
     setComposer("search", workspace.defaultSearchMode);
   });
 
@@ -1474,6 +1479,7 @@ export default function Home() {
 
   const handleModelChange = (modelId: string) => {
     const workspace = activeWorkspace();
+    const thread = activeThread();
     if (workspace && isDraftViewActive()) {
       updateWorkspaceDraft(workspace.id, (draft) => ({
         ...draft,
@@ -1482,6 +1488,10 @@ export default function Home() {
       }));
     } else {
       setComposer("modelId", modelId);
+      // Save to current thread for per-thread persistence
+      if (thread) {
+        updateThreadAction({ ...thread, modelId, updatedAt: nowIso() });
+      }
     }
     updateWorkspacePreferences({ defaultModelId: modelId });
   };
@@ -1502,6 +1512,7 @@ export default function Home() {
 
   const handleReasoningChange = (reasoningLevel: ReasoningLevel) => {
     const workspace = activeWorkspace();
+    const thread = activeThread();
     if (workspace && isDraftViewActive()) {
       updateWorkspaceDraft(workspace.id, (draft) => ({
         ...draft,
@@ -1510,6 +1521,10 @@ export default function Home() {
       }));
     } else {
       setComposer("reasoningLevel", reasoningLevel);
+      // Save to current thread for per-thread persistence
+      if (thread) {
+        updateThreadAction({ ...thread, reasoningLevel, updatedAt: nowIso() });
+      }
     }
     updateWorkspacePreferences({ defaultReasoningLevel: reasoningLevel });
   };

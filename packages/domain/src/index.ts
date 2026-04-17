@@ -45,6 +45,8 @@ export const ThreadRow = Schema.Struct({
   title: Schema.String,
   pinned: Schema.Boolean,
   headMessageId: NullableString,
+  modelId: NullableString,
+  reasoningLevel: Schema.NullOr(ReasoningLevel),
   createdAt: Schema.String,
   updatedAt: Schema.String,
   lastMessageAt: Schema.String,
@@ -537,7 +539,12 @@ export function createWorkspace(input: {
   });
 }
 
-export function createThread(input: { workspaceId: string; title?: string }) {
+export function createThread(input: {
+  workspaceId: string;
+  title?: string;
+  modelId?: string | null;
+  reasoningLevel?: ReasoningLevel | null;
+}) {
   const now = nowIso();
   return decodeThreadRow({
     id: createId("thd"),
@@ -545,6 +552,8 @@ export function createThread(input: { workspaceId: string; title?: string }) {
     title: input.title ?? "New Chat",
     pinned: false,
     headMessageId: null,
+    modelId: input.modelId ?? null,
+    reasoningLevel: input.reasoningLevel ?? null,
     createdAt: now,
     updatedAt: now,
     lastMessageAt: now,
