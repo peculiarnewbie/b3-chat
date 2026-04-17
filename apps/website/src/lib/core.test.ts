@@ -1125,4 +1125,67 @@ describe("server helpers", () => {
     expect(short.ok).toBe(false);
     expect(short.reason).toBe("query_too_short");
   });
+
+  it("classifies Exa aborts/timeouts as a retryable timeout reason", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    // fetchWithTimeout wraps fetch with an AbortController; simulate the
+    // post-abort rejection shape (Error with "timed out" in the message).
+    globalThis.fetch = vi.fn(async () => {
+      calls += 1;
+      throw new Error("Request timed out after 15000ms");
+    }) as typeof fetch;
+
+    try {
+      await expect(exaSearch(env as any, "anything", 5)).rejects.toMatchObject({
+        name: "ExaSearchError",
+        reason: "timeout",
+        retryable: true,
+      });
+      // Timeouts are retryable, so the retry loop should run to EXA_MAX_ATTEMPTS (2).
+      expect(calls).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("search tool falls back to the Exa MCP endpoint when EXA_API_KEY is unset", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchedUrls: string[] = [];
+    globalThis.fetch = vi.fn(async (url: RequestInfo | URL) => {
+      const href = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      fetchedUrls.push(href);
+      // MCP returns text/event-stream with a JSON-RPC "tools/call" result payload.
+      const body = [
+        "event: message",
+        'data: {"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"Source 1\\nhttps://mcp.example.com/hit\\nMCP snippet content"}]}}',
+        "",
+      ].join("\n");
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const envNoKey = { ...env, EXA_API_KEY: "" };
+      const { tool, state } = createExaSearchTool({
+        env: envNoKey as any,
+        assistantMessageId: "msg_mcp",
+      });
+      const result = (await (tool as any).execute({
+        query: "mcp fallback query",
+      })) as any;
+
+      expect(result.ok).toBe(true);
+      expect(fetchedUrls.some((u) => u.includes("mcp.exa.ai"))).toBe(true);
+      expect(fetchedUrls.every((u) => !u.includes("api.exa.ai/search"))).toBe(true);
+      expect(String(result.context)).toContain("https://mcp.example.com/hit");
+      expect(String(result.context)).toContain("MCP snippet content");
+      expect(state.searchRuns).toHaveLength(1);
+      expect(state.searchRuns[0]?.status).toBe("completed");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

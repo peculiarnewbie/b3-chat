@@ -110,9 +110,18 @@ export async function consumeAssistantStream(
    */
   let toolCallIterations = 0;
   /** Track tool calls started / ended per iteration, to spot adapter-level
-   *  issues (e.g., stream ended without TOOL_CALL_END). */
+   *  issues (e.g., stream ended without TOOL_CALL_END).
+   *
+   *  TanStack AI emits TOOL_CALL_END *twice* per logical tool call:
+   *  - Once by the adapter when the model finishes emitting args
+   *    (shape: { toolCallId, toolName, input? } — no `result` field).
+   *  - Once by the engine after local tool execution during the continuation
+   *    pass (shape: { toolCallId, toolName, result } — no `input` field).
+   *  We count these separately so the log ratio (started : emissionEnded)
+   *  should stay 1:1 while resultEnded tracks actual execution. */
   let toolCallsStarted = 0;
-  let toolCallsEnded = 0;
+  let toolCallEmissionsEnded = 0;
+  let toolCallResultsEnded = 0;
   const toolNamesSeen = new Set<string>();
 
   const flushDelta = async () => {
@@ -305,13 +314,23 @@ export async function consumeAssistantStream(
         }
 
         case "TOOL_CALL_END": {
-          toolCallsEnded += 1;
-          const toolName = (chunk as { toolName?: string }).toolName;
+          const endChunk = chunk as { toolName?: string; result?: unknown };
+          // Distinguish adapter-emitted (args done) vs engine-emitted (result available).
+          // The engine's TOOL_CALL_END includes a `result` field, the adapter's does not.
+          const hasResult = "result" in endChunk && endChunk.result !== undefined;
+          const phase: "emission" | "result" = hasResult ? "result" : "emission";
+          if (phase === "emission") {
+            toolCallEmissionsEnded += 1;
+          } else {
+            toolCallResultsEnded += 1;
+          }
           log?.("assistant_turn_tool_call_end", {
             assistantMessageId: messageId,
-            toolName: toolName ?? null,
+            toolName: endChunk.toolName ?? null,
             iteration: toolCallIterations + 1,
-            ended: toolCallsEnded,
+            phase,
+            emissionsEnded: toolCallEmissionsEnded,
+            resultsEnded: toolCallResultsEnded,
           });
           break;
         }
@@ -343,7 +362,8 @@ export async function consumeAssistantStream(
               iteration: toolCallIterations,
               toolNames: [...toolNamesSeen],
               toolCallsStarted,
-              toolCallsEnded,
+              toolCallEmissionsEnded,
+              toolCallResultsEnded,
               elapsedMs: Date.now() - streamStartedAt,
             });
             await flushDelta();
