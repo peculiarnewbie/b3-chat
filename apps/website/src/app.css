@@ -414,6 +414,25 @@ a {
   border-color: #b33329;
 }
 
+.btn-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  background: var(--panel-strong);
+  border-color: var(--line);
+}
+
+.btn-stop:hover {
+  background: var(--panel);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn-stop svg {
+  flex: none;
+}
+
 /* ── Modal ────────────────────────────────────────── */
 
 .modal-backdrop {

@@ -47,6 +47,7 @@ import {
   archiveWorkspaceAction,
   updateThreadAction,
   updateWorkspaceAction,
+  cancelAssistantTurnAction,
   deleteAttachmentAction,
   editUserMessageAction,
   retryMessageAction,
@@ -2061,6 +2062,29 @@ export default function Home() {
     return thread ? streamingThreadIds().has(thread.id) : false;
   });
 
+  /**
+   * The assistant message currently streaming in the selected thread, if any.
+   * Used to target the Stop button at the right message id.
+   */
+  const streamingAssistantMessageId = createMemo(() => {
+    const thread = selectedConversationThread();
+    if (!thread) return null;
+    for (const id of messageIds()) {
+      const msg = messageById(id);
+      if (!msg || msg.role !== "assistant") continue;
+      if (msg.status === "streaming" || msg.status === "pending" || msg.status === "queued") {
+        return msg.id;
+      }
+    }
+    return null;
+  });
+
+  const cancelActiveResponse = () => {
+    const messageId = streamingAssistantMessageId();
+    if (!messageId) return;
+    cancelAssistantTurnAction(messageId);
+  };
+
   const startEditingUserMessage = (msg: Message) => {
     if (isSelectedThreadBusy()) return;
     setEditingUserMessageId(msg.id);
@@ -2572,16 +2596,43 @@ export default function Home() {
                   Search
                 </label>
                 <span class="kbd-hint">Enter to send</span>
-                <button
-                  class="btn btn-primary"
-                  disabled={
-                    composer.sending ||
-                    composerAttachments().some((attachment) => attachment.status === "uploading")
+                <Show
+                  when={isSelectedThreadBusy() && streamingAssistantMessageId()}
+                  fallback={
+                    <button
+                      class="btn btn-primary"
+                      disabled={
+                        composer.sending ||
+                        composerAttachments().some(
+                          (attachment) => attachment.status === "uploading",
+                        )
+                      }
+                      onClick={sendMessage}
+                    >
+                      {composer.sending ? "Sending…" : "Send"}
+                    </button>
                   }
-                  onClick={sendMessage}
                 >
-                  {composer.sending ? "Sending…" : "Send"}
-                </button>
+                  <button
+                    type="button"
+                    class="btn btn-stop"
+                    aria-label="Stop response"
+                    title="Stop response"
+                    onClick={cancelActiveResponse}
+                  >
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="currentColor"
+                      stroke="none"
+                      aria-hidden="true"
+                    >
+                      <rect x="6" y="6" width="12" height="12" rx="2" />
+                    </svg>
+                    Stop
+                  </button>
+                </Show>
               </div>
               <Show when={willDisableReasoningForToolTurn()}>
                 <p class="composer-note">

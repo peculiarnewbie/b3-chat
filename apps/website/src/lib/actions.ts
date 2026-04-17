@@ -8,6 +8,7 @@ import {
   summarizeThreadTitle,
   toWire,
   type Attachment,
+  type CancelAssistantTurnPayload,
   type CreateUserMessagePayload,
   type EditUserMessagePayload,
   type Message,
@@ -456,6 +457,16 @@ export function editUserMessageAction(input: {
     } satisfies EditUserMessagePayload,
     { opId },
   );
+}
+
+/**
+ * Cancel an in-flight assistant response. The server marks the message
+ * `failed` with errorCode "cancelled", which releases the thread's "busy"
+ * state client-side and lets the user regain control immediately.
+ */
+export function cancelAssistantTurnAction(messageId: string) {
+  const opId = createId("op");
+  dispatch("cancel_assistant_turn", { messageId } satisfies CancelAssistantTurnPayload, { opId });
 }
 
 export function deleteAttachmentAction(attachmentId: string) {
