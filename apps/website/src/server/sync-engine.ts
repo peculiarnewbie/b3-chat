@@ -101,19 +101,25 @@ function looksLikeMissingRealtimeAccess(text: string) {
 const SEARCH_TOOL_SYSTEM_PROMPT =
   "You have access to the exa_web_search tool for current or external information. Use it when the answer depends on up-to-date facts, live information, or verification outside the conversation. If the tool is available, do not claim you lack access to current information without trying it when it is relevant.";
 
-function getProviderModelOptions(
+export function getProviderModelOptions(
   modelId: string,
-  _toolCount: number,
+  toolCount: number,
   reasoningLevel: ReasoningLevel,
   modelInterleavedField?: string | null,
 ) {
   const provider = modelId.split("/")[0]?.toLowerCase() ?? "";
-  const effectiveReasoningLevel = reasoningLevel;
-  const overrideReason: string | null = null;
+  let effectiveReasoningLevel = reasoningLevel;
+  let overrideReason: string | null = null;
 
-  // Models with interleaved thinking (e.g., Kimi K2.5) use reasoning_content field.
-  // The adapter now properly caches and replays reasoning_content across tool calls.
+  // Some providers require interleaved reasoning replay across tool turns, but the
+  // upstream proxy path may not expose the full reasoning payload reliably enough
+  // for continuation. Disable thinking for tool-enabled turns to avoid hard 400s.
   if (modelInterleavedField === "reasoning_content") {
+    if (toolCount > 0 && effectiveReasoningLevel !== "off") {
+      effectiveReasoningLevel = "off";
+      overrideReason = "tool_turn_disables_interleaved_reasoning";
+    }
+
     return {
       effectiveReasoningLevel,
       overrideReason,

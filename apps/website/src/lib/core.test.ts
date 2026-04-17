@@ -50,6 +50,7 @@ import {
 import { resetPendingOps } from "./pending-ops";
 import { processEnvelopes } from "./sync-adapter";
 import { normalizeAssistantError } from "../server/error-normalization";
+import { getProviderModelOptions } from "../server/sync-engine";
 
 beforeEach(() => {
   resetCollections();
@@ -865,6 +866,32 @@ describe("server helpers", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("disables interleaved reasoning for tool-enabled turns on reasoning_content models", () => {
+    expect(
+      getProviderModelOptions("moonshot/kimi-k2.5", 1, "high", "reasoning_content"),
+    ).toMatchObject({
+      effectiveReasoningLevel: "off",
+      overrideReason: "tool_turn_disables_interleaved_reasoning",
+      modelOptions: {
+        thinking: {
+          type: "disabled",
+        },
+      },
+    });
+
+    expect(
+      getProviderModelOptions("moonshot/kimi-k2.5", 0, "high", "reasoning_content"),
+    ).toMatchObject({
+      effectiveReasoningLevel: "high",
+      overrideReason: null,
+      modelOptions: {
+        thinking: {
+          type: "enabled",
+        },
+      },
+    });
   });
 
   it("clamps exa result counts", () => {

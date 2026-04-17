@@ -696,8 +696,15 @@ export default function Home() {
     () =>
       composerSearch() &&
       effectiveComposerReasoningLevel() !== "off" &&
-      Boolean(unsupportedInterleavedReasoningField()),
+      Boolean(selectedModelInterleavedField()),
   );
+  const toolTurnReasoningDisableNote = createMemo(() => {
+    if (!willDisableReasoningForToolTurn()) return null;
+    if (unsupportedInterleavedReasoningField()) {
+      return `Thinking will be disabled for this turn because this model requires interleaved reasoning replay (${unsupportedInterleavedReasoningField()}) across tool calls, and this app does not preserve that field.`;
+    }
+    return "Thinking will be disabled for this turn because this model requires interleaved reasoning replay across tool calls, and this provider path does not reliably support that continuation.";
+  });
 
   createEffect(() => {
     pendingDraftAttachmentCleanupTick();
@@ -2038,15 +2045,8 @@ export default function Home() {
                   {composer.sending ? "Sending…" : "Send"}
                 </button>
               </div>
-              <Show when={willDisableReasoningForToolTurn()}>
-                <p class="composer-note">
-                  Thinking will be disabled for this turn because this model requires interleaved
-                  reasoning replay
-                  {unsupportedInterleavedReasoningField()
-                    ? ` (${unsupportedInterleavedReasoningField()})`
-                    : ""}
-                  across tool calls, and this app does not preserve that field.
-                </p>
+              <Show when={toolTurnReasoningDisableNote()}>
+                <p class="composer-note">{toolTurnReasoningDisableNote()}</p>
               </Show>
             </footer>
           </Show>
