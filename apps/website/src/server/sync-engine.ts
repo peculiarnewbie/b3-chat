@@ -1108,6 +1108,11 @@ export class SyncEngineDurableObject {
         systemPrompts.push(SEARCH_TOOL_SYSTEM_PROMPT);
       }
 
+      // Inject current date so models use correct year when searching
+      const now = new Date();
+      const datePrompt = `Current date: ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. When searching for current/recent information, use this date as reference—do not default to years from your training data.`;
+      systemPrompts.push(datePrompt);
+
       // Create adapter for TanStack AI chat()
       const adapter = createChatCompletionsAdapter(
         {
