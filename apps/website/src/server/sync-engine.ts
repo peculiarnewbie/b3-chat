@@ -1320,6 +1320,10 @@ export class SyncEngineDurableObject {
         stack: error instanceof Error ? error.stack : undefined,
       });
 
+      // Only emit the message_failed event and "Response failed" activity
+      // if the stream consumer didn't already mark the message as failed.
+      // Otherwise we'd duplicate the failure marker (the consumer's
+      // failMessage already emits both, and both reach the inline layout).
       const current = this.getMessage(payload.assistantMessage.id);
       if (current && current.status !== "completed" && current.status !== "failed") {
         const failed = await this.appendServerEvent(null, "message_failed", {
@@ -1329,16 +1333,16 @@ export class SyncEngineDurableObject {
           updatedAt: nowIso(),
         });
         this.broadcast(failed);
-      }
 
-      await appendMessagePart("activity", {
-        text: "Response failed",
-        json: json({
-          label: "Response failed",
-          state: "failed",
-          detail: normalizedError.errorMessage,
-        } satisfies SearchProgressEvent),
-      });
+        await appendMessagePart("activity", {
+          text: "Response failed",
+          json: json({
+            label: "Response failed",
+            state: "failed",
+            detail: normalizedError.errorMessage,
+          } satisfies SearchProgressEvent),
+        });
+      }
       await recorder.finishSpan({
         spanId: rootSpanId,
         status: normalizedError.errorCode === "cancelled" ? "cancelled" : "failed",

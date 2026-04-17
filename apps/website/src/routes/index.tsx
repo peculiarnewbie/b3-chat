@@ -903,13 +903,24 @@ export default function Home() {
           if (activity.label === "Response streaming") continue;
           if (activity.label === "Response complete") continue;
 
-          if (activity.label === "Response failed" || activity.state === "failed") {
+          // Top-level failure activity emitted by the stream consumer's
+          // failMessage and the sync-engine's runAssistantTurn catch.
+          // Render at most one failure card per message — both paths can
+          // emit a "Response failed" activity when a stream ends in error,
+          // and the card reads its text from message.errorMessage anyway.
+          if (activity.label === "Response failed") {
             flushText(false);
-            items.push({ kind: "failure", key: `failure:${part.seq}` });
+            if (!items.some((item) => item.kind === "failure")) {
+              items.push({ kind: "failure", key: `failure:${part.seq}` });
+            }
             continue;
           }
 
           if (activity.step != null) {
+            // For a given search step we may see multiple activities
+            // (active → completed, or active → failed). Only emit the
+            // chip once; its live status and result count are read from
+            // the search run row, which reflects the latest state.
             if (renderedSearchSteps.has(activity.step)) continue;
             renderedSearchSteps.add(activity.step);
             flushText(false);
@@ -928,10 +939,19 @@ export default function Home() {
             continue;
           }
 
-          // Uncategorized activity without a step — render as a thinking-
-          // like chip so it still shows up, but without extra UI.
-          flushText(false);
-          // Currently nothing else falls through here; skip for cleanliness.
+          // Activity with state="failed" but no step — treat as a top-
+          // level failure marker (e.g. budget reached). Dedupe across a
+          // message as above.
+          if (activity.state === "failed") {
+            flushText(false);
+            if (!items.some((item) => item.kind === "failure")) {
+              items.push({ kind: "failure", key: `failure:${part.seq}` });
+            }
+            continue;
+          }
+
+          // Anything else: skip silently. Streaming text is the primary
+          // feedback channel in the interleaved layout.
           continue;
         }
 
