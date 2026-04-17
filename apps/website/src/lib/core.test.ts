@@ -882,6 +882,122 @@ describe("server helpers", () => {
     }
   });
 
+  it("replays leaked reasoning_content on continuation even when thinking is disabled", async () => {
+    const requests: Array<Record<string, any>> = [];
+    const originalFetch = globalThis.fetch;
+    let callCount = 0;
+    const encoder = new TextEncoder();
+
+    globalThis.fetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const rawBody = typeof init?.body === "string" ? init.body : "";
+      const body = JSON.parse(rawBody);
+      requests.push(body);
+      callCount += 1;
+
+      if (callCount === 1) {
+        expect(body.thinking).toEqual({ type: "disabled" });
+        const sse = [
+          'data: {"choices":[{"delta":{"reasoningContent":"Need current standings. "}}]}\n\n',
+          'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exa_web_search","arguments":"{\\"query\\":\\"current f1 standings\\"}"}}]}}]}\n\n',
+          'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":63}}}\n\n',
+          "data: [DONE]\n\n",
+        ];
+        const stream = new ReadableStream({
+          start(controller) {
+            for (const chunk of sse) {
+              controller.enqueue(encoder.encode(chunk));
+            }
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+
+      const continuationMessages = body.messages ?? [];
+      const assistantToolCall = continuationMessages.find(
+        (message: any) => message.role === "assistant" && Array.isArray(message.tool_calls),
+      );
+      if (!assistantToolCall?.reasoning_content) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              message: "thinking is enabled but reasoning_content is missing",
+            },
+          }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+
+      const sse = [
+        'data: {"choices":[{"delta":{"content":"Oscar Piastri leads."}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":7}}\n\n',
+        "data: [DONE]\n\n",
+      ];
+      const stream = new ReadableStream({
+        start(controller) {
+          for (const chunk of sse) {
+            controller.enqueue(encoder.encode(chunk));
+          }
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const adapter = createChatCompletionsAdapter(
+        {
+          baseUrl: "https://api.example.com",
+          apiKey: "test-key",
+        },
+        "moonshot/kimi-k2.5",
+      );
+
+      const searchTool = toolDefinition({
+        name: "exa_web_search",
+        description: "Search the web",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+          },
+          required: ["query"],
+          additionalProperties: false,
+        },
+      }).server(async () => "Search grounding");
+
+      const chunks = [];
+      for await (const chunk of chat({
+        adapter,
+        messages: [{ role: "user", content: "who leads the 2026 f1 wdc?" }],
+        modelOptions: {
+          thinking: { type: "disabled" },
+        },
+        tools: [searchTool],
+      })) {
+        chunks.push(chunk);
+      }
+
+      expect(requests).toHaveLength(2);
+      expect(chunks.some((chunk: any) => chunk.type === "RUN_ERROR")).toBe(false);
+
+      const continuationMessages = requests[1]?.messages ?? [];
+      const assistantToolCall = continuationMessages.find(
+        (message: any) => message.role === "assistant" && Array.isArray(message.tool_calls),
+      );
+
+      expect(assistantToolCall?.reasoning_content).toBe("Need current standings. ");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("clamps exa result counts", () => {
     expect(clampExaResults(1)).toBe(3);
     expect(clampExaResults(5)).toBe(5);

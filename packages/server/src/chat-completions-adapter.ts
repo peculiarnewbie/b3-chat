@@ -659,21 +659,14 @@ export class ChatCompletionsAdapter {
         } as ExtendedStreamChunk;
       }
 
-      // Store reasoning_content for tool call continuations (needed for Kimi K2.5 and similar)
-      // This will be included in the next request when TanStack AI continues with tool results.
-      //
-      // If thinking is explicitly disabled in the current modelOptions, we do
-      // NOT cache reasoning_content even if the upstream leaked some —
-      // replaying it on the continuation request would contradict the
-      // thinking=disabled flag and cause the upstream to reject with
-      // "reasoning_content is missing / thinking is enabled but
-      // reasoning_content is missing" in subsequent assistant messages.
-      const thinking = (effectiveModelOptions as { thinking?: { type?: string } } | undefined)
-        ?.thinking;
-      const thinkingDisabled = thinking?.type === "disabled";
+      // Store reasoning_content for tool call continuations (needed for Kimi K2.5 and similar).
+      // Some providers still emit reasoning_content on tool turns even when we requested
+      // thinking-disabled mode, and they expect the continuation to replay the assistant
+      // tool-call message losslessly. UI suppression happens elsewhere; here we preserve the
+      // upstream message shape exactly so the continuation request remains valid.
       if (toolCalls.size > 0) {
-        const shouldReplayReasoning = !thinkingDisabled && !!reasoningContent;
-        if (shouldReplayReasoning) {
+        const hasReasoningContent = !!reasoningContent;
+        if (hasReasoningContent) {
           this.pendingReasoningContent = reasoningContent;
         } else {
           this.pendingReasoningContent = null;
@@ -689,7 +682,7 @@ export class ChatCompletionsAdapter {
               arguments: toolCall.args,
             },
           })),
-          ...(shouldReplayReasoning ? { reasoning_content: reasoningContent } : {}),
+          ...(hasReasoningContent ? { reasoning_content: reasoningContent } : {}),
         };
       }
 

@@ -702,15 +702,11 @@ export default function Home() {
   const effectiveComposerReasoningLevel = createMemo<ReasoningLevel>(() =>
     selectedModelSupportsReasoning() ? composerReasoningLevel() : "off",
   );
-  const unsupportedInterleavedReasoningField = createMemo(
-    () =>
-      selectedModelInterleavedField() && selectedModelInterleavedField() !== "reasoning_content",
-  );
   const willDisableReasoningForToolTurn = createMemo(
     () =>
       composerSearch() &&
       effectiveComposerReasoningLevel() !== "off" &&
-      Boolean(unsupportedInterleavedReasoningField()),
+      selectedModelInterleavedField() === "reasoning_content",
   );
 
   createEffect(() => {
@@ -2081,6 +2077,8 @@ export default function Home() {
     const text = editingUserMessageText().trim();
     cancelEditingUserMessage();
     if (!thread || !text || text === msg.text.trim()) return;
+    const modelId =
+      msg.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto";
     const attachmentIds = userAttachments(msg.id)
       .filter((attachment) => attachment.status === "ready")
       .map((attachment) => attachment.id);
@@ -2088,9 +2086,8 @@ export default function Home() {
       thread,
       sourceMessage: msg,
       text,
-      modelId:
-        msg.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto",
-      modelInterleavedField: modelInterleavedFieldFor(msg.modelId),
+      modelId,
+      modelInterleavedField: modelInterleavedFieldFor(modelId),
       reasoningLevel: (msg.reasoningLevel ?? "off") as ReasoningLevel,
       search: Boolean(msg.searchEnabled),
       attachmentIds,
@@ -2100,12 +2097,13 @@ export default function Home() {
   const retryMessage = (msg: Message) => {
     const thread = selectedConversationThread();
     if (!thread || !msg.text?.trim() || isSelectedThreadBusy()) return;
+    const modelId =
+      msg.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto";
     retryMessageAction({
       thread,
       userMessage: msg,
-      modelId:
-        msg.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto",
-      modelInterleavedField: modelInterleavedFieldFor(msg.modelId),
+      modelId,
+      modelInterleavedField: modelInterleavedFieldFor(modelId),
       reasoningLevel: (msg.reasoningLevel ?? "off") as ReasoningLevel,
       search: Boolean(msg.searchEnabled),
     });
@@ -2139,15 +2137,16 @@ export default function Home() {
     setComposer("sending", true);
     try {
       const text = composerText().trim();
+      const modelId =
+        composerModelId() || workspace?.defaultModelId || models()?.models?.[0]?.id || "auto";
       const attachmentIds = composerAttachments()
         .filter((a) => a.status === "ready" && a.attachmentId)
         .map((a) => a.attachmentId!);
       sendMessageAction({
         thread,
         text,
-        modelId:
-          composerModelId() || workspace?.defaultModelId || models()?.models?.[0]?.id || "auto",
-        modelInterleavedField: selectedModelInterleavedField(),
+        modelId,
+        modelInterleavedField: modelInterleavedFieldFor(modelId),
         reasoningLevel: effectiveComposerReasoningLevel(),
         search: composerSearch(),
         attachmentIds,
@@ -2586,12 +2585,9 @@ export default function Home() {
               </div>
               <Show when={willDisableReasoningForToolTurn()}>
                 <p class="composer-note">
-                  Thinking will be disabled for this turn because this model requires interleaved
-                  reasoning replay
-                  {unsupportedInterleavedReasoningField()
-                    ? ` (${unsupportedInterleavedReasoningField()})`
-                    : ""}
-                  across tool calls, and this app does not preserve that field.
+                  Thinking will be disabled for this turn because this model uses interleaved
+                  reasoning replay (`reasoning_content`) across tool continuations, and search is
+                  more reliable when tool turns run without visible reasoning.
                 </p>
               </Show>
             </footer>
