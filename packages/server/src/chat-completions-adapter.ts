@@ -302,6 +302,29 @@ function extractChatCompletionText(
     .trim();
 }
 
+function extractReasoningChunk(choice: Record<string, any> | undefined): string {
+  if (!choice || typeof choice !== "object") return "";
+
+  const candidateContainers = [choice.delta, choice.message];
+  for (const container of candidateContainers) {
+    if (!container || typeof container !== "object") continue;
+    for (const key of [
+      "reasoning_content",
+      "reasoningContent",
+      "reasoning_delta",
+      "reasoningDelta",
+      "reasoning",
+    ]) {
+      const value = container[key];
+      if (typeof value === "string" && value) {
+        return value;
+      }
+    }
+  }
+
+  return "";
+}
+
 /**
  * Generate a unique ID for events
  */
@@ -505,8 +528,9 @@ export class ChatCompletionsAdapter {
             finishReason = choice.finish_reason;
           }
 
-          // Capture reasoning_content for models that use interleaved thinking (e.g., Kimi K2.5)
-          const reasoningDelta = choice?.delta?.reasoning_content ?? "";
+          // Capture reasoning content for models that use interleaved thinking.
+          // Some upstream proxies expose this as reasoningContent/reasoning/reasoning_delta.
+          const reasoningDelta = extractReasoningChunk(choice);
           if (reasoningDelta) {
             reasoningContent += reasoningDelta;
           }

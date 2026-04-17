@@ -783,6 +783,90 @@ describe("server helpers", () => {
     }
   });
 
+  it("replays interleaved reasoning content on tool call continuation", async () => {
+    const requests: Array<Record<string, any>> = [];
+    const originalFetch = globalThis.fetch;
+    let callCount = 0;
+    const encoder = new TextEncoder();
+
+    globalThis.fetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const rawBody = typeof init?.body === "string" ? init.body : "";
+      requests.push(JSON.parse(rawBody));
+      callCount += 1;
+
+      const sse =
+        callCount === 1
+          ? [
+              'data: {"choices":[{"delta":{"reasoningContent":"Need current standings. "}}]}\n\n',
+              'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exa_web_search","arguments":"{\\"query\\":\\"current f1 standings\\"}"}}]}}]}\n\n',
+              'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":63}}}\n\n',
+              "data: [DONE]\n\n",
+            ]
+          : [
+              'data: {"choices":[{"delta":{"content":"Oscar Piastri leads."}}]}\n\n',
+              'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":7}}\n\n',
+              "data: [DONE]\n\n",
+            ];
+
+      const body = new ReadableStream({
+        start(controller) {
+          for (const chunk of sse) {
+            controller.enqueue(encoder.encode(chunk));
+          }
+          controller.close();
+        },
+      });
+
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const adapter = createChatCompletionsAdapter(
+        {
+          baseUrl: "https://api.example.com",
+          apiKey: "test-key",
+        },
+        "moonshot/kimi-k2.5",
+      );
+
+      const searchTool = toolDefinition({
+        name: "exa_web_search",
+        description: "Search the web",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+          },
+          required: ["query"],
+          additionalProperties: false,
+        },
+      }).server(async () => "Search grounding");
+
+      for await (const _chunk of chat({
+        adapter,
+        messages: [{ role: "user", content: "who leads the 2026 f1 wdc?" }],
+        modelOptions: {
+          thinking: { type: "enabled" },
+        },
+        tools: [searchTool],
+      })) {
+      }
+
+      expect(requests).toHaveLength(2);
+      const continuationMessages = requests[1]?.messages ?? [];
+      const assistantToolCall = continuationMessages.find(
+        (message: any) => message.role === "assistant" && Array.isArray(message.tool_calls),
+      );
+
+      expect(assistantToolCall?.reasoning_content).toBe("Need current standings. ");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("clamps exa result counts", () => {
     expect(clampExaResults(1)).toBe(3);
     expect(clampExaResults(5)).toBe(5);
