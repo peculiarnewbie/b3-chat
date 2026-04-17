@@ -131,6 +131,7 @@ function convertToOpenAIMessages(
   messages: ModelMessage[],
   systemPrompts: string[] = [],
   pendingReasoningContent?: string | null,
+  pendingAssistantToolCallMessage?: Record<string, unknown> | null,
 ): Array<Record<string, unknown>> {
   const result: Array<Record<string, unknown>> = [];
 
@@ -175,10 +176,13 @@ function convertToOpenAIMessages(
     const convertedMessage: Record<string, unknown> = {
       role: message.role,
     };
-    if (content !== null) {
-      convertedMessage.content = content;
-    }
     if (message.role === "assistant" && message.toolCalls?.length) {
+      if (pendingAssistantToolCallMessage && i === lastToolCallAssistantIndex) {
+        result.push(JSON.parse(JSON.stringify(pendingAssistantToolCallMessage)));
+        continue;
+      }
+
+      convertedMessage.content = content;
       convertedMessage.tool_calls = message.toolCalls.map((toolCall) => ({
         id: toolCall.id,
         type: toolCall.type,
@@ -193,6 +197,8 @@ function convertToOpenAIMessages(
       if (pendingReasoningContent && i === lastToolCallAssistantIndex) {
         convertedMessage.reasoning_content = pendingReasoningContent;
       }
+    } else if (content !== null) {
+      convertedMessage.content = content;
     }
 
     result.push(convertedMessage);
@@ -358,6 +364,7 @@ export class ChatCompletionsAdapter {
    * we can use a simple instance variable instead of a complex keyed cache.
    */
   private pendingReasoningContent: string | null = null;
+  private pendingAssistantToolCallMessage: Record<string, unknown> | null = null;
 
   /**
    * Stores modelOptions from the first request to ensure they're applied
@@ -378,6 +385,8 @@ export class ChatCompletionsAdapter {
     // Include any pending reasoning_content from a previous tool call turn
     const reasoningToInclude = this.pendingReasoningContent;
     this.pendingReasoningContent = null; // Clear after use
+    const assistantToolCallMessageToInclude = this.pendingAssistantToolCallMessage;
+    this.pendingAssistantToolCallMessage = null;
 
     // Store modelOptions from the first request to ensure they're applied consistently
     // TanStack AI may not preserve these across tool call iterations
@@ -390,6 +399,7 @@ export class ChatCompletionsAdapter {
       options.messages ?? [],
       options.systemPrompts,
       reasoningToInclude,
+      assistantToolCallMessageToInclude,
     );
     const tools = convertToOpenAITools(options.tools);
     const trace =
@@ -473,6 +483,7 @@ export class ChatCompletionsAdapter {
       };
       let finishReason: "stop" | "length" | "content_filter" | "tool_calls" | null = "stop";
       let reasoningContent = "";
+      let assistantContent: string | null = null;
       const toolCalls = new Map<
         number,
         {
@@ -591,6 +602,8 @@ export class ChatCompletionsAdapter {
           const delta = choice?.delta?.content ?? "";
           if (!delta) continue;
 
+          assistantContent = (assistantContent ?? "") + delta;
+
           // Emit TEXT_MESSAGE_START on first content
           if (!messageStarted) {
             messageStarted = true;
@@ -648,8 +661,23 @@ export class ChatCompletionsAdapter {
 
       // Store reasoning_content for tool call continuations (needed for Kimi K2.5 and similar)
       // This will be included in the next request when TanStack AI continues with tool results
-      if (toolCalls.size > 0 && reasoningContent) {
-        this.pendingReasoningContent = reasoningContent;
+      if (toolCalls.size > 0) {
+        if (reasoningContent) {
+          this.pendingReasoningContent = reasoningContent;
+        }
+        this.pendingAssistantToolCallMessage = {
+          role: "assistant",
+          content: assistantContent,
+          tool_calls: [...toolCalls.values()].map((toolCall) => ({
+            id: toolCall.toolCallId,
+            type: "function",
+            function: {
+              name: toolCall.toolName,
+              arguments: toolCall.args,
+            },
+          })),
+          ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
+        };
       }
 
       // Emit RUN_FINISHED with usage (including custom _reasoningTokens field)

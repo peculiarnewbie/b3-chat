@@ -50,7 +50,6 @@ import {
 import { resetPendingOps } from "./pending-ops";
 import { processEnvelopes } from "./sync-adapter";
 import { normalizeAssistantError } from "../server/error-normalization";
-import { getProviderModelOptions } from "../server/sync-engine";
 
 beforeEach(() => {
   resetCollections();
@@ -700,7 +699,7 @@ describe("server helpers", () => {
     expect(extractReasoningTokens({ completion_tokens: 42 })).toBe(null);
   });
 
-  it("completes provider tool calls and omits null assistant content on continuation", async () => {
+  it("completes provider tool calls and preserves null assistant content on continuation", async () => {
     const requests: Array<Record<string, any>> = [];
     const originalFetch = globalThis.fetch;
     let callCount = 0;
@@ -778,13 +777,13 @@ describe("server helpers", () => {
         (message: any) => message.role === "assistant" && Array.isArray(message.tool_calls),
       );
       expect(assistantToolCall).toBeTruthy();
-      expect("content" in assistantToolCall).toBe(false);
+      expect(assistantToolCall?.content).toBeNull();
     } finally {
       globalThis.fetch = originalFetch;
     }
   });
 
-  it("replays interleaved reasoning content on tool call continuation", async () => {
+  it("replays the provider-shaped assistant tool call on continuation", async () => {
     const requests: Array<Record<string, any>> = [];
     const originalFetch = globalThis.fetch;
     let callCount = 0;
@@ -799,6 +798,7 @@ describe("server helpers", () => {
         callCount === 1
           ? [
               'data: {"choices":[{"delta":{"reasoningContent":"Need current standings. "}}]}\n\n',
+              'data: {"choices":[{"delta":{"content":"Let me check the latest standings. "}}]}\n\n',
               'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exa_web_search","arguments":"{\\"query\\":\\"current f1 standings\\"}"}}]}}]}\n\n',
               'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":63}}}\n\n',
               "data: [DONE]\n\n",
@@ -862,36 +862,21 @@ describe("server helpers", () => {
         (message: any) => message.role === "assistant" && Array.isArray(message.tool_calls),
       );
 
+      expect(assistantToolCall?.content).toBe("Let me check the latest standings. ");
       expect(assistantToolCall?.reasoning_content).toBe("Need current standings. ");
+      expect(assistantToolCall?.tool_calls).toEqual([
+        {
+          id: "call_1",
+          type: "function",
+          function: {
+            name: "exa_web_search",
+            arguments: '{"query":"current f1 standings"}',
+          },
+        },
+      ]);
     } finally {
       globalThis.fetch = originalFetch;
     }
-  });
-
-  it("disables interleaved reasoning for tool-enabled turns on reasoning_content models", () => {
-    expect(
-      getProviderModelOptions("moonshot/kimi-k2.5", 1, "high", "reasoning_content"),
-    ).toMatchObject({
-      effectiveReasoningLevel: "off",
-      overrideReason: "tool_turn_disables_interleaved_reasoning",
-      modelOptions: {
-        thinking: {
-          type: "disabled",
-        },
-      },
-    });
-
-    expect(
-      getProviderModelOptions("moonshot/kimi-k2.5", 0, "high", "reasoning_content"),
-    ).toMatchObject({
-      effectiveReasoningLevel: "high",
-      overrideReason: null,
-      modelOptions: {
-        thinking: {
-          type: "enabled",
-        },
-      },
-    });
   });
 
   it("clamps exa result counts", () => {
