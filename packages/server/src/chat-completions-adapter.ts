@@ -131,7 +131,7 @@ function convertToOpenAIMessages(
   messages: ModelMessage[],
   systemPrompts: string[] = [],
   pendingReasoningContent?: string | null,
-  pendingAssistantToolCallMessage?: Record<string, unknown> | null,
+  assistantToolCallMessages: Array<Record<string, unknown>> = [],
 ): Array<Record<string, unknown>> {
   const result: Array<Record<string, unknown>> = [];
 
@@ -157,6 +157,7 @@ function convertToOpenAIMessages(
   }
 
   // Convert each message
+  let toolCallAssistantIndex = 0;
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
 
@@ -177,8 +178,9 @@ function convertToOpenAIMessages(
       role: message.role,
     };
     if (message.role === "assistant" && message.toolCalls?.length) {
-      if (pendingAssistantToolCallMessage && i === lastToolCallAssistantIndex) {
-        result.push(JSON.parse(JSON.stringify(pendingAssistantToolCallMessage)));
+      const preservedAssistantToolCallMessage = assistantToolCallMessages[toolCallAssistantIndex++];
+      if (preservedAssistantToolCallMessage) {
+        result.push(JSON.parse(JSON.stringify(preservedAssistantToolCallMessage)));
         continue;
       }
 
@@ -357,14 +359,10 @@ export class ChatCompletionsAdapter {
 
   private readonly config: ChatCompletionsAdapterConfig;
 
-  /**
-   * Stores the last reasoning_content from an assistant response that had tool calls.
-   * This is needed for models like Kimi K2.5 that require reasoning context replay.
-   * Since the adapter instance is reused within a single TanStack AI chat() loop,
-   * we can use a simple instance variable instead of a complex keyed cache.
-   */
-  private pendingReasoningContent: string | null = null;
-  private pendingAssistantToolCallMessage: Record<string, unknown> | null = null;
+  /** Last reasoning_content we observed (or had to carry forward) for tool continuations. */
+  private lastReasoningContent: string | null = null;
+  /** Provider-shaped assistant tool-call messages preserved in turn order. */
+  private assistantToolCallMessageHistory: Array<Record<string, unknown>> = [];
 
   /**
    * Stores modelOptions from the first request to ensure they're applied
@@ -382,11 +380,8 @@ export class ChatCompletionsAdapter {
    * Streaming chat completion that yields AG-UI events.
    */
   async *chatStream(options: TextOptions): AsyncIterable<ExtendedStreamChunk> {
-    // Include any pending reasoning_content from a previous tool call turn
-    const reasoningToInclude = this.pendingReasoningContent;
-    this.pendingReasoningContent = null; // Clear after use
-    const assistantToolCallMessageToInclude = this.pendingAssistantToolCallMessage;
-    this.pendingAssistantToolCallMessage = null;
+    // Include any preserved reasoning/tool-call messages from previous tool iterations.
+    const reasoningToInclude = this.lastReasoningContent;
 
     // Store modelOptions from the first request to ensure they're applied consistently
     // TanStack AI may not preserve these across tool call iterations
@@ -399,7 +394,7 @@ export class ChatCompletionsAdapter {
       options.messages ?? [],
       options.systemPrompts,
       reasoningToInclude,
-      assistantToolCallMessageToInclude,
+      this.assistantToolCallMessageHistory,
     );
     const tools = convertToOpenAITools(options.tools);
     const trace =
@@ -664,14 +659,15 @@ export class ChatCompletionsAdapter {
       // thinking-disabled mode, and they expect the continuation to replay the assistant
       // tool-call message losslessly. UI suppression happens elsewhere; here we preserve the
       // upstream message shape exactly so the continuation request remains valid.
+      //
+      // On multi-tool turns the provider may emit reasoning_content on the first tool-call
+      // assistant message but omit it on later ones while still expecting the continuation
+      // request to carry the prior replay field. When no fresh reasoning chunk was observed,
+      // carry forward the last value we sent.
       if (toolCalls.size > 0) {
-        const hasReasoningContent = !!reasoningContent;
-        if (hasReasoningContent) {
-          this.pendingReasoningContent = reasoningContent;
-        } else {
-          this.pendingReasoningContent = null;
-        }
-        this.pendingAssistantToolCallMessage = {
+        const continuationReasoningContent = reasoningContent || this.lastReasoningContent || null;
+        this.lastReasoningContent = continuationReasoningContent;
+        const providerToolCallMessage = {
           role: "assistant",
           content: assistantContent,
           tool_calls: [...toolCalls.values()].map((toolCall) => ({
@@ -682,8 +678,14 @@ export class ChatCompletionsAdapter {
               arguments: toolCall.args,
             },
           })),
-          ...(hasReasoningContent ? { reasoning_content: reasoningContent } : {}),
+          ...(continuationReasoningContent
+            ? { reasoning_content: continuationReasoningContent }
+            : {}),
         };
+        const historicalToolCallCount = (options.messages ?? []).filter(
+          (message) => message.role === "assistant" && message.toolCalls?.length,
+        ).length;
+        this.assistantToolCallMessageHistory[historicalToolCallCount] = providerToolCallMessage;
       }
 
       // Emit RUN_FINISHED with usage (including custom _reasoningTokens field)
