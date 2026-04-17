@@ -585,9 +585,9 @@ a {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 48px;
+  width: 28px;
   height: 28px;
-  padding: 0 10px;
+  padding: 0;
   margin-top: 4px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -595,6 +595,11 @@ a {
   color: var(--text-secondary);
   cursor: pointer;
   font: inherit;
+}
+
+.msg-action-btn svg {
+  width: 14px;
+  height: 14px;
 }
 
 .msg-user-row:hover .msg-user-actions {

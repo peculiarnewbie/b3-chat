@@ -432,6 +432,57 @@ export default function Home() {
   let dragCounter = 0;
   const removedUploadLocalIds = new Set<string>();
 
+  const workspaces = createMemo(() =>
+    (allWorkspaces() as Workspace[])
+      .filter((workspace) => !workspace.archivedAt)
+      .sort((a, b) => b.sortKey - a.sortKey),
+  );
+  const activeWorkspace = createMemo(
+    () => workspaces().find((workspace) => workspace.id === activeWorkspaceId()) ?? workspaces()[0],
+  );
+  const threads = createMemo(() =>
+    (allThreads() as Thread[])
+      .filter((thread) => thread.workspaceId === activeWorkspace()?.id && !thread.archivedAt)
+      .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt)),
+  );
+  const activeThread = createMemo(
+    () => threads().find((thread) => thread.id === activeThreadId()) ?? threads()[0],
+  );
+  const activeDraft = createMemo(() => {
+    const workspace = activeWorkspace();
+    if (!workspace) return null;
+    return getWorkspaceDraft(workspace.id);
+  });
+  const isDraftViewActive = createMemo(() => {
+    const workspace = activeWorkspace();
+    if (!workspace) return false;
+    return getWorkspaceConversationView(workspace.id) === "draft" && Boolean(activeDraft());
+  });
+  const selectedConversationThread = createMemo(
+    () => (isDraftViewActive() ? activeDraft()?.thread : activeThread()) ?? null,
+  );
+  const composerText = () => (isDraftViewActive() ? (activeDraft()?.text ?? "") : composer.text);
+  const composerAttachments = () =>
+    isDraftViewActive() ? (activeDraft()?.attachments ?? []) : composer.attachments;
+  const composerModelId = () =>
+    isDraftViewActive() ? (activeDraft()?.modelId ?? "") : composer.modelId;
+  const composerReasoningLevel = () =>
+    isDraftViewActive() ? (activeDraft()?.reasoningLevel ?? "off") : composer.reasoningLevel;
+  const composerSearch = () =>
+    isDraftViewActive() ? (activeDraft()?.search ?? false) : composer.search;
+  const setComposerTextValue = (text: string) => {
+    const workspace = activeWorkspace();
+    if (workspace && isDraftViewActive()) {
+      updateWorkspaceDraft(workspace.id, (draft) => ({
+        ...draft,
+        text,
+        updatedAt: nowIso(),
+      }));
+      return;
+    }
+    setComposer("text", text);
+  };
+
   // File upload handlers
   const handleFileSelect = async (files: FileList | null) => {
     const thread = selectedConversationThread();
@@ -657,68 +708,6 @@ export default function Home() {
       removedUploadLocalIds.add(cleanup.localId);
     }
   });
-
-  // Auto-scroll only when user is already near the bottom
-  createEffect(() => {
-    const _messageIds = messageIds();
-    const _activities = assistantActivities();
-    if (timelineRef && isNearBottom()) {
-      requestAnimationFrame(() => {
-        timelineRef!.scrollTop = timelineRef!.scrollHeight;
-      });
-    }
-  });
-
-  const workspaces = createMemo(() =>
-    (allWorkspaces() as Workspace[])
-      .filter((workspace) => !workspace.archivedAt)
-      .sort((a, b) => b.sortKey - a.sortKey),
-  );
-  const activeWorkspace = createMemo(
-    () => workspaces().find((workspace) => workspace.id === activeWorkspaceId()) ?? workspaces()[0],
-  );
-  const threads = createMemo(() =>
-    (allThreads() as Thread[])
-      .filter((thread) => thread.workspaceId === activeWorkspace()?.id && !thread.archivedAt)
-      .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt)),
-  );
-  const activeThread = createMemo(
-    () => threads().find((thread) => thread.id === activeThreadId()) ?? threads()[0],
-  );
-  const activeDraft = createMemo(() => {
-    const workspace = activeWorkspace();
-    if (!workspace) return null;
-    return getWorkspaceDraft(workspace.id);
-  });
-  const isDraftViewActive = createMemo(() => {
-    const workspace = activeWorkspace();
-    if (!workspace) return false;
-    return getWorkspaceConversationView(workspace.id) === "draft" && Boolean(activeDraft());
-  });
-  const selectedConversationThread = createMemo(
-    () => (isDraftViewActive() ? activeDraft()?.thread : activeThread()) ?? null,
-  );
-  const composerText = () => (isDraftViewActive() ? (activeDraft()?.text ?? "") : composer.text);
-  const composerAttachments = () =>
-    isDraftViewActive() ? (activeDraft()?.attachments ?? []) : composer.attachments;
-  const composerModelId = () =>
-    isDraftViewActive() ? (activeDraft()?.modelId ?? "") : composer.modelId;
-  const composerReasoningLevel = () =>
-    isDraftViewActive() ? (activeDraft()?.reasoningLevel ?? "off") : composer.reasoningLevel;
-  const composerSearch = () =>
-    isDraftViewActive() ? (activeDraft()?.search ?? false) : composer.search;
-  const setComposerTextValue = (text: string) => {
-    const workspace = activeWorkspace();
-    if (workspace && isDraftViewActive()) {
-      updateWorkspaceDraft(workspace.id, (draft) => ({
-        ...draft,
-        text,
-        updatedAt: nowIso(),
-      }));
-      return;
-    }
-    setComposer("text", text);
-  };
   const messageIds = createMemo(() =>
     resolveThreadMessagePath(
       (allMessages() as Message[]).filter(
@@ -812,6 +801,18 @@ export default function Home() {
     }
     return byMessage;
   });
+
+  // Auto-scroll only when user is already near the bottom
+  createEffect(() => {
+    const _messageIds = messageIds();
+    const _activities = assistantActivities();
+    if (timelineRef && isNearBottom()) {
+      requestAnimationFrame(() => {
+        timelineRef!.scrollTop = timelineRef!.scrollHeight;
+      });
+    }
+  });
+
   const traceRunsByMessage = createMemo(() => {
     const byMessage = new Map<string, TraceRun[]>();
     for (const row of allTraceRuns() as TraceRun[]) {
@@ -972,20 +973,50 @@ export default function Home() {
                 <div class="msg-user-row">
                   <div class="msg-user-actions">
                     <button
+                      type="button"
                       class="msg-action-btn"
+                      aria-label="Edit and regenerate from this point"
                       title="Edit and regenerate from this point"
                       disabled={isSelectedThreadBusy()}
                       onClick={() => startEditingUserMessage(message())}
                     >
-                      Edit
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M12 20h9" />
+                        <path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z" />
+                      </svg>
                     </button>
                     <button
+                      type="button"
                       class="msg-action-btn"
+                      aria-label="Retry from this point with original settings"
                       title="Retry from this point with original settings"
                       disabled={isSelectedThreadBusy()}
                       onClick={() => retryMessage(message())}
                     >
-                      Retry
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
+                        <polyline points="1 4 1 10 7 10" />
+                        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                      </svg>
                     </button>
                   </div>
                   <div class="msg-user-stack">
@@ -1025,12 +1056,13 @@ export default function Home() {
                           value={editingUserMessageText()}
                           onInput={(e) => setEditingUserMessageText(e.currentTarget.value)}
                           onKeyDown={(e) => {
+                            if (e.isComposing) return;
                             if (e.key === "Escape") {
                               e.preventDefault();
                               cancelEditingUserMessage();
                               return;
                             }
-                            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                            if (e.key === "Enter" && !e.shiftKey) {
                               e.preventDefault();
                               commitUserMessageEdit(message());
                             }
