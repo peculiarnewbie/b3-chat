@@ -18,6 +18,7 @@ type Env = AppEnv & {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     setRuntimeEnv(env);
+    const startedAt = Date.now();
 
     const withVersionHeader = (response: Response) => {
       const next = new Response(response.body, response);
@@ -30,34 +31,147 @@ export default {
     const method = request.method;
 
     // Debug: log every request that reaches the worker
-    console.log(`[worker] ${method} ${pathname}`);
+    console.log(
+      JSON.stringify({
+        scope: "worker",
+        event: "request_start",
+        method,
+        pathname,
+        version: BUILD_INFO.version,
+      }),
+    );
 
     try {
       // API routing
       if (pathname.startsWith("/api/")) {
         if (pathname.startsWith("/api/auth/")) {
-          console.log(`[worker] routing to handleAuth: ${method} ${pathname}`);
-          return withVersionHeader(await handleAuth(request));
+          console.log(
+            JSON.stringify({
+              scope: "worker",
+              event: "route_auth",
+              method,
+              pathname,
+            }),
+          );
+          const response = withVersionHeader(await handleAuth(request));
+          console.log(
+            JSON.stringify({
+              scope: "worker",
+              event: "request_end",
+              method,
+              pathname,
+              status: response.status,
+              durationMs: Date.now() - startedAt,
+            }),
+          );
+          return response;
         }
 
-        if (pathname === "/api/session" && method === "GET")
-          return withVersionHeader(await handleSession(request));
+        if (pathname === "/api/session" && method === "GET") {
+          const response = withVersionHeader(await handleSession(request));
+          console.log(
+            JSON.stringify({
+              scope: "worker",
+              event: "request_end",
+              method,
+              pathname,
+              status: response.status,
+              durationMs: Date.now() - startedAt,
+            }),
+          );
+          return response;
+        }
 
-        if (pathname === "/api/models" && method === "GET")
-          return withVersionHeader(await handleModels(request));
+        if (pathname === "/api/models" && method === "GET") {
+          const response = withVersionHeader(await handleModels(request));
+          console.log(
+            JSON.stringify({
+              scope: "worker",
+              event: "request_end",
+              method,
+              pathname,
+              status: response.status,
+              durationMs: Date.now() - startedAt,
+            }),
+          );
+          return response;
+        }
 
-        if (pathname.startsWith("/api/sync/")) return withVersionHeader(await handleSync(request));
+        if (pathname.startsWith("/api/sync/")) {
+          const response = withVersionHeader(await handleSync(request));
+          console.log(
+            JSON.stringify({
+              scope: "worker",
+              event: "request_end",
+              method,
+              pathname,
+              status: response.status,
+              durationMs: Date.now() - startedAt,
+            }),
+          );
+          return response;
+        }
 
-        if (pathname === "/api/uploads/presign" && method === "POST")
-          return withVersionHeader(await handleUploadPresign(request));
+        if (pathname === "/api/uploads/presign" && method === "POST") {
+          const response = withVersionHeader(await handleUploadPresign(request));
+          console.log(
+            JSON.stringify({
+              scope: "worker",
+              event: "request_end",
+              method,
+              pathname,
+              status: response.status,
+              durationMs: Date.now() - startedAt,
+            }),
+          );
+          return response;
+        }
 
         if (pathname.startsWith("/api/uploads/blob/")) {
-          if (method === "PUT") return withVersionHeader(await handleUploadBlobPut(request));
-          if (method === "GET") return withVersionHeader(await handleUploadBlobGet(request));
+          if (method === "PUT") {
+            const response = withVersionHeader(await handleUploadBlobPut(request));
+            console.log(
+              JSON.stringify({
+                scope: "worker",
+                event: "request_end",
+                method,
+                pathname,
+                status: response.status,
+                durationMs: Date.now() - startedAt,
+              }),
+            );
+            return response;
+          }
+          if (method === "GET") {
+            const response = withVersionHeader(await handleUploadBlobGet(request));
+            console.log(
+              JSON.stringify({
+                scope: "worker",
+                event: "request_end",
+                method,
+                pathname,
+                status: response.status,
+                durationMs: Date.now() - startedAt,
+              }),
+            );
+            return response;
+          }
         }
 
-        if (pathname === "/api/uploads/complete" && method === "POST")
-          return withVersionHeader(await handleUploadComplete(request));
+        if (pathname === "/api/uploads/complete" && method === "POST") {
+          const response = withVersionHeader(await handleUploadComplete(request));
+          console.log(
+            JSON.stringify({
+              scope: "worker",
+              event: "request_end",
+              method,
+              pathname,
+              status: response.status,
+              durationMs: Date.now() - startedAt,
+            }),
+          );
+          return response;
+        }
 
         return withVersionHeader(new Response("Not found", { status: 404 }));
       }
@@ -65,14 +179,48 @@ export default {
       // Serve static assets, with SPA fallback to index.html
       const assetResponse = await env.ASSETS.fetch(request);
       if (assetResponse.status === 404) {
-        return withVersionHeader(
+        const response = withVersionHeader(
           await env.ASSETS.fetch(new Request(new URL("/index.html", url.origin))),
         );
+        console.log(
+          JSON.stringify({
+            scope: "worker",
+            event: "request_end",
+            method,
+            pathname,
+            status: response.status,
+            durationMs: Date.now() - startedAt,
+            spaFallback: true,
+          }),
+        );
+        return response;
       }
-      return withVersionHeader(assetResponse);
+      const response = withVersionHeader(assetResponse);
+      console.log(
+        JSON.stringify({
+          scope: "worker",
+          event: "request_end",
+          method,
+          pathname,
+          status: response.status,
+          durationMs: Date.now() - startedAt,
+          spaFallback: false,
+        }),
+      );
+      return response;
     } catch (error) {
       if (error instanceof Response) return withVersionHeader(error);
-      console.error("Unhandled error:", error);
+      console.error(
+        JSON.stringify({
+          scope: "worker",
+          event: "request_error",
+          method,
+          pathname,
+          durationMs: Date.now() - startedAt,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        }),
+      );
       return withVersionHeader(new Response("Internal Server Error", { status: 500 }));
     }
   },

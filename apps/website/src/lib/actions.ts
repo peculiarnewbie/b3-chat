@@ -28,6 +28,7 @@ import {
 } from "./collections";
 import { clearAllDraftState, clearWorkspaceDraft } from "./draft-state";
 import { setActiveWorkspaceId, setActiveThreadId, ensureActiveSelection } from "./ui-state";
+import { createClientLogger, previewText } from "./debug-log";
 
 // ---------------------------------------------------------------------------
 // Optimistic rollback tracking
@@ -42,6 +43,7 @@ type CollectionWithRows = {
 };
 
 const optimisticByOp = new Map<string, OptimisticEntry[]>();
+const logger = createClientLogger("actions");
 
 function toLocalSyncRow<T extends object>(row: T, opId: string) {
   return {
@@ -53,6 +55,11 @@ function toLocalSyncRow<T extends object>(row: T, opId: string) {
 
 function trackOptimistic(opId: string, entries: OptimisticEntry[]) {
   optimisticByOp.set(opId, entries);
+  logger.log("track_optimistic", {
+    opId,
+    entryCount: entries.length,
+    trackedOps: optimisticByOp.size,
+  });
 }
 
 function deleteRow(collectionId: CollectionId, key: string): OptimisticEntry {
@@ -87,6 +94,10 @@ function restoreRow<T extends { id: string }>(
 export function rollbackOp(opId: string) {
   const entries = optimisticByOp.get(opId);
   if (!entries) return;
+  logger.warn("rollback_op", {
+    opId,
+    entryCount: entries.length,
+  });
   for (const entry of entries) {
     try {
       entry.rollback();
@@ -102,6 +113,10 @@ export function rollbackOp(opId: string) {
 /** Clean up tracking when server ack confirms the optimistic data. */
 export function confirmOp(opId: string) {
   optimisticByOp.delete(opId);
+  logger.log("confirm_op", {
+    opId,
+    remainingTrackedOps: optimisticByOp.size,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +140,14 @@ export function createWorkspaceAction(
   });
   const initialThread = createThread({ workspaceId: workspace.id });
 
+  logger.log("create_workspace", {
+    opId,
+    workspaceId: workspace.id,
+    threadId: initialThread.id,
+    defaultModelId: input.defaultModelId,
+    defaultReasoningLevel: input.defaultReasoningLevel ?? "off",
+    defaultSearchMode: input.defaultSearchMode ?? false,
+  });
   // Optimistic
   applyLocalInsert("workspaces", toLocalSyncRow(workspace, opId));
   applyLocalInsert("threads", toLocalSyncRow(initialThread, opId));
@@ -148,6 +171,11 @@ export function createWorkspaceAction(
 export function createThreadAction(workspaceId: string) {
   const opId = createId("op");
   const thread = createThread({ workspaceId });
+  logger.log("create_thread", {
+    opId,
+    workspaceId,
+    threadId: thread.id,
+  });
 
   applyLocalInsert("threads", toLocalSyncRow(thread, opId));
   setActiveThreadId(thread.id);
@@ -160,6 +188,10 @@ export function archiveThreadAction(threadId: string) {
   const existing = threads.get(threadId);
   if (!existing) return;
   const updatedAt = nowIso();
+  logger.log("archive_thread", {
+    threadId,
+    updatedAt,
+  });
 
   applyLocalUpdate("threads", {
     ...existing,
@@ -177,6 +209,10 @@ export function archiveWorkspaceAction(workspaceId: string) {
   const existing = workspaces.get(workspaceId);
   if (!existing) return;
   const updatedAt = nowIso();
+  logger.log("archive_workspace", {
+    workspaceId,
+    updatedAt,
+  });
 
   applyLocalUpdate("workspaces", {
     ...existing,
@@ -193,6 +229,13 @@ export function archiveWorkspaceAction(workspaceId: string) {
 export function updateThreadAction(thread: Thread) {
   const opId = createId("op");
   const existing = threads.get(thread.id);
+  logger.log("update_thread", {
+    opId,
+    threadId: thread.id,
+    workspaceId: thread.workspaceId,
+    title: thread.title,
+    headMessageId: thread.headMessageId ?? null,
+  });
   applyLocalUpdate("threads", toLocalSyncRow(thread, opId));
   if (existing) {
     trackOptimistic(opId, [restoreRow("threads", threads, existing)]);
@@ -203,6 +246,14 @@ export function updateThreadAction(thread: Thread) {
 export function updateWorkspaceAction(workspace: Workspace) {
   const opId = createId("op");
   const existing = workspaces.get(workspace.id);
+  logger.log("update_workspace", {
+    opId,
+    workspaceId: workspace.id,
+    name: workspace.name,
+    defaultModelId: workspace.defaultModelId,
+    defaultReasoningLevel: workspace.defaultReasoningLevel ?? "off",
+    defaultSearchMode: workspace.defaultSearchMode ?? false,
+  });
   applyLocalUpdate("workspaces", toLocalSyncRow(workspace, opId));
   if (existing) {
     trackOptimistic(opId, [restoreRow("workspaces", workspaces, existing)]);
@@ -249,6 +300,19 @@ export function sendMessageAction(input: {
     updatedAt,
     lastMessageAt: updatedAt,
   };
+
+  logger.log("send_message", {
+    opId,
+    threadId: input.thread.id,
+    workspaceId: input.thread.workspaceId,
+    userMessageId: userMessage.id,
+    assistantMessageId: assistantMessage.id,
+    modelId: input.modelId,
+    reasoningLevel: input.reasoningLevel,
+    search: input.search,
+    attachmentCount: input.attachmentIds?.length ?? 0,
+    promptPreview: previewText(input.text),
+  });
 
   // Optimistic mutations
   const existingThread = threads.get(input.thread.id);
@@ -328,6 +392,17 @@ export function retryMessageAction(input: {
     lastMessageAt: updatedAt,
   };
 
+  logger.log("retry_message", {
+    opId,
+    threadId: input.thread.id,
+    userMessageId: input.userMessage.id,
+    assistantMessageId: assistantMessage.id,
+    modelId: input.modelId,
+    reasoningLevel: input.reasoningLevel,
+    search: input.search,
+    userPromptPreview: previewText(input.userMessage.text),
+  });
+
   const existingThread = threads.get(input.thread.id);
   if (existingThread) {
     applyLocalUpdate("threads", toLocalSyncRow(threadUpdate, opId));
@@ -397,6 +472,19 @@ export function editUserMessageAction(input: {
     lastMessageAt: updatedAt,
   };
 
+  logger.log("edit_user_message", {
+    opId,
+    threadId: input.thread.id,
+    sourceMessageId: input.sourceMessage.id,
+    userMessageId: userMessage.id,
+    assistantMessageId: assistantMessage.id,
+    modelId: input.modelId,
+    reasoningLevel: input.reasoningLevel,
+    search: input.search,
+    attachmentCount: input.attachmentIds?.length ?? 0,
+    promptPreview: previewText(input.text),
+  });
+
   const existingThread = threads.get(input.thread.id);
   if (existingThread) {
     applyLocalUpdate("threads", toLocalSyncRow(threadUpdate, opId));
@@ -459,12 +547,20 @@ export function editUserMessageAction(input: {
 }
 
 export function deleteAttachmentAction(attachmentId: string) {
+  logger.log("delete_attachment", { attachmentId });
   dispatch("delete_attachment", { id: attachmentId });
 }
 
 export function updateAttachmentAction(attachment: Attachment) {
   const opId = createId("op");
   const existing = attachments.get(attachment.id);
+  logger.log("update_attachment", {
+    opId,
+    attachmentId: attachment.id,
+    threadId: attachment.threadId,
+    messageId: attachment.messageId ?? null,
+    status: attachment.status,
+  });
   applyLocalUpdate("attachments", toLocalSyncRow(attachment, opId));
   if (existing) {
     trackOptimistic(opId, [restoreRow("attachments", attachments, existing)]);
@@ -474,6 +570,7 @@ export function updateAttachmentAction(attachment: Attachment) {
 
 export function resetAllData() {
   const opId = createId("op");
+  logger.warn("reset_all_data", { opId });
   // Tell server to wipe all DO state
   dispatch("reset_storage", {}, { opId });
   // Clear local state

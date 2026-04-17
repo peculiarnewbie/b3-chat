@@ -1,4 +1,7 @@
+import { createClientLogger, serializeError } from "./debug-log";
+
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+const logger = createClientLogger("upload");
 
 const ALLOWED_PREFIXES = ["image/", "text/", "application/json"];
 const EXTRA_ALLOWED = ["application/pdf", "application/csv"];
@@ -34,47 +37,89 @@ export async function uploadFile(
   threadId: string,
   onProgress?: (status: UploadProgress) => void,
 ): Promise<UploadResult> {
+  logger.log("start", {
+    threadId,
+    fileName: file.name,
+    mimeType: file.type || "application/octet-stream",
+    sizeBytes: file.size,
+  });
   onProgress?.("presigning");
 
-  const presignRes = await fetch("/api/uploads/presign", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      sizeBytes: file.size,
-      mimeType: file.type || "application/octet-stream",
-      fileName: file.name,
+  try {
+    const presignRes = await fetch("/api/uploads/presign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sizeBytes: file.size,
+        mimeType: file.type || "application/octet-stream",
+        fileName: file.name,
+        threadId,
+      }),
+    });
+    logger.log("presign_response", {
+      ok: presignRes.ok,
+      status: presignRes.status,
+      statusText: presignRes.statusText,
+    });
+    if (!presignRes.ok) throw new Error(`Presign failed: ${presignRes.statusText}`);
+    const presignData = (await presignRes.json()) as {
+      attachment: UploadResult["attachment"];
+      uploadUrl: string;
+    };
+    const { attachment, uploadUrl } = presignData;
+    logger.log("presign_success", {
+      attachmentId: attachment.id,
+      objectKey: attachment.objectKey,
+      threadId: attachment.threadId,
+    });
+
+    onProgress?.("uploading");
+    const putRes = await fetch(uploadUrl, {
+      method: "PUT",
+      body: file,
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+    });
+    logger.log("upload_response", {
+      attachmentId: attachment.id,
+      ok: putRes.ok,
+      status: putRes.status,
+      statusText: putRes.statusText,
+    });
+    if (!putRes.ok) throw new Error(`Upload failed: ${putRes.statusText}`);
+
+    onProgress?.("completing");
+    const completeRes = await fetch("/api/uploads/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ attachment }),
+    });
+    logger.log("complete_response", {
+      attachmentId: attachment.id,
+      ok: completeRes.ok,
+      status: completeRes.status,
+      statusText: completeRes.statusText,
+    });
+    if (!completeRes.ok) throw new Error(`Complete failed: ${completeRes.statusText}`);
+
+    onProgress?.("ready");
+
+    const previewUrl = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined;
+    logger.log("complete_success", {
+      attachmentId: attachment.id,
+      objectKey: attachment.objectKey,
+      previewReady: Boolean(previewUrl),
+    });
+
+    return {
+      attachment: { ...attachment, status: "ready" as const },
+      previewUrl,
+    };
+  } catch (error) {
+    logger.error("failed", {
       threadId,
-    }),
-  });
-  if (!presignRes.ok) throw new Error(`Presign failed: ${presignRes.statusText}`);
-  const presignData = (await presignRes.json()) as {
-    attachment: UploadResult["attachment"];
-    uploadUrl: string;
-  };
-  const { attachment, uploadUrl } = presignData;
-
-  onProgress?.("uploading");
-  const putRes = await fetch(uploadUrl, {
-    method: "PUT",
-    body: file,
-    headers: { "Content-Type": file.type || "application/octet-stream" },
-  });
-  if (!putRes.ok) throw new Error(`Upload failed: ${putRes.statusText}`);
-
-  onProgress?.("completing");
-  const completeRes = await fetch("/api/uploads/complete", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ attachment }),
-  });
-  if (!completeRes.ok) throw new Error(`Complete failed: ${completeRes.statusText}`);
-
-  onProgress?.("ready");
-
-  const previewUrl = file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined;
-
-  return {
-    attachment: { ...attachment, status: "ready" as const },
-    previewUrl,
-  };
+      fileName: file.name,
+      ...serializeError(error),
+    });
+    throw error;
+  }
 }

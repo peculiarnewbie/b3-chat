@@ -93,6 +93,128 @@ function previewText(value: string, limit = 160) {
   return value.replace(/\s+/g, " ").trim().slice(0, limit);
 }
 
+function summarizeSnapshotTables(snapshot: SyncSnapshot | { tables?: SyncSnapshot["tables"] }) {
+  return Object.fromEntries(
+    Object.entries(snapshot.tables ?? {}).map(([tableName, rows]) => [
+      tableName,
+      Object.keys(rows ?? {}).length,
+    ]),
+  );
+}
+
+function summarizeCommandPayload(
+  commandType: SyncCommandType,
+  payload: SyncCommandPayloadMap[SyncCommandType],
+) {
+  switch (commandType) {
+    case "bootstrap_session":
+      return {
+        defaultModelId: (payload as SyncCommandPayloadMap["bootstrap_session"]).defaultModelId,
+      };
+    case "create_workspace": {
+      const command = payload as SyncCommandPayloadMap["create_workspace"];
+      return {
+        workspaceId: command.workspace.id,
+        initialThreadId: command.initialThread.id,
+        defaultModelId: command.workspace.defaultModelId,
+      };
+    }
+    case "create_thread":
+    case "update_thread": {
+      const command = payload as
+        | SyncCommandPayloadMap["create_thread"]
+        | SyncCommandPayloadMap["update_thread"];
+      return {
+        threadId: command.thread.id,
+        workspaceId: command.thread.workspaceId,
+        headMessageId: command.thread.headMessageId ?? null,
+      };
+    }
+    case "archive_thread":
+      return { threadId: (payload as SyncCommandPayloadMap["archive_thread"]).id };
+    case "archive_workspace":
+      return { workspaceId: (payload as SyncCommandPayloadMap["archive_workspace"]).id };
+    case "update_workspace": {
+      const command = payload as SyncCommandPayloadMap["update_workspace"];
+      return {
+        workspaceId: command.workspace.id,
+        defaultModelId: command.workspace.defaultModelId,
+      };
+    }
+    case "create_user_message": {
+      const command = payload as SyncCommandPayloadMap["create_user_message"];
+      return {
+        threadId: command.threadId,
+        userMessageId: command.userMessage.id,
+        assistantMessageId: command.assistantMessage.id,
+        modelId: command.modelId,
+        search: command.search,
+        reasoningLevel: command.reasoningLevel,
+        promptPreview: previewText(command.promptText),
+        attachmentCount: command.attachmentIds?.length ?? 0,
+      };
+    }
+    case "retry_message": {
+      const command = payload as SyncCommandPayloadMap["retry_message"];
+      return {
+        threadId: command.threadId,
+        userMessageId: command.userMessage.id,
+        assistantMessageId: command.assistantMessage.id,
+        modelId: command.modelId,
+        search: command.search,
+        reasoningLevel: command.reasoningLevel,
+        promptPreview: previewText(command.userMessage.text),
+      };
+    }
+    case "edit_user_message": {
+      const command = payload as SyncCommandPayloadMap["edit_user_message"];
+      return {
+        threadId: command.threadId,
+        sourceMessageId: command.sourceMessageId,
+        userMessageId: command.userMessage.id,
+        assistantMessageId: command.assistantMessage.id,
+        modelId: command.modelId,
+        search: command.search,
+        reasoningLevel: command.reasoningLevel,
+        promptPreview: previewText(command.promptText),
+        attachmentCount: command.attachments?.length ?? 0,
+      };
+    }
+    case "start_assistant_turn":
+      return {
+        assistantMessageId: (payload as SyncCommandPayloadMap["start_assistant_turn"])
+          .assistantMessage.id,
+      };
+    case "cancel_assistant_turn":
+      return { messageId: (payload as SyncCommandPayloadMap["cancel_assistant_turn"]).messageId };
+    case "register_attachment":
+    case "complete_attachment":
+    case "update_attachment": {
+      const command = payload as
+        | SyncCommandPayloadMap["register_attachment"]
+        | SyncCommandPayloadMap["complete_attachment"]
+        | SyncCommandPayloadMap["update_attachment"];
+      return {
+        attachmentId: command.attachment.id,
+        threadId: command.attachment.threadId,
+        messageId: command.attachment.messageId ?? null,
+        status: command.attachment.status,
+      };
+    }
+    case "delete_attachment":
+      return { attachmentId: (payload as SyncCommandPayloadMap["delete_attachment"]).id };
+    case "set_search_mode": {
+      const command = payload as SyncCommandPayloadMap["set_search_mode"];
+      return {
+        workspaceId: command.workspaceId,
+        defaultSearchMode: command.defaultSearchMode,
+      };
+    }
+    case "reset_storage":
+      return {};
+  }
+}
+
 function looksLikeMissingRealtimeAccess(text: string) {
   return /don'?t have access to real[- ]?time|can'?t tell you the (exact )?current time|don'?t have access to the current date|don'?t have access to current information/i.test(
     text,
@@ -239,6 +361,7 @@ export class SyncEngineDurableObject {
       syncLog("internal_command", {
         opId: body.opId,
         commandType: body.commandType,
+        payload: summarizeCommandPayload(body.commandType, body.payload),
       });
       const result = await this.processCommand(body.opId, body.commandType, body.payload, true);
       return Response.json({
@@ -260,7 +383,12 @@ export class SyncEngineDurableObject {
       typeof message === "string" ? message : new TextDecoder().decode(message),
     );
     try {
-      syncLog("ws_message", { type: envelope.type });
+      syncLog("ws_message", {
+        type: envelope.type,
+        socketCount: this.ctx.getWebSockets().length,
+        commandType: envelope.type === "command" ? envelope.commandType : undefined,
+        opId: "opId" in envelope ? envelope.opId : undefined,
+      });
       await this.handleSocketEnvelope(ws, envelope);
     } catch (error) {
       console.error("[sync] websocket message error", error);
@@ -275,7 +403,11 @@ export class SyncEngineDurableObject {
     }
   }
 
-  async webSocketClose(_ws: WebSocket) {}
+  async webSocketClose(_ws: WebSocket) {
+    syncLog("ws_close", {
+      remainingSockets: this.ctx.getWebSockets().length,
+    });
+  }
 
   private async ensureInitialized() {
     if (this.initialized) return;
@@ -386,6 +518,11 @@ export class SyncEngineDurableObject {
   }
 
   private async handleSocketEnvelope(ws: WebSocket, envelope: SyncClientEnvelope) {
+    syncLog("handle_socket_envelope", {
+      type: envelope.type,
+      commandType: envelope.type === "command" ? envelope.commandType : undefined,
+      opId: "opId" in envelope ? envelope.opId : undefined,
+    });
     switch (envelope.type) {
       case "hello":
         await this.handleHello(ws, envelope);
@@ -453,6 +590,13 @@ export class SyncEngineDurableObject {
     const oldestSeq = this.getOldestEventSeq();
     const needsFullSync =
       hello.lastServerSeq <= 0 || (oldestSeq > 0 && hello.lastServerSeq < oldestSeq);
+    syncLog("hello_sync_decision", {
+      clientId: hello.clientId,
+      clientSeq: hello.lastServerSeq,
+      lastServerSeq,
+      oldestSeq,
+      needsFullSync,
+    });
 
     if (needsFullSync) {
       const reason = hello.lastServerSeq <= 0 ? "initial_sync" : "cursor_stale";
@@ -471,12 +615,25 @@ export class SyncEngineDurableObject {
 
     for (const opId of hello.unackedOpIds) {
       const ack = this.getCommandAck(opId);
-      if (ack) ws.send(json(ack));
+      if (ack) {
+        syncLog("hello_replay_ack", {
+          opId,
+          serverSeq: ack.serverSeq,
+          commandType: ack.commandType,
+        });
+        ws.send(json(ack));
+      }
     }
   }
 
   private async replayAfter(ws: WebSocket, afterSeq: number) {
-    for (const event of this.getEventsAfter(afterSeq)) {
+    const events = this.getEventsAfter(afterSeq);
+    syncLog("replay_after", {
+      afterSeq,
+      eventCount: events.length,
+      eventTypes: events.map((event) => event.eventType),
+    });
+    for (const event of events) {
       ws.send(json(event));
     }
   }
@@ -498,7 +655,15 @@ export class SyncEngineDurableObject {
     payload: SyncCommandPayloadMap[T],
     broadcast: boolean,
   ): Promise<SyncCommandResult> {
-    syncLog("process_command_start", { opId, commandType, broadcast });
+    syncLog("process_command_start", {
+      opId,
+      commandType,
+      broadcast,
+      payload: summarizeCommandPayload(
+        commandType,
+        payload as SyncCommandPayloadMap[SyncCommandType],
+      ),
+    });
     const existing = this.getCommandAck(opId);
     if (existing) {
       syncLog("process_command_duplicate", { opId, commandType });
@@ -850,6 +1015,7 @@ export class SyncEngineDurableObject {
       eventCount: transactionResult.pendingEvents.length,
       ackedSeq: transactionResult.ack.serverSeq,
       hasFollowUp: Boolean(followUp),
+      eventTypes: transactionResult.pendingEvents.map((event) => event.eventType),
     });
 
     if (broadcast) {
@@ -1046,6 +1212,10 @@ export class SyncEngineDurableObject {
     const snapshot = await traceAsync("assistant.snapshot.load", "io", {}, () =>
       this.getSnapshot(),
     );
+    syncLog("assistant_turn_snapshot_loaded", {
+      assistantMessageId: payload.assistantMessage.id,
+      snapshotTables: summarizeSnapshotTables(snapshot),
+    });
     const thread = this.getThread(payload.threadId);
     if (!thread) {
       await recorder.finishSpan({
@@ -1079,6 +1249,13 @@ export class SyncEngineDurableObject {
       return;
     }
     const modelId = payload.modelId || workspace.defaultModelId || getDefaultModelId(this.env);
+    syncLog("assistant_turn_context_ready", {
+      assistantMessageId: payload.assistantMessage.id,
+      threadId: payload.threadId,
+      workspaceId: workspace.id,
+      modelId,
+      threadHeadMessageId: thread.headMessageId ?? null,
+    });
     childTraceContext.workspaceId = workspace.id;
     childTraceContext.modelId = modelId;
     let seq = 0;
@@ -1135,6 +1312,18 @@ export class SyncEngineDurableObject {
       const threadMessages = await traceSync("assistant.thread_messages.load", "sync", {}, () =>
         this.getThreadMessages(snapshot, thread, [payload.userMessage, payload.assistantMessage]),
       );
+      syncLog("assistant_turn_thread_messages", {
+        assistantMessageId: payload.assistantMessage.id,
+        threadId: payload.threadId,
+        messageCount: threadMessages.length,
+        messages: threadMessages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          status: message.status,
+          parentMessageId: message.parentMessageId ?? null,
+          textLength: message.text.length,
+        })),
+      });
       const searchTool = payload.search
         ? createExaSearchTool({
             env: this.env,
@@ -1170,6 +1359,21 @@ export class SyncEngineDurableObject {
         { threadMessageCount: threadMessages.length },
         () => this.buildModelMessages(snapshot, workspace.id, threadMessages),
       );
+      syncLog("assistant_turn_model_messages", {
+        assistantMessageId: payload.assistantMessage.id,
+        modelMessageCount: modelMessages.length,
+        systemPromptCount: systemPrompts.length,
+        modelMessages: modelMessages.map((message) => ({
+          role: message.role,
+          contentType: typeof message.content === "string" ? "text" : "parts",
+          contentPreview:
+            typeof message.content === "string"
+              ? previewText(message.content)
+              : Array.isArray(message.content)
+                ? `parts:${message.content.length}`
+                : "parts:0",
+        })),
+      });
       if (searchTool) {
         systemPrompts.push(SEARCH_TOOL_SYSTEM_PROMPT);
       }

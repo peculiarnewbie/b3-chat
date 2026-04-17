@@ -6,6 +6,7 @@ import {
   type Thread,
   type Workspace,
 } from "@b3-chat/domain";
+import { createClientLogger } from "./debug-log";
 
 export type DraftAttachmentChip = {
   localId: string;
@@ -39,6 +40,7 @@ type DraftAttachmentCleanup = Pick<DraftAttachmentChip, "localId" | "attachmentI
 
 const DRAFTS_KEY = "b3.workspaceDrafts";
 const VIEWS_KEY = "b3.workspaceDraftViews";
+const logger = createClientLogger("draft-state");
 
 function readJson<T>(key: string, fallback: T): T {
   if (typeof localStorage === "undefined") return fallback;
@@ -110,6 +112,12 @@ const [viewsSignal, setViewsSignal] =
   createSignal<Record<string, WorkspaceConversationView>>(readViews());
 const [pendingCleanupVersion, setPendingCleanupVersion] = createSignal(0);
 
+logger.log("hydrate", {
+  draftWorkspaceIds: Object.keys(draftsSignal()),
+  viewWorkspaceIds: Object.keys(viewsSignal()),
+  restoredCleanupCount: restoredCleanup.length,
+});
+
 if (strippedPersistedAttachments) {
   persistJson(DRAFTS_KEY, serializeDrafts(draftsSignal()));
 }
@@ -117,17 +125,29 @@ if (strippedPersistedAttachments) {
 function writeDrafts(next: Record<string, DraftChatState>) {
   setDraftsSignal(next);
   persistJson(DRAFTS_KEY, serializeDrafts(next));
+  logger.log("write_drafts", {
+    workspaceIds: Object.keys(next),
+  });
 }
 
 function writeViews(next: Record<string, WorkspaceConversationView>) {
   setViewsSignal(next);
   persistJson(VIEWS_KEY, next);
+  logger.log("write_views", {
+    workspaceIds: Object.keys(next),
+    views: next,
+  });
 }
 
 function queueAttachmentCleanup(attachments: DraftAttachmentCleanup[]) {
   if (attachments.length === 0) return;
   restoredCleanup = [...restoredCleanup, ...attachments];
   setPendingCleanupVersion((value) => value + 1);
+  logger.log("queue_attachment_cleanup", {
+    count: attachments.length,
+    attachmentIds: attachments.map((attachment) => attachment.attachmentId ?? null),
+    localIds: attachments.map((attachment) => attachment.localId),
+  });
 }
 
 function collectAttachmentCleanup(draft: DraftChatState | undefined) {
@@ -164,7 +184,13 @@ export function ensureWorkspaceDraft(input: {
   search: boolean;
 }) {
   const existing = getWorkspaceDraft(input.workspace.id);
-  if (existing) return existing;
+  if (existing) {
+    logger.log("ensure_workspace_draft_existing", {
+      workspaceId: input.workspace.id,
+      threadId: existing.thread.id,
+    });
+    return existing;
+  }
 
   const draft: DraftChatState = {
     workspaceId: input.workspace.id,
@@ -180,6 +206,13 @@ export function ensureWorkspaceDraft(input: {
     ...draftsSignal(),
     [input.workspace.id]: draft,
   });
+  logger.log("ensure_workspace_draft_created", {
+    workspaceId: input.workspace.id,
+    threadId: draft.thread.id,
+    modelId: draft.modelId,
+    reasoningLevel: draft.reasoningLevel,
+    search: draft.search,
+  });
   return draft;
 }
 
@@ -188,7 +221,10 @@ export function updateWorkspaceDraft(
   updater: (draft: DraftChatState) => DraftChatState,
 ) {
   const current = getWorkspaceDraft(workspaceId);
-  if (!current) return null;
+  if (!current) {
+    logger.warn("update_workspace_draft_missing", { workspaceId });
+    return null;
+  }
   const next = updater(current);
   writeDrafts({
     ...draftsSignal(),
@@ -196,6 +232,15 @@ export function updateWorkspaceDraft(
       ...next,
       updatedAt: next.updatedAt ?? nowIso(),
     },
+  });
+  logger.log("update_workspace_draft", {
+    workspaceId,
+    threadId: next.thread.id,
+    attachmentCount: next.attachments.length,
+    textLength: next.text.length,
+    modelId: next.modelId,
+    reasoningLevel: next.reasoningLevel,
+    search: next.search,
   });
   return next;
 }
@@ -232,6 +277,11 @@ export function removeWorkspaceDraftAttachment(workspaceId: string, localId: str
   if (!draft) return null;
   const removed = draft.attachments.find((attachment) => attachment.localId === localId) ?? null;
   if (!removed) return null;
+  logger.log("remove_workspace_draft_attachment", {
+    workspaceId,
+    localId,
+    attachmentId: removed.attachmentId ?? null,
+  });
   replaceWorkspaceDraftAttachments(
     workspaceId,
     draft.attachments.filter((attachment) => attachment.localId !== localId),
@@ -240,6 +290,7 @@ export function removeWorkspaceDraftAttachment(workspaceId: string, localId: str
 }
 
 export function activateWorkspaceDraftView(workspaceId: string) {
+  logger.log("activate_workspace_draft_view", { workspaceId });
   writeViews({
     ...viewsSignal(),
     [workspaceId]: "draft",
@@ -247,6 +298,7 @@ export function activateWorkspaceDraftView(workspaceId: string) {
 }
 
 export function activateWorkspaceThreadView(workspaceId: string) {
+  logger.log("activate_workspace_thread_view", { workspaceId });
   writeViews({
     ...viewsSignal(),
     [workspaceId]: "thread",
@@ -255,6 +307,11 @@ export function activateWorkspaceThreadView(workspaceId: string) {
 
 export function clearWorkspaceDraft(workspaceId: string) {
   const draft = getWorkspaceDraft(workspaceId);
+  logger.warn("clear_workspace_draft", {
+    workspaceId,
+    threadId: draft?.thread.id ?? null,
+    attachmentCount: draft?.attachments.length ?? 0,
+  });
   queueAttachmentCleanup(collectAttachmentCleanup(draft ?? undefined));
   writeDrafts(omit(draftsSignal(), workspaceId));
   writeViews({
@@ -264,6 +321,9 @@ export function clearWorkspaceDraft(workspaceId: string) {
 }
 
 export function finalizeWorkspaceDraft(workspaceId: string) {
+  logger.log("finalize_workspace_draft", {
+    workspaceId,
+  });
   writeDrafts(omit(draftsSignal(), workspaceId));
   writeViews({
     ...viewsSignal(),
@@ -276,6 +336,7 @@ export function clearAllDraftState() {
   setPendingCleanupVersion(0);
   setDraftsSignal({});
   setViewsSignal({});
+  logger.warn("clear_all_draft_state");
   if (typeof localStorage !== "undefined") {
     localStorage.removeItem(DRAFTS_KEY);
     localStorage.removeItem(VIEWS_KEY);
@@ -302,9 +363,17 @@ export function reconcileDraftState(workspaces: Workspace[], _threads: Thread[])
   }
 
   if (nextDrafts !== draftsSignal()) {
+    logger.warn("reconcile_drafts_removed", {
+      before: Object.keys(draftsSignal()),
+      after: Object.keys(nextDrafts),
+    });
     writeDrafts(nextDrafts);
   }
   if (nextViews !== viewsSignal()) {
+    logger.warn("reconcile_views_removed", {
+      before: Object.keys(viewsSignal()),
+      after: Object.keys(nextViews),
+    });
     writeViews(nextViews);
   }
 }
@@ -316,5 +385,10 @@ export function pendingDraftAttachmentCleanupTick() {
 export function consumePendingDraftAttachmentCleanup() {
   const next = restoredCleanup;
   restoredCleanup = [];
+  logger.log("consume_pending_draft_attachment_cleanup", {
+    count: next.length,
+    attachmentIds: next.map((attachment) => attachment.attachmentId ?? null),
+    localIds: next.map((attachment) => attachment.localId),
+  });
   return next;
 }

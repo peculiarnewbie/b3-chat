@@ -37,6 +37,16 @@ export type { ModelMessage, ContentPart, StreamChunk };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 
+function upstreamLog(event: string, details?: Record<string, unknown>) {
+  console.log(
+    JSON.stringify({
+      scope: "chat-adapter",
+      event,
+      ...details,
+    }),
+  );
+}
+
 function createRequestSignal(input: { externalSignal?: AbortSignal; timeoutMs?: number }) {
   const controller = new AbortController();
   const timeoutMs = input.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -408,6 +418,13 @@ export class ChatCompletionsAdapter {
       externalSignal: options.abortController?.signal,
       timeoutMs: this.config.timeout,
     });
+    upstreamLog("chat_stream_start", {
+      modelId: this.model,
+      messageCount: messages.length,
+      toolCount: tools?.length ?? 0,
+      reasoningReplayLength: reasoningToInclude?.length ?? 0,
+      persistedModelOptions: effectiveModelOptions ?? null,
+    });
 
     // Emit RUN_STARTED
     yield {
@@ -453,9 +470,20 @@ export class ChatCompletionsAdapter {
             signal: request.signal,
           }),
       );
+      upstreamLog("chat_stream_response", {
+        modelId: this.model,
+        status: response.status,
+        ok: response.ok,
+        hasBody: Boolean(response.body),
+      });
 
       if (!response.ok || !response.body) {
         const errorText = await response.text().catch(() => "Unknown error");
+        upstreamLog("chat_stream_http_error", {
+          modelId: this.model,
+          status: response.status,
+          errorText: errorText.slice(0, 500),
+        });
         yield {
           type: "RUN_ERROR",
           runId,
@@ -492,6 +520,10 @@ export class ChatCompletionsAdapter {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        upstreamLog("chat_stream_chunk", {
+          modelId: this.model,
+          bytes: value?.byteLength ?? 0,
+        });
 
         buffer += decoder.decode(value, { stream: true });
 
@@ -688,6 +720,16 @@ export class ChatCompletionsAdapter {
         this.assistantToolCallMessageHistory[historicalToolCallCount] = providerToolCallMessage;
       }
 
+      upstreamLog("chat_stream_finished", {
+        modelId: this.model,
+        finishReason,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        reasoningTokens: usage.reasoningTokens,
+        toolCallCount: toolCalls.size,
+        assistantContentLength: assistantContent?.length ?? 0,
+      });
+
       // Emit RUN_FINISHED with usage (including custom _reasoningTokens field)
       const finishedEvent: ExtendedStreamChunk = {
         type: "RUN_FINISHED",
@@ -712,6 +754,11 @@ export class ChatCompletionsAdapter {
 
       yield finishedEvent;
     } catch (error) {
+      upstreamLog("chat_stream_exception", {
+        modelId: this.model,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
       yield {
         type: "RUN_ERROR",
         runId,
@@ -723,6 +770,9 @@ export class ChatCompletionsAdapter {
         model: this.model,
       } as ExtendedStreamChunk;
     } finally {
+      upstreamLog("chat_stream_cleanup", {
+        modelId: this.model,
+      });
       request.cleanup();
     }
   }
