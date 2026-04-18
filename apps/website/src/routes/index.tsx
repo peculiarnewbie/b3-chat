@@ -352,6 +352,69 @@ function TraceSpanTree(props: { span: ParsedTraceSpan }) {
   );
 }
 
+function spanToCopyShape(span: ParsedTraceSpan): Record<string, unknown> {
+  return {
+    name: span.name,
+    kind: span.kind,
+    status: span.status,
+    startedAt: span.startedAt,
+    endedAt: span.endedAt,
+    durationMs: span.durationMs,
+    errorCode: span.errorCode,
+    errorMessage: span.errorMessage,
+    attrs: span.attrs,
+    events: span.events,
+    children: span.children.map(spanToCopyShape),
+  };
+}
+
+function buildTraceCopyText(trace: {
+  run: TraceRun;
+  spans: ParsedTraceSpan[];
+  attrs: Record<string, unknown>;
+}): string {
+  return JSON.stringify(
+    {
+      run: {
+        traceId: trace.run.traceId,
+        status: trace.run.status,
+        modelId: trace.run.modelId,
+        startedAt: trace.run.startedAt,
+        endedAt: trace.run.endedAt,
+        durationMs: trace.run.durationMs,
+        errorCode: trace.run.errorCode,
+        errorMessage: trace.run.errorMessage,
+        attrs: trace.attrs,
+      },
+      spans: trace.spans.map(spanToCopyShape),
+    },
+    null,
+    2,
+  );
+}
+
+function TraceCopyButton(props: { text: () => string }) {
+  const [copied, setCopied] = createSignal(false);
+  let resetTimer: ReturnType<typeof setTimeout> | undefined;
+  return (
+    <button
+      type="button"
+      class="trace-copy-btn"
+      aria-label="Copy trace JSON"
+      title="Copy trace JSON"
+      onClick={(event) => {
+        event.stopPropagation();
+        void navigator.clipboard.writeText(props.text());
+        setCopied(true);
+        if (resetTimer) clearTimeout(resetTimer);
+        resetTimer = setTimeout(() => setCopied(false), 1500);
+      }}
+    >
+      {copied() ? "Copied" : "Copy"}
+    </button>
+  );
+}
+
 const THEMES: { id: Theme; label: string }[] = [
   { id: "clean", label: "Clean" },
   { id: "night", label: "Night" },
@@ -1946,18 +2009,21 @@ export default function Home() {
                                   <span class="trace-run-id">
                                     trace {shortTraceId(trace.run.traceId)}
                                   </span>
-                                  <span class="trace-run-badges">
-                                    <span>{formatTraceStatus(trace.run.status)}</span>
-                                    <Show when={trace.run.modelId}>
-                                      <span>{trace.run.modelId}</span>
-                                    </Show>
-                                    <Show when={trace.attrs.searchEnabled === true}>
-                                      <span>search</span>
-                                    </Show>
-                                    <Show when={trace.run.durationMs != null}>
-                                      <span>{formatDuration(trace.run.durationMs!)}</span>
-                                    </Show>
-                                  </span>
+                                  <div class="trace-run-actions">
+                                    <span class="trace-run-badges">
+                                      <span>{formatTraceStatus(trace.run.status)}</span>
+                                      <Show when={trace.run.modelId}>
+                                        <span>{trace.run.modelId}</span>
+                                      </Show>
+                                      <Show when={trace.attrs.searchEnabled === true}>
+                                        <span>search</span>
+                                      </Show>
+                                      <Show when={trace.run.durationMs != null}>
+                                        <span>{formatDuration(trace.run.durationMs!)}</span>
+                                      </Show>
+                                    </span>
+                                    <TraceCopyButton text={() => buildTraceCopyText(trace)} />
+                                  </div>
                                 </div>
                                 <Show when={trace.run.errorMessage}>
                                   <div class="trace-run-error">{trace.run.errorMessage}</div>
@@ -2137,18 +2203,21 @@ export default function Home() {
                                       <span class="trace-run-id">
                                         trace {shortTraceId(trace.run.traceId)}
                                       </span>
-                                      <span class="trace-run-badges">
-                                        <span>{formatTraceStatus(trace.run.status)}</span>
-                                        <Show when={trace.run.modelId}>
-                                          <span>{trace.run.modelId}</span>
-                                        </Show>
-                                        <Show when={trace.attrs.searchEnabled === true}>
-                                          <span>search</span>
-                                        </Show>
-                                        <Show when={trace.run.durationMs != null}>
-                                          <span>{formatDuration(trace.run.durationMs!)}</span>
-                                        </Show>
-                                      </span>
+                                      <div class="trace-run-actions">
+                                        <span class="trace-run-badges">
+                                          <span>{formatTraceStatus(trace.run.status)}</span>
+                                          <Show when={trace.run.modelId}>
+                                            <span>{trace.run.modelId}</span>
+                                          </Show>
+                                          <Show when={trace.attrs.searchEnabled === true}>
+                                            <span>search</span>
+                                          </Show>
+                                          <Show when={trace.run.durationMs != null}>
+                                            <span>{formatDuration(trace.run.durationMs!)}</span>
+                                          </Show>
+                                        </span>
+                                        <TraceCopyButton text={() => buildTraceCopyText(trace)} />
+                                      </div>
                                     </div>
                                     <Show when={trace.run.errorMessage}>
                                       <div class="trace-run-error">{trace.run.errorMessage}</div>
