@@ -16,6 +16,7 @@
     "@b3-chat/effect": "workspace:*",
     "@b3-chat/server": "workspace:*",
     "@better-auth/infra": "catalog:",
+    "@cloudflare/puppeteer": "^1.1.0",
     "@solidjs/meta": "^0.29.4",
     "@solidjs/router": "^0.15.4",
     "@tanstack/ai": "0.10.2",

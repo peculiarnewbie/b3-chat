@@ -54,6 +54,9 @@
       },
     ],
   },
+  "browser": {
+    "binding": "BROWSER",
+  },
   "migrations": [
     {
       "tag": "v1",

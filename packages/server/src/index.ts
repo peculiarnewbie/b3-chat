@@ -10,6 +10,7 @@ export {
   type ExtendedStreamChunk,
 } from "./chat-completions-adapter.js";
 export { chat } from "@tanstack/ai";
+import puppeteer from "@cloudflare/puppeteer";
 import { decodeAppEnv, type AppEnv } from "@b3-chat/effect";
 import { betterAuth } from "better-auth";
 import { dash } from "@better-auth/infra";
@@ -96,6 +97,18 @@ const EXA_MCP_REQUEST_TIMEOUT_MS = 20_000;
 /** One quick retry for transient network errors / 5xx. Never retry on 4xx. */
 const EXA_MAX_ATTEMPTS = 2;
 const EXA_RETRY_BACKOFF_MS = 500;
+
+/** Browser Rendering extract timeout. A real Chromium render plus navigation
+ *  is slower than a plain REST search (seconds vs hundreds of ms), so the
+ *  budget is wider. */
+const BROWSER_RENDER_TIMEOUT_MS = 30_000;
+/** Max chars of extracted content we hand back to the model. Full pages can
+ *  easily exceed 50KB; the model rarely benefits from more than ~12k chars
+ *  and longer output bloats context for no gain. */
+const BROWSER_RENDER_MAX_CHARS = 12_000;
+/** One retry on transient errors (session churn, goto aborts). */
+const BROWSER_RENDER_MAX_ATTEMPTS = 2;
+const BROWSER_RENDER_RETRY_BACKOFF_MS = 600;
 const encoder = new TextEncoder();
 
 type ExaSearchResult = {
@@ -652,6 +665,334 @@ export async function exaMcpSearchRawText(query: string, numResults = DEFAULT_EX
   throw (
     lastError ??
     new ExaSearchError("Exa MCP search failed after retries", {
+      retryable: true,
+      reason: "network",
+    })
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Cloudflare Browser Rendering — /markdown extraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Structured error surfaced by the extract tool. Mirrors ExaSearchError so the
+ * tool handler can map it to a stable `reason` the model can reason about.
+ */
+export class BrowserRenderError extends Error {
+  readonly status: number | null;
+  readonly retryable: boolean;
+  readonly reason:
+    | "timeout"
+    | "network"
+    | "http"
+    | "auth"
+    | "rate_limited"
+    | "invalid_url"
+    | "empty"
+    | "not_configured";
+  constructor(
+    message: string,
+    init: {
+      status?: number | null;
+      retryable: boolean;
+      reason: BrowserRenderError["reason"];
+    },
+  ) {
+    super(message);
+    this.name = "BrowserRenderError";
+    this.status = init.status ?? null;
+    this.retryable = init.retryable;
+    this.reason = init.reason;
+  }
+}
+
+function toBrowserRenderError(
+  error: unknown,
+  fallbackReason: "timeout" | "network",
+): BrowserRenderError {
+  if (error instanceof BrowserRenderError) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+  if (
+    lower.includes("abort") ||
+    lower.includes("timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("deadline")
+  ) {
+    return new BrowserRenderError("Browser Rendering timed out", {
+      status: null,
+      retryable: true,
+      reason: "timeout",
+    });
+  }
+  return new BrowserRenderError(`Browser Rendering network error: ${message.slice(0, 200)}`, {
+    status: null,
+    retryable: true,
+    reason: fallbackReason,
+  });
+}
+
+/**
+ * Normalize a user-provided URL string. Rejects non-http(s) schemes and
+ * anything that doesn't parse. The model often emits bare domains (`example.com`)
+ * — we prepend `https://` to be forgiving.
+ */
+export function normalizeExtractUrl(input: string): URL | null {
+  if (typeof input !== "string") return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  // If the caller provided an explicit scheme other than http(s), bail
+  // instead of silently coercing it — otherwise `ftp://x.y/z` becomes
+  // `https://ftp://x.y/z`, which parses as a valid URL with host `ftp`.
+  const schemeMatch = /^([a-z][a-z0-9+.-]*):/i.exec(trimmed);
+  if (schemeMatch && !/^https?$/i.test(schemeMatch[1]!)) return null;
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const url = new URL(withScheme);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (!url.hostname) return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+/** Truncate extracted markdown to keep tool output context-friendly. */
+export function truncateExtractedMarkdown(markdown: string) {
+  if (markdown.length <= BROWSER_RENDER_MAX_CHARS) {
+    return { text: markdown, truncated: false, originalLength: markdown.length };
+  }
+  return {
+    text: `${markdown.slice(0, BROWSER_RENDER_MAX_CHARS)}\n\n[… truncated at ${BROWSER_RENDER_MAX_CHARS} chars of ${markdown.length} total]`,
+    truncated: true,
+    originalLength: markdown.length,
+  };
+}
+
+/**
+ * In-page HTML → markdown-ish text. Runs inside the headless Chromium tab
+ * with full DOM access, so we avoid pulling a turndown-style library into
+ * the Worker bundle. The output is close enough to markdown to be useful
+ * to an LLM — headings, lists, code, and links are preserved; inline
+ * styling isn't.
+ *
+ * Kept as a stringifiable function because `page.evaluate` serializes it
+ * and evaluates it in the page context — closures to module-scope values
+ * do NOT work.
+ */
+function extractMarkdownInPage(): string {
+  // Prefer the most specific semantic container the page exposes. Fall back
+  // to <body> so we always produce some content.
+  const root: Element =
+    document.querySelector("article") ||
+    document.querySelector("main") ||
+    document.querySelector('[role="main"]') ||
+    document.body;
+  if (!root) return "";
+  const clone = root.cloneNode(true) as Element;
+  const drop = clone.querySelectorAll(
+    "script, style, noscript, nav, footer, header, aside, iframe, form, button, input, " +
+      'select, textarea, [aria-hidden="true"], [role="navigation"], [role="banner"], ' +
+      '[role="contentinfo"], [role="complementary"]',
+  );
+  for (const node of Array.from(drop)) node.remove();
+
+  const lines: string[] = [];
+  function pushText(text: string) {
+    const trimmed = text.replace(/\s+/g, " ").trim();
+    if (trimmed) lines.push(trimmed);
+  }
+  function renderInline(element: Element): string {
+    let out = "";
+    for (const child of Array.from(element.childNodes)) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        out += (child.textContent ?? "").replace(/\s+/g, " ");
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        const el = child as Element;
+        const tag = el.tagName.toLowerCase();
+        if (tag === "a") {
+          const href = (el as HTMLAnchorElement).href?.trim();
+          const label = renderInline(el).trim();
+          out += href && label && href !== label ? `[${label}](${href})` : label;
+        } else if (tag === "code") {
+          out += `\`${renderInline(el)}\``;
+        } else if (tag === "strong" || tag === "b") {
+          out += `**${renderInline(el)}**`;
+        } else if (tag === "em" || tag === "i") {
+          out += `*${renderInline(el)}*`;
+        } else if (tag === "br") {
+          out += "\n";
+        } else {
+          out += renderInline(el);
+        }
+      }
+    }
+    return out;
+  }
+  function walk(element: Element) {
+    const tag = element.tagName.toLowerCase();
+    if (tag === "pre") {
+      const code = element.textContent ?? "";
+      if (code.trim()) {
+        lines.push("```");
+        lines.push(code.trimEnd());
+        lines.push("```");
+      }
+      return;
+    }
+    if (/^h[1-6]$/.test(tag)) {
+      const level = Number(tag.slice(1));
+      const text = renderInline(element).trim();
+      if (text) lines.push(`${"#".repeat(level)} ${text}`);
+      return;
+    }
+    if (tag === "li") {
+      const text = renderInline(element).trim();
+      if (text) lines.push(`- ${text}`);
+      return;
+    }
+    if (tag === "p" || tag === "blockquote") {
+      const text = renderInline(element).trim();
+      if (text) lines.push(tag === "blockquote" ? `> ${text}` : text);
+      return;
+    }
+    if (tag === "hr") {
+      lines.push("---");
+      return;
+    }
+    // Container — recurse into element children. Leaf text nodes are
+    // only captured inside the inline renderers above, so pure-text
+    // containers (like lone <span>s) still surface via their parent's
+    // renderInline call.
+    let onlyText = true;
+    for (const child of Array.from(element.children)) {
+      const childTag = child.tagName.toLowerCase();
+      if (
+        /^(h[1-6]|p|pre|ul|ol|li|blockquote|hr|article|section|div|main|header|footer|nav|aside|table|thead|tbody|tr)$/.test(
+          childTag,
+        )
+      ) {
+        onlyText = false;
+        break;
+      }
+    }
+    if (onlyText) {
+      const text = renderInline(element).trim();
+      if (text) pushText(text);
+      return;
+    }
+    for (const child of Array.from(element.children)) walk(child);
+  }
+  walk(clone);
+  // Collapse runs of duplicate blank lines and return.
+  const joined = lines.join("\n\n").replace(/\n{3,}/g, "\n\n");
+  return joined.trim();
+}
+
+/**
+ * Renders `url` via the Cloudflare Browser Rendering binding and returns
+ * markdown-ish text. The binding avoids the round-trip to
+ * `api.cloudflare.com` and the associated API token — we're already on
+ * Cloudflare, so we talk to the browser service directly.
+ *
+ * Throws `BrowserRenderError` on failure; the tool handler maps it to a
+ * structured result for the model.
+ */
+export async function cloudflareBrowserMarkdown(env: AppEnv, rawUrl: string): Promise<string> {
+  const binding = env.BROWSER as unknown;
+  if (!binding) {
+    throw new BrowserRenderError("Browser Rendering binding is not configured", {
+      status: null,
+      retryable: false,
+      reason: "not_configured",
+    });
+  }
+
+  const parsed = normalizeExtractUrl(rawUrl);
+  if (!parsed) {
+    throw new BrowserRenderError("URL is not a valid http(s) URL", {
+      status: null,
+      retryable: false,
+      reason: "invalid_url",
+    });
+  }
+  const target = parsed.toString();
+
+  let lastError: BrowserRenderError | null = null;
+  for (let attempt = 1; attempt <= BROWSER_RENDER_MAX_ATTEMPTS; attempt++) {
+    let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
+    try {
+      // `keep_alive` lets Cloudflare reuse this session for up to 10 min if
+      // another extract call lands on the same Worker isolate. We still
+      // close the browser in `finally` to release the concurrent-session
+      // slot — the underlying session stays warm server-side.
+      browser = await puppeteer.launch(binding as Parameters<typeof puppeteer.launch>[0], {
+        keep_alive: 60_000,
+      });
+      const page = await browser.newPage();
+
+      // Block heavy resources we don't need for text extraction. This
+      // makes rendering 2–3× faster on image-heavy pages and avoids
+      // chewing through the page-weight budget.
+      await page.setRequestInterception(true);
+      page.on("request", (req: { resourceType(): string; abort(): void; continue(): void }) => {
+        const type = req.resourceType();
+        if (type === "image" || type === "media" || type === "font" || type === "stylesheet") {
+          req.abort();
+        } else {
+          req.continue();
+        }
+      });
+
+      const response = await page.goto(target, {
+        waitUntil: "domcontentloaded",
+        timeout: BROWSER_RENDER_TIMEOUT_MS,
+      });
+      const status = response?.status() ?? 0;
+      if (status && status >= 400) {
+        const retryable = status >= 500 || status === 429;
+        const reason: BrowserRenderError["reason"] =
+          status === 401 || status === 403 ? "auth" : status === 429 ? "rate_limited" : "http";
+        const err = new BrowserRenderError(`Browser Rendering: target returned HTTP ${status}`, {
+          status,
+          retryable,
+          reason,
+        });
+        if (!retryable || attempt === BROWSER_RENDER_MAX_ATTEMPTS) throw err;
+        lastError = err;
+        await sleep(BROWSER_RENDER_RETRY_BACKOFF_MS * attempt);
+        continue;
+      }
+
+      const markdown = await page.evaluate(extractMarkdownInPage);
+      if (!markdown || !markdown.trim()) {
+        throw new BrowserRenderError("Browser Rendering returned empty content", {
+          status: status || null,
+          retryable: false,
+          reason: "empty",
+        });
+      }
+      return markdown;
+    } catch (error) {
+      const err = toBrowserRenderError(error, "network");
+      if (!err.retryable || attempt === BROWSER_RENDER_MAX_ATTEMPTS) throw err;
+      lastError = err;
+      await sleep(BROWSER_RENDER_RETRY_BACKOFF_MS * attempt);
+    } finally {
+      if (browser) {
+        try {
+          await browser.close();
+        } catch {
+          // Closing a browser that's already gone is fine — session expired
+          // or the worker is shutting down.
+        }
+      }
+    }
+  }
+  throw (
+    lastError ??
+    new BrowserRenderError("Browser Rendering failed after retries", {
       retryable: true,
       reason: "network",
     })

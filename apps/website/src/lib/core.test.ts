@@ -11,8 +11,10 @@ import {
 } from "@b3-chat/domain";
 import {
   allowedEmail,
+  BrowserRenderError,
   chat,
   clampExaResults,
+  cloudflareBrowserMarkdown,
   createChatCompletionsAdapter,
   exaSearch,
   ExaSearchError,
@@ -23,10 +25,13 @@ import {
   isImageAttachment,
   isInlineTextAttachment,
   normalizeEmail,
+  normalizeExtractUrl,
   parseExaMcpTextResponse,
+  truncateExtractedMarkdown,
   verifyUploadToken,
 } from "@b3-chat/server";
 import { createExaSearchTool } from "../server/search";
+import { createBrowserExtractTool } from "../server/extract";
 import { toolDefinition } from "@tanstack/ai";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { explainAssistantError } from "./assistant-errors";
@@ -562,6 +567,11 @@ describe("server helpers", () => {
     AUTH_DB: {} as D1Database,
     UPLOADS: {} as R2Bucket,
     SYNC_ENGINE: {} as DurableObjectNamespace,
+    // A truthy sentinel stands in for the Cloudflare Browser Rendering
+    // binding. The real binding is a Fetcher that only works under
+    // `wrangler dev --remote`; tests inject a fake `extract` function into
+    // `createBrowserExtractTool` so we never dereference it.
+    BROWSER: { __mock: true } as unknown as Fetcher,
   };
 
   it("normalizes and checks the allowed email", () => {
@@ -1441,5 +1451,180 @@ describe("server helpers", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Browser Rendering extract tool
+  // ---------------------------------------------------------------------------
+
+  it("normalizeExtractUrl prepends https and rejects garbage", () => {
+    expect(normalizeExtractUrl("example.com/docs")?.toString()).toBe("https://example.com/docs");
+    expect(normalizeExtractUrl("  https://foo.bar/baz ")?.toString()).toBe("https://foo.bar/baz");
+    expect(normalizeExtractUrl("")).toBeNull();
+    // Non-http(s) schemes rejected
+    expect(normalizeExtractUrl("ftp://x.y/z")).toBeNull();
+    expect(normalizeExtractUrl("not a url at all")).toBeNull();
+  });
+
+  it("truncateExtractedMarkdown caps long payloads and preserves short ones", () => {
+    const short = truncateExtractedMarkdown("# short page\n\nhello");
+    expect(short.truncated).toBe(false);
+    expect(short.text).toBe("# short page\n\nhello");
+
+    const big = truncateExtractedMarkdown("x".repeat(20_000));
+    expect(big.truncated).toBe(true);
+    expect(big.originalLength).toBe(20_000);
+    // Truncated text includes a visible marker so the model knows content was cut.
+    expect(big.text).toContain("truncated");
+    expect(big.text.length).toBeLessThan(20_000);
+  });
+
+  it("cloudflareBrowserMarkdown errors cleanly when the binding is missing", async () => {
+    const envNoBinding = { ...env, BROWSER: undefined };
+    await expect(
+      cloudflareBrowserMarkdown(envNoBinding as any, "https://x.test"),
+    ).rejects.toMatchObject({
+      name: "BrowserRenderError",
+      reason: "not_configured",
+      retryable: false,
+    });
+  });
+
+  it("cloudflareBrowserMarkdown rejects invalid URLs before touching the binding", async () => {
+    // Even with a binding present, bad URLs should short-circuit without
+    // attempting a browser launch.
+    await expect(cloudflareBrowserMarkdown(env as any, "not a url at all")).rejects.toMatchObject({
+      name: "BrowserRenderError",
+      reason: "invalid_url",
+      retryable: false,
+    });
+  });
+
+  it("extract tool returns truncated-aware markdown content on success", async () => {
+    const calls: string[] = [];
+    const { tool, state } = createBrowserExtractTool({
+      env: env as any,
+      assistantMessageId: "msg_extract_ok",
+      extract: async (_env, url) => {
+        calls.push(url);
+        return "# Example\n\nBody content here.";
+      },
+    });
+
+    const result = (await (tool as any).execute({
+      url: "https://example.com/article",
+    })) as any;
+
+    expect(result.ok).toBe(true);
+    expect(result.url).toBe("https://example.com/article");
+    expect(result.content).toContain("Example");
+    expect(result.truncated).toBe(false);
+    expect(calls).toEqual(["https://example.com/article"]);
+    expect(state.extractRuns).toHaveLength(1);
+    expect(state.extractRuns[0]?.status).toBe("completed");
+  });
+
+  it("extract tool refuses duplicate URLs instead of re-rendering", async () => {
+    let renders = 0;
+    const { tool } = createBrowserExtractTool({
+      env: env as any,
+      assistantMessageId: "msg_extract_dup",
+      extract: async () => {
+        renders += 1;
+        return "# Page";
+      },
+    });
+    const first = (await (tool as any).execute({
+      url: "https://example.com/docs?utm_source=x",
+    })) as any;
+    expect(first.ok).toBe(true);
+    // Near-duplicate: trailing slash + different utm_ param.
+    const second = (await (tool as any).execute({
+      url: "https://example.com/docs/?utm_campaign=y",
+    })) as any;
+    expect(second.ok).toBe(false);
+    expect(second.reason).toBe("duplicate_url");
+    expect(renders).toBe(1);
+  });
+
+  it("extract tool enforces per-turn budget", async () => {
+    const { tool, state } = createBrowserExtractTool({
+      env: env as any,
+      assistantMessageId: "msg_extract_budget",
+      extract: async () => "# Page",
+    });
+    // Budget is 5 — fill it, then the 6th call should be rejected.
+    for (let i = 0; i < 5; i++) {
+      const ok = (await (tool as any).execute({ url: `https://example.com/page-${i}` })) as any;
+      expect(ok.ok).toBe(true);
+    }
+    const rejected = (await (tool as any).execute({
+      url: "https://example.com/page-6",
+    })) as any;
+    expect(rejected.ok).toBe(false);
+    expect(rejected.reason).toBe("max_extracts_reached");
+    // Budget rejection doesn't create a run record.
+    expect(state.extractRuns).toHaveLength(5);
+  });
+
+  it("extract tool rejects malformed URLs without touching the browser", async () => {
+    let renders = 0;
+    const { tool, state } = createBrowserExtractTool({
+      env: env as any,
+      assistantMessageId: "msg_extract_invalid",
+      extract: async () => {
+        renders += 1;
+        return "";
+      },
+    });
+    const result = (await (tool as any).execute({ url: "not a url" })) as any;
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("invalid_url");
+    expect(renders).toBe(0);
+    expect(state.extractRuns).toHaveLength(0);
+  });
+
+  it("extract tool maps Browser Rendering HTTP failures into structured errors", async () => {
+    const { tool, state } = createBrowserExtractTool({
+      env: env as any,
+      assistantMessageId: "msg_extract_err",
+      extract: async () => {
+        throw new BrowserRenderError("target returned HTTP 500", {
+          status: 500,
+          retryable: true,
+          reason: "http",
+        });
+      },
+    });
+    const result = (await (tool as any).execute({
+      url: "https://example.com/broken",
+    })) as any;
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("extract_http");
+    expect(typeof result.hint).toBe("string");
+    expect(state.extractRuns).toHaveLength(1);
+    expect(state.extractRuns[0]?.status).toBe("failed");
+  });
+
+  it("extract tool surfaces not_configured when the binding is missing", async () => {
+    const { tool } = createBrowserExtractTool({
+      env: { ...env, BROWSER: undefined } as any,
+      assistantMessageId: "msg_extract_unconfigured",
+      // No injection — falls through to cloudflareBrowserMarkdown which
+      // throws BrowserRenderError("not_configured").
+    });
+    const result = (await (tool as any).execute({ url: "https://example.com/x" })) as any;
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("not_configured");
+  });
+
+  it("BrowserRenderError classifies response bodies as retryable vs not", () => {
+    const authErr = new BrowserRenderError("unauthorized", {
+      status: 401,
+      retryable: false,
+      reason: "auth",
+    });
+    expect(authErr.retryable).toBe(false);
+    expect(authErr.reason).toBe("auth");
   });
 });

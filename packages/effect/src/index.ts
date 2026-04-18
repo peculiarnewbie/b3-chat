@@ -23,6 +23,10 @@ export const AppEnvConfig = Schema.Struct({
   AUTH_DB: Schema.Any,
   UPLOADS: Schema.Any,
   SYNC_ENGINE: Schema.Any,
+  /** Cloudflare Browser Rendering binding. Present when `browser` is wired
+   *  up in wrangler.jsonc; absent on local builds without the binding.
+   *  The extract tool degrades gracefully when this is missing. */
+  BROWSER: Schema.optional(Schema.Any),
 });
 
 export type AppEnv = Schema.Schema.Type<typeof AppEnvConfig>;
