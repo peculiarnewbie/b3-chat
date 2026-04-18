@@ -1677,7 +1677,8 @@ a {
   accent-color: var(--accent);
 }
 
-.composer-bar .btn-primary {
+.composer-bar .btn-primary,
+.composer-bar .btn-stop {
   margin-left: auto;
 }
 
