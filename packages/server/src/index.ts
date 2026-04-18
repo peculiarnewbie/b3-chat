@@ -88,12 +88,13 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_EXA_RESULTS = 5;
 const MIN_EXA_RESULTS = 3;
 const MAX_EXA_RESULTS = 8;
-/** Max time for a single Exa API HTTP call. Search hangs are the #1 source of
- *  stuck tool loops — a tight timeout here keeps the agent loop moving. */
-const EXA_REQUEST_TIMEOUT_MS = 15_000;
-/** Max time for the Exa MCP fallback. Slightly larger because MCP does more work
- *  (autoprompt + livecrawl fallback). */
-const EXA_MCP_REQUEST_TIMEOUT_MS = 20_000;
+/** Max time for a single Exa API HTTP call. Search hangs are a common source of
+ *  stuck tool loops, but we'd rather wait a bit longer than kill a slow-but-
+ *  working query; 60s gives Exa room on cold-path queries while still bounded. */
+const EXA_REQUEST_TIMEOUT_MS = 60_000;
+/** Max time for the Exa MCP fallback. Matches the API timeout — MCP does more
+ *  work (autoprompt + livecrawl fallback), but 60s is generous for both. */
+const EXA_MCP_REQUEST_TIMEOUT_MS = 60_000;
 /** One quick retry for transient network errors / 5xx. Never retry on 4xx. */
 const EXA_MAX_ATTEMPTS = 2;
 const EXA_RETRY_BACKOFF_MS = 500;

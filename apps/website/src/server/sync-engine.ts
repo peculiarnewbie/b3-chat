@@ -110,8 +110,9 @@ function looksLikeMissingRealtimeAccess(text: string) {
  *  2. Models writing natural-language full-sentence queries that return
  *     poor Exa results. → explicit keyword-dense style guidance with
  *     good/bad examples.
- *  3. Models over-searching (4+ searches for a single question). → explicit
- *     budget and "stop once you have enough" directive.
+ *  3. Models over-searching (2-4 searches for a single question that one
+ *     good query could answer). → explicit "prefer a single search" directive,
+ *     framing multiple searches as the exception rather than the norm.
  *  4. Models claiming they can't access real-time info instead of using
  *     the tool. → explicit "don't refuse without trying".
  *  5. Models sending tool results verbatim to the user. → unchanged from the
@@ -128,12 +129,12 @@ const SEARCH_TOOL_SYSTEM_PROMPT = [
   "How to write good queries:",
   "- Keyword-dense, not conversational. Good: `Oscar Piastri 2026 F1 WDC points`. Bad: `Who is currently leading the 2026 Formula 1 Drivers Championship?`.",
   "- Include concrete entities (names, years, versions, locations). Include the current year for anything time-sensitive.",
-  "- For multi-part questions, issue separate focused searches rather than one combined query.",
+  "- Prefer one well-crafted query that covers the whole question. A single good search is almost always enough.",
   "",
   "Budget and loop control:",
-  "- At most a few searches per turn (hard cap: 4). Stop once you have enough to answer.",
-  "- Never repeat an identical or near-identical query — the tool will refuse duplicates. If the first query was weak, reformulate with *different* keywords.",
-  "- If the tool returns `{ ok: false, ... }`, read the `hint` field and follow it. Do not retry the same failed query.",
+  "- Strongly prefer a SINGLE search per turn. Multiple searches are the exception, not the rule — only issue more than one when a single search genuinely cannot answer (e.g., the user asked about two unrelated topics, or the first result was clearly off-target) or when the user explicitly asked you to research several things. The hard cap is 4, but reaching 2+ searches should be rare.",
+  "- Never repeat an identical or near-identical query — the tool will refuse duplicates. If the first query was weak, reformulate with *different* keywords rather than retrying.",
+  "- If the tool returns `{ ok: false, ... }`, read the `hint` field and follow it. Do not retry the same failed query. If a second attempt also fails, stop searching and answer with what you know, explicitly acknowledging the gap.",
   "- After searching, write the final answer. Do not keep searching to be exhaustive.",
   "",
   "How to use results: cite inline by source number when relevant. Do not mention the search tool, the query, or that a search happened unless the user asks.",
