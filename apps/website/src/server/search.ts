@@ -30,13 +30,26 @@ type SearchGroundingRun = {
   rawText?: string;
 };
 
-export type SearchProgressEvent = {
+/**
+ * Progress event shared by `exa_web_search` and `web_extract`.
+ *
+ * `tool` is the discriminator the UI branches on: search and extract both
+ * emit stepped activities, and without this field step 1 of extract would
+ * collide with step 1 of search in the timeline builder. Existing callers
+ * that predate the extract wiring may still omit it — those default to the
+ * search chip, which is the behavior we had before.
+ */
+export type ToolProgressEvent = {
+  tool?: "search" | "extract";
   label: string;
   state?: "active" | "completed" | "failed";
   step?: number;
   query?: string;
   detail?: string;
 };
+
+/** @deprecated use ToolProgressEvent. Kept as an alias to avoid churn. */
+export type SearchProgressEvent = ToolProgressEvent;
 
 type SearchToolState = {
   searchRuns: SearchRun[];
@@ -271,6 +284,7 @@ export function createExaSearchTool(input: {
         priorRuns: state.searchRuns.length,
       });
       await input.onProgress?.({
+        tool: "search",
         label: `Search budget reached (${MAX_SEARCHES_PER_TURN}); answering with existing results`,
         state: "failed",
         step: state.searchRuns.length + 1,
@@ -308,6 +322,7 @@ export function createExaSearchTool(input: {
     return trace("assistant.search.prepare", { query, numResults }, async () => {
       const step = state.searchRuns.length + 1;
       await input.onProgress?.({
+        tool: "search",
         label: `Searching the web for "${query}"`,
         state: "active",
         step,
@@ -366,6 +381,7 @@ export function createExaSearchTool(input: {
               previewText: run.previewText,
             });
             await input.onProgress?.({
+              tool: "search",
               label:
                 normalizedRows.length > 0
                   ? `Found ${normalizedRows.length} result${normalizedRows.length === 1 ? "" : "s"} for "${query}"`
@@ -403,6 +419,7 @@ export function createExaSearchTool(input: {
               previewText: run.previewText,
             });
             await input.onProgress?.({
+              tool: "search",
               label: `Search finished for "${query}"`,
               state: "completed",
               step,
@@ -441,6 +458,7 @@ export function createExaSearchTool(input: {
             reason,
           });
           await input.onProgress?.({
+            tool: "search",
             label: `Search failed for "${query}"`,
             state: "failed",
             step,

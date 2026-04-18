@@ -15,6 +15,7 @@ import { useLiveQuery } from "@tanstack/solid-db";
 import { createId, nowIso, resolveThreadMessagePath } from "@b3-chat/domain";
 import type {
   Attachment,
+  ExtractRun,
   Message,
   MessagePart,
   ReasoningLevel,
@@ -38,6 +39,7 @@ import {
   attachments as attachmentsCollection,
   searchRuns as searchRunsCollection,
   searchResults as searchResultsCollection,
+  extractRuns as extractRunsCollection,
   traceRuns as traceRunsCollection,
   traceSpans as traceSpansCollection,
 } from "../lib/collections";
@@ -99,6 +101,13 @@ type ModelsPayload = {
 
 type Theme = "clean" | "night" | "warm";
 type AssistantActivity = {
+  /**
+   * Which tool produced this activity. Missing on older parts (pre-extract
+   * wiring) or on non-tool activities like "Response failed"; we treat
+   * missing-with-a-step as `search` for back-compat, and missing-without-a-
+   * step as a generic activity.
+   */
+  tool: "search" | "extract" | null;
   label: string;
   state: "active" | "completed" | "failed";
   step: number | null;
@@ -195,6 +204,7 @@ function parseAssistantActivity(part: { kind?: string; text?: string; json?: str
   if (typeof part.json !== "string" || !part.json.trim()) {
     return fallbackLabel
       ? {
+          tool: null,
           label: fallbackLabel,
           state: "active" as const,
           step: null,
@@ -210,10 +220,20 @@ function parseAssistantActivity(part: { kind?: string; text?: string; json?: str
       typeof parsed.label === "string" && parsed.label.trim() ? parsed.label.trim() : fallbackLabel;
     if (!label) return null;
 
+    // Back-compat for activities emitted before the tool discriminator
+    // landed: a stepped activity with no `tool` field must have been search
+    // (extract wasn't wired then). An unstepped activity with no tool field
+    // is a top-level marker ("Response failed", budget reached).
+    const rawTool = parsed.tool;
+    const step = typeof parsed.step === "number" ? parsed.step : null;
+    const tool: AssistantActivity["tool"] =
+      rawTool === "search" || rawTool === "extract" ? rawTool : step != null ? "search" : null;
+
     return {
+      tool,
       label,
       state: parsed.state === "completed" || parsed.state === "failed" ? parsed.state : "active",
-      step: typeof parsed.step === "number" ? parsed.step : null,
+      step,
       query: typeof parsed.query === "string" && parsed.query.trim() ? parsed.query.trim() : null,
       detail:
         typeof parsed.detail === "string" && parsed.detail.trim() ? parsed.detail.trim() : null,
@@ -221,6 +241,7 @@ function parseAssistantActivity(part: { kind?: string; text?: string; json?: str
   } catch {
     return fallbackLabel
       ? {
+          tool: null,
           label: fallbackLabel,
           state: "active" as const,
           step: null,
@@ -379,6 +400,7 @@ export default function Home() {
   const allAttachments = useLiveQuery(() => attachmentsCollection);
   const allSearchRuns = useLiveQuery(() => searchRunsCollection);
   const allSearchResults = useLiveQuery(() => searchResultsCollection);
+  const allExtractRuns = useLiveQuery(() => extractRunsCollection);
   const allTraceRuns = useLiveQuery(() => traceRunsCollection);
   const allTraceSpans = useLiveQuery(() => traceSpansCollection);
   const [theme, setTheme] = createSignal<Theme>(getInitialTheme());
@@ -771,6 +793,23 @@ export default function Home() {
     }
     return byMessage;
   });
+  /**
+   * Parallel to searchRunsMemo: keys messageId → ExtractRun[] sorted by step.
+   * The extract chip reads from this to render "Reading…" vs "Read … (N
+   * chars)" states, and to expose final char counts after streaming.
+   */
+  const extractRunsMemo = createMemo(() => {
+    const byMessage = new Map<string, ExtractRun[]>();
+    for (const row of allExtractRuns() as ExtractRun[]) {
+      const list = byMessage.get(row.messageId) ?? [];
+      list.push(row);
+      byMessage.set(row.messageId, list);
+    }
+    for (const list of byMessage.values()) {
+      list.sort((a, b) => a.step - b.step);
+    }
+    return byMessage;
+  });
   /** Flat, ordered list of citations per message (matches [1],[2]… numbering the model uses). */
   const citationsForMessage = (messageId: string): Citation[] => {
     const runs = searchRunsMemo().get(messageId);
@@ -858,6 +897,21 @@ export default function Home() {
         detail: string | null;
         key: string;
       }
+    | {
+        kind: "extract";
+        step: number;
+        /** URL the model asked to extract. Falls back to the activity's URL
+         *  if the ExtractRun row hasn't landed yet. */
+        url: string;
+        /** Hostname extracted from `url`, for the compact chip label. */
+        host: string;
+        status: "active" | "completed" | "failed";
+        charCount: number;
+        originalLength: number | null;
+        truncated: boolean;
+        detail: string | null;
+        key: string;
+      }
     | { kind: "thinking"; tokens: number; key: string }
     | {
         kind: "reasoning";
@@ -876,6 +930,7 @@ export default function Home() {
   const assistantTimelineByMessage = createMemo(() => {
     const byMessage = new Map<string, TimelineItem[]>();
     const searchRunsByMsg = searchRunsMemo();
+    const extractRunsByMsg = extractRunsMemo();
 
     for (const [messageId, parts] of messagePartsByMessage()) {
       const items: TimelineItem[] = [];
@@ -921,6 +976,10 @@ export default function Home() {
       /** Track the latest activity seen for each search step so we can
        *  collapse (Searching…, Found X results) into a single chip. */
       const renderedSearchSteps = new Set<number>();
+      /** Parallel tracker for extract steps — search and extract share the
+       *  same step-number space from the model's POV (each tool starts at 1
+       *  independently) so we key their chips separately. */
+      const renderedExtractSteps = new Set<number>();
 
       for (const part of parts) {
         if (part.kind === "text") {
@@ -964,14 +1023,47 @@ export default function Home() {
           }
 
           if (activity.step != null) {
-            // For a given search step we may see multiple activities
+            // For a given tool step we may see multiple activities
             // (active → completed, or active → failed). Only emit the
             // chip once; its live status and result count are read from
-            // the search run row, which reflects the latest state.
-            if (renderedSearchSteps.has(activity.step)) continue;
-            renderedSearchSteps.add(activity.step);
+            // the run row, which reflects the latest state.
             flushReasoning(false);
             flushText(false);
+
+            if (activity.tool === "extract") {
+              if (renderedExtractSteps.has(activity.step)) continue;
+              renderedExtractSteps.add(activity.step);
+              const run = (extractRunsByMsg.get(messageId) ?? []).find(
+                (r) => r.step === activity.step,
+              );
+              const url = run?.url ?? "";
+              let host = "";
+              if (url) {
+                try {
+                  host = new URL(url).hostname;
+                } catch {
+                  host = url;
+                }
+              }
+              items.push({
+                kind: "extract",
+                step: activity.step,
+                url,
+                host,
+                status: run ? run.status : activity.state,
+                charCount: run?.charCount ?? 0,
+                originalLength: run?.originalLength ?? null,
+                truncated: run?.truncated ?? false,
+                detail: activity.detail ?? run?.errorMessage ?? null,
+                key: `extract:${activity.step}`,
+              });
+              continue;
+            }
+
+            // Default to search — covers explicit `tool: "search"` and the
+            // back-compat path (stepped activity with no tool field).
+            if (renderedSearchSteps.has(activity.step)) continue;
+            renderedSearchSteps.add(activity.step);
             const run = (searchRunsByMsg.get(messageId) ?? []).find(
               (r) => r.step === activity.step,
             );
@@ -1150,6 +1242,7 @@ export default function Home() {
     (Boolean(message.text?.trim()) ||
       message.status === "failed" ||
       (searchRunsMemo().get(message.id)?.length ?? 0) > 0 ||
+      (extractRunsMemo().get(message.id)?.length ?? 0) > 0 ||
       hasAssistantStats(message));
   /**
    * True when an assistant message should render with the new interleaved
@@ -1527,6 +1620,117 @@ export default function Home() {
                                           </div>
                                         )}
                                       </Show>
+                                    </Show>
+                                    <Show
+                                      when={
+                                        !collapsed() && data().status === "failed" && data().detail
+                                      }
+                                    >
+                                      <div class="assistant-chip-error">{data().detail}</div>
+                                    </Show>
+                                  </div>
+                                );
+                              }}
+                            </Match>
+                            <Match
+                              when={
+                                item().kind === "extract"
+                                  ? (item() as Extract<TimelineItem, { kind: "extract" }>)
+                                  : null
+                              }
+                            >
+                              {(data) => {
+                                const collapsed = () => isChipCollapsed(message().id, data().key);
+                                const hasDetail = () =>
+                                  Boolean(data().url) ||
+                                  (data().status === "failed" && Boolean(data().detail));
+                                const statusLabel = () => {
+                                  if (data().status === "failed") return "Read failed";
+                                  if (data().status === "active") return "Reading page";
+                                  return "Read page";
+                                };
+                                const metaLabel = () => {
+                                  if (data().status !== "completed") return null;
+                                  const chars = data().originalLength ?? data().charCount;
+                                  if (!chars) return null;
+                                  return data().truncated
+                                    ? `${chars.toLocaleString()} chars (truncated)`
+                                    : `${chars.toLocaleString()} chars`;
+                                };
+                                return (
+                                  <div
+                                    classList={{
+                                      "assistant-chip": true,
+                                      "assistant-chip-search": true,
+                                      "assistant-chip-extract": true,
+                                      "is-active": data().status === "active",
+                                      "is-failed": data().status === "failed",
+                                    }}
+                                  >
+                                    <button
+                                      type="button"
+                                      class="assistant-chip-toggle"
+                                      aria-expanded={!collapsed()}
+                                      onClick={() => toggleChipCollapse(message().id, data().key)}
+                                      disabled={!hasDetail()}
+                                    >
+                                      <span class="assistant-chip-icon" aria-hidden="true">
+                                        <Show
+                                          when={data().status === "active"}
+                                          fallback={
+                                            <svg
+                                              width="12"
+                                              height="12"
+                                              viewBox="0 0 24 24"
+                                              fill="none"
+                                              stroke="currentColor"
+                                              stroke-width="2"
+                                              stroke-linecap="round"
+                                              stroke-linejoin="round"
+                                            >
+                                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                              <path d="M14 2v6h6" />
+                                              <path d="M16 13H8" />
+                                              <path d="M16 17H8" />
+                                              <path d="M10 9H8" />
+                                            </svg>
+                                          }
+                                        >
+                                          <span class="thinking-spinner" />
+                                        </Show>
+                                      </span>
+                                      <span class="assistant-chip-label">{statusLabel()}</span>
+                                      <Show when={data().host}>
+                                        <span class="assistant-chip-detail">{data().host}</span>
+                                      </Show>
+                                      <Show when={metaLabel()}>
+                                        {(label) => (
+                                          <span class="assistant-chip-meta">{label()}</span>
+                                        )}
+                                      </Show>
+                                      <Show when={hasDetail()}>
+                                        <span
+                                          classList={{
+                                            "assistant-chip-chevron": true,
+                                            "is-collapsed": collapsed(),
+                                          }}
+                                          aria-hidden="true"
+                                        >
+                                          ▾
+                                        </span>
+                                      </Show>
+                                    </button>
+                                    <Show when={!collapsed() && data().url}>
+                                      <div class="search-results-inline">
+                                        <a
+                                          class="search-result-link"
+                                          href={data().url}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                        >
+                                          <span class="search-result-title">{data().url}</span>
+                                        </a>
+                                      </div>
                                     </Show>
                                     <Show
                                       when={

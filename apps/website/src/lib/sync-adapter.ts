@@ -16,6 +16,7 @@ import {
   attachments,
   searchRuns,
   searchResults,
+  extractRuns,
   traceRuns,
   traceSpans,
   getSyncWriter,
@@ -78,6 +79,8 @@ function hasRow(collectionId: string, key: string) {
       return Boolean(searchRuns.get(key));
     case "searchResults":
       return Boolean(searchResults.get(key));
+    case "extractRuns":
+      return Boolean(extractRuns.get(key));
     case "traceRuns":
       return Boolean(traceRuns.get(key));
     case "traceSpans":
@@ -253,6 +256,26 @@ function applyEvent(eventType: string, payload: unknown) {
           resWriter.write({ type: "insert", value: row });
         }
         resWriter.commit();
+      }
+      break;
+    }
+    case "extract_runs_replaced": {
+      const event = payload as SyncEventPayloadMap["extract_runs_replaced"];
+      // Same strategy as search_runs: fully replace this message's rows
+      // rather than diff. Keeps the client in lockstep with state.extractRuns
+      // on the server.
+      const erWriter = getSyncWriter("extractRuns");
+      if (erWriter) {
+        erWriter.begin();
+        for (const [key, row] of extractRuns.state.entries()) {
+          if ((row as any).messageId === event.messageId) {
+            erWriter.write({ key: key as string, type: "delete" });
+          }
+        }
+        for (const row of event.rows) {
+          erWriter.write({ type: "insert", value: row });
+        }
+        erWriter.commit();
       }
       break;
     }

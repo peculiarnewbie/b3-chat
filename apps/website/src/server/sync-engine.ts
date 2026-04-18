@@ -23,6 +23,7 @@ import {
   type RetryMessagePayload,
   type SearchRun,
   type SearchResult,
+  type ExtractRun,
   type SyncClientEnvelope,
   type SyncClientHello,
   type SyncCommandPayloadMap,
@@ -60,7 +61,7 @@ import {
   traceEffect,
 } from "@b3-chat/effect";
 import { Effect } from "effect";
-import { createExaSearchTool, type SearchProgressEvent } from "./search";
+import { createExaSearchTool, type ToolProgressEvent } from "./search";
 import { createBrowserExtractTool } from "./extract";
 import { normalizeAssistantError } from "./error-normalization";
 import { consumeAssistantStream, type StreamConsumerDeps } from "./stream-consumer";
@@ -375,6 +376,11 @@ export class SyncEngineDurableObject {
         message_id TEXT NOT NULL,
         row_json TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS extract_runs (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        row_json TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS trace_runs (
         id TEXT PRIMARY KEY,
         message_id TEXT,
@@ -400,6 +406,7 @@ export class SyncEngineDurableObject {
       CREATE INDEX IF NOT EXISTS idx_attachments_thread ON attachments(thread_id);
       CREATE INDEX IF NOT EXISTS idx_search_runs_message ON search_runs(message_id);
       CREATE INDEX IF NOT EXISTS idx_search_results_message ON search_results(message_id);
+      CREATE INDEX IF NOT EXISTS idx_extract_runs_message ON extract_runs(message_id);
       CREATE INDEX IF NOT EXISTS idx_trace_runs_message ON trace_runs(message_id);
       CREATE INDEX IF NOT EXISTS idx_trace_spans_trace_run ON trace_spans(trace_run_id);
     `);
@@ -814,6 +821,7 @@ export class SyncEngineDurableObject {
           this.exec(`DELETE FROM attachments`);
           this.exec(`DELETE FROM search_runs`);
           this.exec(`DELETE FROM search_results`);
+          this.exec(`DELETE FROM extract_runs`);
           this.exec(`DELETE FROM trace_runs`);
           this.exec(`DELETE FROM trace_spans`);
           this.exec(`DELETE FROM events`);
@@ -1150,7 +1158,7 @@ export class SyncEngineDurableObject {
       return rawAppendMessagePart(kind, input);
     };
 
-    const reportActivity = async (activity: SearchProgressEvent) => {
+    const reportActivity = async (activity: ToolProgressEvent) => {
       await appendMessagePart("activity", {
         text: activity.label,
         json: json(activity),
@@ -1209,6 +1217,13 @@ export class SyncEngineDurableObject {
                   run,
                 ),
               onProgress: reportActivity,
+              onExtractStateChange: async (state) => {
+                const extractEvent = await this.appendServerEvent(null, "extract_runs_replaced", {
+                  messageId: payload.assistantMessage.id,
+                  rows: state.extractRuns,
+                });
+                this.broadcast(extractEvent);
+              },
             })
           : null;
 
@@ -1426,7 +1441,7 @@ export class SyncEngineDurableObject {
             label: "Response failed",
             state: "failed",
             detail: normalizedError.errorMessage,
-          } satisfies SearchProgressEvent),
+          } satisfies ToolProgressEvent),
         });
       }
       await recorder.finishSpan({
@@ -1792,6 +1807,20 @@ export class SyncEngineDurableObject {
         }
         break;
       }
+      case "extract_runs_replaced": {
+        const event = payload as SyncEventPayloadMap["extract_runs_replaced"];
+        this.exec(`DELETE FROM extract_runs WHERE message_id = ?`, event.messageId);
+        for (const row of event.rows) {
+          this.exec(
+            `INSERT OR REPLACE INTO extract_runs (id, message_id, row_json)
+             VALUES (?, ?, ?)`,
+            row.id,
+            row.messageId,
+            json(row),
+          );
+        }
+        break;
+      }
       case "trace_run_upserted": {
         const event = payload as SyncEventPayloadMap["trace_run_upserted"];
         const row = event.row;
@@ -1841,6 +1870,7 @@ export class SyncEngineDurableObject {
       "attachments",
       "search_runs",
       "search_results",
+      "extract_runs",
       "trace_runs",
       "trace_spans",
     ]) {
@@ -1878,6 +1908,15 @@ export class SyncEngineDurableObject {
     }
     for (const [messageId, rows] of resultsByMessage) {
       this.applyEventToMaterializedState("search_results_replaced", { messageId, rows });
+    }
+    const extractRunsByMessage = new Map<string, ExtractRun[]>();
+    for (const row of Object.values<ExtractRun>(tables[TABLES.extractRuns] ?? {})) {
+      const list = extractRunsByMessage.get(row.messageId) ?? [];
+      list.push(row);
+      extractRunsByMessage.set(row.messageId, list);
+    }
+    for (const [messageId, rows] of extractRunsByMessage) {
+      this.applyEventToMaterializedState("extract_runs_replaced", { messageId, rows });
     }
     for (const row of Object.values<TraceRun>(tables[TABLES.traceRuns] ?? {})) {
       this.applyEventToMaterializedState("trace_run_upserted", { row });
@@ -1971,6 +2010,7 @@ export class SyncEngineDurableObject {
         [TABLES.attachments]: this.readTable("attachments"),
         [TABLES.searchRuns]: this.readTable("search_runs"),
         [TABLES.searchResults]: this.readTable("search_results"),
+        [TABLES.extractRuns]: this.readTable("extract_runs"),
         [TABLES.traceRuns]: this.readTable("trace_runs"),
         [TABLES.traceSpans]: this.readTable("trace_spans"),
       },
@@ -2024,6 +2064,7 @@ export class SyncEngineDurableObject {
       "attachments",
       "search_runs",
       "search_results",
+      "extract_runs",
       "trace_runs",
       "trace_spans",
     ]) {

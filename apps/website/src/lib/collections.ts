@@ -7,6 +7,7 @@ import type {
   Attachment,
   SearchRun,
   SearchResult,
+  ExtractRun,
   TraceRun,
   TraceSpan,
 } from "@b3-chat/domain";
@@ -32,6 +33,7 @@ export const COLLECTION_IDS = [
   "attachments",
   "searchRuns",
   "searchResults",
+  "extractRuns",
   "traceRuns",
   "traceSpans",
 ] as const;
@@ -94,6 +96,7 @@ export const messageParts = createSyncedCollection<MessagePart>("messageParts", 
 export const attachments = createSyncedCollection<Attachment>("attachments", (a) => a.id);
 export const searchRuns = createSyncedCollection<SearchRun>("searchRuns", (sr) => sr.id);
 export const searchResults = createSyncedCollection<SearchResult>("searchResults", (sr) => sr.id);
+export const extractRuns = createSyncedCollection<ExtractRun>("extractRuns", (er) => er.id);
 export const traceRuns = createSyncedCollection<TraceRun>("traceRuns", (run) => run.id);
 export const traceSpans = createSyncedCollection<TraceSpan>("traceSpans", (span) => span.id);
 
@@ -129,6 +132,7 @@ export const TABLE_TO_COLLECTION: Record<string, string> = {
   attachments: "attachments",
   search_runs: "searchRuns",
   search_results: "searchResults",
+  extract_runs: "extractRuns",
   trace_runs: "traceRuns",
   trace_spans: "traceSpans",
 };

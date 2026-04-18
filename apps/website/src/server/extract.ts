@@ -1,4 +1,5 @@
 import { toolDefinition } from "@tanstack/ai";
+import { createExtractRun, type ExtractRun } from "@b3-chat/domain";
 import {
   BrowserRenderError,
   cloudflareBrowserMarkdown,
@@ -6,7 +7,7 @@ import {
   truncateExtractedMarkdown,
   type AppEnv,
 } from "@b3-chat/server";
-import type { SearchProgressEvent } from "./search";
+import type { ToolProgressEvent } from "./search";
 
 /**
  * Cap on extract calls per assistant turn. The limit is about quality, not
@@ -143,14 +144,13 @@ function normalizeUrlKey(url: string): string {
 }
 
 type ExtractToolState = {
-  extractRuns: Array<{
-    url: string;
-    status: "completed" | "failed";
-    step: number;
-    errorMessage?: string | null;
-    originalLength?: number;
-    truncated?: boolean;
-  }>;
+  /**
+   * Full ExtractRun rows (mirrors search tool). Storing the final decoded
+   * shape — including a stable id — lets us feed the same value straight into
+   * `extract_runs_replaced` without any post-hoc enrichment, and it lets
+   * tests assert on the exact row the UI will see.
+   */
+  extractRuns: ExtractRun[];
 };
 
 export function createBrowserExtractTool(input: {
@@ -158,7 +158,14 @@ export function createBrowserExtractTool(input: {
   assistantMessageId: string;
   log?: (event: string, details?: Record<string, unknown>) => void;
   trace?: <A>(name: string, attrs: Record<string, unknown>, run: () => Promise<A>) => Promise<A>;
-  onProgress?: (event: SearchProgressEvent) => void | Promise<void>;
+  onProgress?: (event: ToolProgressEvent) => void | Promise<void>;
+  /**
+   * Called whenever `state.extractRuns` changes (after the active row is
+   * appended pre-fetch, and again when it flips to completed/failed). The
+   * sync-engine wires this to an `extract_runs_replaced` server event so the
+   * UI sees progress in real time, exactly like search.
+   */
+  onExtractStateChange?: (state: Readonly<ExtractToolState>) => void | Promise<void>;
   /**
    * Injection point. Defaults to `cloudflareBrowserMarkdown`, which hits
    * the Browser Rendering binding via puppeteer. Tests pass a fake so they
@@ -171,6 +178,18 @@ export function createBrowserExtractTool(input: {
   const trace =
     input.trace ?? ((_: string, __: Record<string, unknown>, run: () => Promise<any>) => run());
   const extract = input.extract ?? cloudflareBrowserMarkdown;
+
+  /**
+   * Replace the in-memory row at index `at` and publish the whole state.
+   * We don't splice-in-place with a simple assignment so callers can treat
+   * `state.extractRuns` as append-only from the outside — every transition
+   * creates a fresh row.
+   */
+  const publishState = async () => {
+    await input.onExtractStateChange?.({
+      extractRuns: [...state.extractRuns],
+    });
+  };
 
   const tool = toolDefinition({
     name: "web_extract",
@@ -227,6 +246,7 @@ export function createBrowserExtractTool(input: {
         priorRuns: state.extractRuns.length,
       });
       await input.onProgress?.({
+        tool: "extract",
         label: `Extract budget reached (${MAX_EXTRACTS_PER_TURN}); answering with existing content`,
         state: "failed",
         step: state.extractRuns.length + 1,
@@ -261,7 +281,21 @@ export function createBrowserExtractTool(input: {
 
     return trace("assistant.extract.prepare", { url }, async () => {
       const step = state.extractRuns.length + 1;
+      // Append an `active` row up front so the UI shows a "Reading …" chip
+      // that later flips to "Read … (N chars)" via the terminal publishState
+      // below. The row id is stable — we update the same slot in place so
+      // extract_runs_replaced replaces cleanly on the client.
+      const runIndex = state.extractRuns.length;
+      const activeRun = createExtractRun({
+        messageId: input.assistantMessageId,
+        url,
+        status: "active",
+        step,
+      });
+      state.extractRuns.push(activeRun);
+      await publishState();
       await input.onProgress?.({
+        tool: "extract",
         label: `Reading ${safeHost(url) || url}`,
         state: "active",
         step,
@@ -271,13 +305,18 @@ export function createBrowserExtractTool(input: {
         try {
           const markdown = await extract(input.env, url);
           const { text, truncated, originalLength } = truncateExtractedMarkdown(markdown);
-          state.extractRuns.push({
+          state.extractRuns[runIndex] = createExtractRun({
+            id: activeRun.id,
+            createdAt: activeRun.createdAt,
+            messageId: input.assistantMessageId,
             url,
             status: "completed",
             step,
+            charCount: text.length,
             originalLength,
             truncated,
           });
+          await publishState();
           urlCache.set(urlKey, {
             ok: true,
             url,
@@ -294,6 +333,7 @@ export function createBrowserExtractTool(input: {
             truncated,
           });
           await input.onProgress?.({
+            tool: "extract",
             label: truncated
               ? `Read ${safeHost(url) || url} (${originalLength.toLocaleString()} chars, truncated)`
               : `Read ${safeHost(url) || url} (${originalLength.toLocaleString()} chars)`,
@@ -309,12 +349,16 @@ export function createBrowserExtractTool(input: {
           } satisfies ExtractToolResult;
         } catch (error) {
           const { reason, message, hint } = classifyRenderError(error);
-          state.extractRuns.push({
+          state.extractRuns[runIndex] = createExtractRun({
+            id: activeRun.id,
+            createdAt: activeRun.createdAt,
+            messageId: input.assistantMessageId,
             url,
             status: "failed",
             step,
             errorMessage: message,
           });
+          await publishState();
           input.log?.("assistant_turn_tool_extract_error", {
             assistantMessageId: input.assistantMessageId,
             step,
@@ -323,6 +367,7 @@ export function createBrowserExtractTool(input: {
             reason,
           });
           await input.onProgress?.({
+            tool: "extract",
             label: `Failed to read ${safeHost(url) || url}`,
             state: "failed",
             step,

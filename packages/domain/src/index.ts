@@ -8,11 +8,15 @@ export const TABLES = {
   attachments: "attachments",
   searchRuns: "search_runs",
   searchResults: "search_results",
+  extractRuns: "extract_runs",
   traceRuns: "trace_runs",
   traceSpans: "trace_spans",
 } as const;
 
-export const SYNC_PROTOCOL_VERSION = "effect4-trace-v1";
+// Bumped from "effect4-trace-v1" because we added a new persisted table
+// (extract_runs). Clients on the old schema will see a hello_ack mismatch
+// and reload to pick up the new snapshot shape.
+export const SYNC_PROTOCOL_VERSION = "effect4-extract-v1";
 
 const NullableString = Schema.NullOr(Schema.String);
 const NullableNumber = Schema.NullOr(Schema.Number);
@@ -147,6 +151,29 @@ export const SearchResultRow = Schema.Struct({
   score: Schema.Number,
 });
 
+/**
+ * A single Browser Rendering extract call.
+ *
+ * `charCount` is the length of the clean markdown we actually handed back to
+ * the model (post-truncation), while `originalLength` is what the page
+ * rendered to before the cap — keeping both lets the UI say "Read 48,300
+ * chars (truncated to 12k)" without re-fetching the content.
+ */
+export const ExtractRunStatus = Schema.Literals(["active", "completed", "failed"]);
+
+export const ExtractRunRow = Schema.Struct({
+  id: Schema.String,
+  messageId: Schema.String,
+  url: Schema.String,
+  status: ExtractRunStatus,
+  step: Schema.Number,
+  charCount: Schema.Number,
+  originalLength: NullableNumber,
+  truncated: Schema.Boolean,
+  errorMessage: NullableString,
+  createdAt: Schema.String,
+});
+
 export const TraceStatus = Schema.Literals(["running", "completed", "failed", "cancelled"]);
 export const TraceSpanKind = Schema.Literals(["root", "internal", "tool", "model", "io", "sync"]);
 
@@ -200,6 +227,7 @@ export const decodeMessagePartRow = Schema.decodeUnknownSync(MessagePartRow);
 export const decodeAttachmentRow = Schema.decodeUnknownSync(AttachmentRow);
 export const decodeSearchRunRow = Schema.decodeUnknownSync(SearchRunRow);
 export const decodeSearchResultRow = Schema.decodeUnknownSync(SearchResultRow);
+export const decodeExtractRunRow = Schema.decodeUnknownSync(ExtractRunRow);
 export const decodeTraceRunRow = Schema.decodeUnknownSync(TraceRunRow);
 export const decodeTraceSpanRow = Schema.decodeUnknownSync(TraceSpanRow);
 
@@ -210,6 +238,8 @@ export type MessagePart = Schema.Schema.Type<typeof MessagePartRow>;
 export type Attachment = Schema.Schema.Type<typeof AttachmentRow>;
 export type SearchRun = Schema.Schema.Type<typeof SearchRunRow>;
 export type SearchResult = Schema.Schema.Type<typeof SearchResultRow>;
+export type ExtractRun = Schema.Schema.Type<typeof ExtractRunRow>;
+export type ExtractRunStatus = Schema.Schema.Type<typeof ExtractRunStatus>;
 export type ReasoningLevel = Schema.Schema.Type<typeof ReasoningLevel>;
 export type MessagePartKind = Schema.Schema.Type<typeof MessagePartKind>;
 export type TraceStatus = Schema.Schema.Type<typeof TraceStatus>;
@@ -414,6 +444,7 @@ export type SyncEventPayloadMap = {
   attachment_deleted: { id: string };
   search_runs_replaced: { messageId: string; rows: SearchRun[] };
   search_results_replaced: { messageId: string; rows: SearchResult[] };
+  extract_runs_replaced: { messageId: string; rows: ExtractRun[] };
   trace_run_upserted: { row: TraceRun };
   trace_span_upserted: { row: TraceSpan };
   server_state_rebased: { snapshot: SyncSnapshot };
@@ -783,6 +814,37 @@ export function createSearchRun(input: {
     previewText: input.previewText ?? "",
     errorMessage: input.errorMessage ?? null,
     createdAt: nowIso(),
+  });
+}
+
+/**
+ * Construct an ExtractRun row. Mirrors `createSearchRun` — we always build a
+ * full row (including a fresh id) so the same value can be pushed through the
+ * sync pipeline without any post-hoc enrichment.
+ */
+export function createExtractRun(input: {
+  id?: string;
+  messageId: string;
+  url: string;
+  status: ExtractRunStatus;
+  step: number;
+  charCount?: number;
+  originalLength?: number | null;
+  truncated?: boolean;
+  errorMessage?: string | null;
+  createdAt?: string;
+}) {
+  return decodeExtractRunRow({
+    id: input.id ?? createId("ext"),
+    messageId: input.messageId,
+    url: input.url,
+    status: input.status,
+    step: input.step,
+    charCount: input.charCount ?? 0,
+    originalLength: input.originalLength ?? null,
+    truncated: input.truncated ?? false,
+    errorMessage: input.errorMessage ?? null,
+    createdAt: input.createdAt ?? nowIso(),
   });
 }
 
