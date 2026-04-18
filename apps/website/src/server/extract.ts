@@ -156,6 +156,14 @@ type ExtractToolState = {
 export function createBrowserExtractTool(input: {
   env: AppEnv;
   assistantMessageId: string;
+  /**
+   * Abort signal tied to the assistant turn. When the user presses Stop we
+   * abort the turn's controller; the signal short-circuits queued tool
+   * calls and tears down the Cloudflare Browser Rendering session mid-
+   * fetch so the worker doesn't keep rendering a page the user no longer
+   * wants.
+   */
+  signal?: AbortSignal;
   log?: (event: string, details?: Record<string, unknown>) => void;
   trace?: <A>(name: string, attrs: Record<string, unknown>, run: () => Promise<A>) => Promise<A>;
   onProgress?: (event: ToolProgressEvent) => void | Promise<void>;
@@ -170,8 +178,11 @@ export function createBrowserExtractTool(input: {
    * Injection point. Defaults to `cloudflareBrowserMarkdown`, which hits
    * the Browser Rendering binding via puppeteer. Tests pass a fake so they
    * don't need to spin up a real Chromium session.
+   *
+   * Accepts an optional AbortSignal so callers can tear down the render
+   * session when the assistant turn is cancelled.
    */
-  extract?: (env: AppEnv, url: string) => Promise<string>;
+  extract?: (env: AppEnv, url: string, signal?: AbortSignal) => Promise<string>;
 }) {
   const state: ExtractToolState = { extractRuns: [] };
   const urlCache = new Map<string, ExtractToolResult & { ok: true }>();
@@ -217,6 +228,20 @@ export function createBrowserExtractTool(input: {
       additionalProperties: false,
     },
   }).server(async (args: any): Promise<ExtractToolResult> => {
+    // Guard -1: the user already pressed Stop. The model may still be
+    // emitting queued tool_calls from before the abort arrived; short-
+    // circuit them instead of kicking off a Browser Rendering session we
+    // immediately tear down. No activity chip — the cancel handler
+    // already drove the UI into the cancelled state.
+    if (input.signal?.aborted) {
+      return {
+        ok: false,
+        url: typeof args?.url === "string" ? args.url : "",
+        error: "Request was cancelled.",
+        reason: "extract_unknown",
+        hint: "The user cancelled the turn; do not retry.",
+      };
+    }
     const rawUrl = typeof args?.url === "string" ? args.url : "";
     const parsed = normalizeExtractUrl(rawUrl);
 
@@ -303,7 +328,7 @@ export function createBrowserExtractTool(input: {
 
       return trace("assistant.extract.run", { url, step }, async () => {
         try {
-          const markdown = await extract(input.env, url);
+          const markdown = await extract(input.env, url, input.signal);
           const { text, truncated, originalLength } = truncateExtractedMarkdown(markdown);
           state.extractRuns[runIndex] = createExtractRun({
             id: activeRun.id,
@@ -349,6 +374,12 @@ export function createBrowserExtractTool(input: {
           } satisfies ExtractToolResult;
         } catch (error) {
           const { reason, message, hint } = classifyRenderError(error);
+          // If the failure is the user pressing Stop, the cancel handler has
+          // already marked the assistant message failed and painted the UI.
+          // Still flip the run row to failed (so the Reading chip doesn't
+          // stay "active" forever), but skip the "Failed to read X" activity
+          // chip so the timeline isn't littered with fake render failures.
+          const cancelled = Boolean(input.signal?.aborted);
           state.extractRuns[runIndex] = createExtractRun({
             id: activeRun.id,
             createdAt: activeRun.createdAt,
@@ -356,7 +387,7 @@ export function createBrowserExtractTool(input: {
             url,
             status: "failed",
             step,
-            errorMessage: message,
+            errorMessage: cancelled ? "Cancelled" : message,
           });
           await publishState();
           input.log?.("assistant_turn_tool_extract_error", {
@@ -365,20 +396,23 @@ export function createBrowserExtractTool(input: {
             url,
             error: message,
             reason,
+            cancelled,
           });
-          await input.onProgress?.({
-            tool: "extract",
-            label: `Failed to read ${safeHost(url) || url}`,
-            state: "failed",
-            step,
-            detail: message,
-          });
+          if (!cancelled) {
+            await input.onProgress?.({
+              tool: "extract",
+              label: `Failed to read ${safeHost(url) || url}`,
+              state: "failed",
+              step,
+              detail: message,
+            });
+          }
           return {
             ok: false,
             url,
-            error: message,
-            reason,
-            hint,
+            error: cancelled ? "Request was cancelled." : message,
+            reason: cancelled ? "extract_unknown" : reason,
+            hint: cancelled ? "The user cancelled the turn; do not retry." : hint,
           } satisfies ExtractToolResult;
         }
       });

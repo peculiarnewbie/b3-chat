@@ -236,6 +236,16 @@ export class SyncEngineDurableObject {
   private initialized = false;
   private readonly ctx: DurableObjectState;
   private readonly env: AppEnv;
+  /**
+   * Per-assistant-message AbortController registry.
+   *
+   * When `runAssistantTurn` starts it registers a controller keyed by the
+   * assistant message id; the `cancel_assistant_turn` command aborts that
+   * controller so the in-flight upstream chat fetch, web search, and
+   * browser extract all tear down together instead of running to
+   * completion after the UI has already marked the message cancelled.
+   */
+  private readonly assistantTurnControllers = new Map<string, AbortController>();
 
   constructor(ctx: DurableObjectState, env: AppEnv) {
     this.ctx = ctx;
@@ -768,6 +778,11 @@ export class SyncEngineDurableObject {
               updatedAt: nowIso(),
             }),
           );
+          // Abort the in-flight run (upstream chat fetch + web_search +
+          // web_extract all share this signal). Without this the UI would
+          // release immediately but the server would keep streaming tokens,
+          // running searches, and driving the browser renderer to completion.
+          this.assistantTurnControllers.get(command.messageId)?.abort(new Error("Cancelled"));
           break;
         }
         case "register_attachment":
@@ -916,546 +931,570 @@ export class SyncEngineDurableObject {
       assistantMessage: Message;
     },
   ) {
-    const traceContext = makeRootTraceContext({
-      messageId: payload.assistantMessage.id,
-      threadId: payload.threadId,
-      modelId: payload.modelId,
-      opId: payload.assistantMessage.opId ?? null,
-    });
-    const rootSpanId = createId("span");
-    const childTraceContext = {
-      ...traceContext,
-      parentSpanId: rootSpanId,
-    };
-    const traceRuns = new Map<string, TraceRun>();
-    const traceSpans = new Map<string, TraceSpan>();
-    const turnLogger = createStructuredLogger("assistant-turn", {
-      traceId: traceContext.traceId,
-      traceRunId: traceContext.traceRunId,
-      rootSpanId,
-      messageId: payload.assistantMessage.id,
-      threadId: payload.threadId,
-      modelId: payload.modelId,
-    });
-
-    const upsertTraceRun = async (row: TraceRun) => {
-      traceRuns.set(row.id, row);
-      const event = await this.appendServerEvent(null, "trace_run_upserted", { row });
-      this.broadcast(event);
-    };
-
-    const upsertTraceSpan = async (row: TraceSpan) => {
-      traceSpans.set(row.id, row);
-      const event = await this.appendServerEvent(null, "trace_span_upserted", { row });
-      this.broadcast(event);
-    };
-
-    const recorder = makeTraceRecorder({
-      scope: "assistant-turn",
-      logger: turnLogger,
-      onTraceRunStart: async (row) => {
-        await upsertTraceRun(
-          createTraceRun({
-            id: row.id,
-            messageId: row.messageId,
-            threadId: row.threadId,
-            workspaceId: row.workspaceId,
-            traceId: row.traceId,
-            rootSpanId: row.rootSpanId,
-            modelId: row.modelId,
-            status: row.status,
-            startedAt: row.startedAt,
-            endedAt: row.endedAt,
-            durationMs: row.durationMs,
-            errorCode: row.errorCode,
-            errorMessage: row.errorMessage,
-            attrs: typeof row.attrsJson === "string" ? parseJson(row.attrsJson) : {},
-          }),
-        );
-      },
-      onTraceRunFinish: async (row) => {
-        const current = traceRuns.get(row.id);
-        if (!current) return;
-        await upsertTraceRun(
-          decodeTraceRunRow({
-            ...current,
-            ...row,
-          }),
-        );
-      },
-      onSpanStart: async (row) => {
-        await upsertTraceSpan(
-          createTraceSpan({
-            id: row.id,
-            traceRunId: row.traceRunId,
-            traceId: row.traceId,
-            parentSpanId: row.parentSpanId,
-            messageId: row.messageId,
-            name: row.name,
-            kind: row.kind,
-            status: row.status,
-            startedAt: row.startedAt,
-            endedAt: row.endedAt,
-            durationMs: row.durationMs,
-            errorCode: row.errorCode,
-            errorMessage: row.errorMessage,
-            attrs: typeof row.attrsJson === "string" ? parseJson(row.attrsJson) : {},
-            events: typeof row.eventsJson === "string" ? parseJson(row.eventsJson) : [],
-          }),
-        );
-      },
-      onSpanFinish: async (row) => {
-        const current = traceSpans.get(row.id);
-        if (!current) return;
-        await upsertTraceSpan(
-          decodeTraceSpanRow({
-            ...current,
-            ...row,
-          }),
-        );
-      },
-    });
-
-    const traceRuntime = {
-      env: this.env,
-      traceRecorder: recorder,
-      traceContext: childTraceContext,
-    } satisfies Parameters<typeof runAppEffect>[1];
-
-    const traceAsync = <A>(
-      name: string,
-      kind: TraceSpan["kind"],
-      attrs: Record<string, unknown>,
-      run: () => Promise<A>,
-    ) => runAppEffect(traceEffect(name, kind, attrs, Effect.tryPromise(run)), traceRuntime);
-
-    const traceSync = <A>(
-      name: string,
-      kind: TraceSpan["kind"],
-      attrs: Record<string, unknown>,
-      run: () => A,
-    ) => runAppEffect(traceEffect(name, kind, attrs, Effect.sync(run)), traceRuntime);
-
-    syncLog("assistant_turn_start", {
-      threadId: payload.threadId,
-      assistantMessageId: payload.assistantMessage.id,
-      modelId: payload.modelId,
-      reasoningLevel: payload.reasoningLevel,
-      search: payload.search,
-      traceId: traceContext.traceId,
-      traceRunId: traceContext.traceRunId,
-    });
-
-    await recorder.startTraceRun({
-      traceRunId: traceContext.traceRunId,
-      traceId: traceContext.traceId,
-      rootSpanId,
-      messageId: payload.assistantMessage.id,
-      threadId: payload.threadId,
-      workspaceId: payload.thread.workspaceId,
-      modelId: payload.modelId || payload.assistantMessage.modelId || null,
-      attrs: {
-        reasoningLevel: payload.reasoningLevel,
-        searchEnabled: payload.search,
-      },
-    });
-    await recorder.startSpan({
-      spanId: rootSpanId,
-      traceRunId: traceContext.traceRunId,
-      traceId: traceContext.traceId,
-      parentSpanId: null,
-      messageId: payload.assistantMessage.id,
-      name: "assistant.turn",
-      kind: "root",
-      attrs: {
-        workspaceId: payload.thread.workspaceId,
-        threadId: payload.threadId,
-        messageId: payload.assistantMessage.id,
-        modelId: payload.modelId || payload.assistantMessage.modelId || null,
-        reasoningLevel: payload.reasoningLevel,
-        searchEnabled: payload.search,
-      },
-    });
-
-    const snapshot = await traceAsync("assistant.snapshot.load", "io", {}, () =>
-      this.getSnapshot(),
-    );
-    const thread = this.getThread(payload.threadId);
-    if (!thread) {
-      await recorder.finishSpan({
-        spanId: rootSpanId,
-        status: "failed",
-        errorCode: "ThreadNotFound",
-        errorMessage: "Thread not found",
-      });
-      await recorder.finishTraceRun({
-        traceRunId: traceContext.traceRunId,
-        status: "failed",
-        errorCode: "ThreadNotFound",
-        errorMessage: "Thread not found",
-      });
-      return;
-    }
-    const workspace = this.getWorkspace(thread.workspaceId);
-    if (!workspace) {
-      await recorder.finishSpan({
-        spanId: rootSpanId,
-        status: "failed",
-        errorCode: "WorkspaceNotFound",
-        errorMessage: "Workspace not found",
-      });
-      await recorder.finishTraceRun({
-        traceRunId: traceContext.traceRunId,
-        status: "failed",
-        errorCode: "WorkspaceNotFound",
-        errorMessage: "Workspace not found",
-      });
-      return;
-    }
-    const modelId = payload.modelId || workspace.defaultModelId || getDefaultModelId(this.env);
-    childTraceContext.workspaceId = workspace.id;
-    childTraceContext.modelId = modelId;
-    let seq = 0;
-
-    /**
-     * Callback the stream-consumer wires up. When invoked, it flushes any
-     * buffered text deltas and appends a `text` message_part covering the
-     * text accumulated since the last commit. We call this before every
-     * non-text message_part so that text and activities interleave in the
-     * correct seq order (T3-style inline activity chips).
-     */
-    let commitPendingText: () => Promise<void> = async () => {};
-
-    const rawAppendMessagePart = async (
-      kind: "activity" | "thinking_tokens" | "text" | "reasoning",
-      input: {
-        text?: string;
-        json?: string | null;
-      },
-    ) => {
-      const part = createMessagePart({
-        messageId: payload.assistantMessage.id,
-        seq: seq++,
-        kind,
-        text: input.text ?? "",
-        json: input.json ?? null,
-      });
-      const event = await this.appendServerEvent(null, "message_part_appended", { row: part });
-      this.broadcast(event);
-      return part;
-    };
-
-    const appendMessagePart = async (
-      kind: "activity" | "thinking_tokens" | "text" | "reasoning",
-      input: {
-        text?: string;
-        json?: string | null;
-      },
-    ) => {
-      if (kind !== "text") {
-        await commitPendingText();
-      }
-      return rawAppendMessagePart(kind, input);
-    };
-
-    const reportActivity = async (activity: ToolProgressEvent) => {
-      await appendMessagePart("activity", {
-        text: activity.label,
-        json: json(activity),
-      });
-    };
-
+    // Register the turn's AbortController up front so a cancel command that
+    // lands while we're still loading the snapshot, resolving attachments,
+    // or preparing the model request still reaches the in-flight work. The
+    // signal is threaded into chat() (upstream model fetch), the search
+    // tool (Exa API/MCP fetch), and the extract tool (Cloudflare Browser
+    // Rendering session). The `finally` at the bottom of this method
+    // deregisters it so cancellation can't accidentally target a later turn
+    // that reuses the same message id.
+    const abortController = new AbortController();
+    this.assistantTurnControllers.set(payload.assistantMessage.id, abortController);
     try {
-      const threadMessages = await traceSync("assistant.thread_messages.load", "sync", {}, () =>
-        this.getThreadMessages(snapshot, thread, [payload.userMessage, payload.assistantMessage]),
+      const traceContext = makeRootTraceContext({
+        messageId: payload.assistantMessage.id,
+        threadId: payload.threadId,
+        modelId: payload.modelId,
+        opId: payload.assistantMessage.opId ?? null,
+      });
+      const rootSpanId = createId("span");
+      const childTraceContext = {
+        ...traceContext,
+        parentSpanId: rootSpanId,
+      };
+      const traceRuns = new Map<string, TraceRun>();
+      const traceSpans = new Map<string, TraceSpan>();
+      const turnLogger = createStructuredLogger("assistant-turn", {
+        traceId: traceContext.traceId,
+        traceRunId: traceContext.traceRunId,
+        rootSpanId,
+        messageId: payload.assistantMessage.id,
+        threadId: payload.threadId,
+        modelId: payload.modelId,
+      });
+
+      const upsertTraceRun = async (row: TraceRun) => {
+        traceRuns.set(row.id, row);
+        const event = await this.appendServerEvent(null, "trace_run_upserted", { row });
+        this.broadcast(event);
+      };
+
+      const upsertTraceSpan = async (row: TraceSpan) => {
+        traceSpans.set(row.id, row);
+        const event = await this.appendServerEvent(null, "trace_span_upserted", { row });
+        this.broadcast(event);
+      };
+
+      const recorder = makeTraceRecorder({
+        scope: "assistant-turn",
+        logger: turnLogger,
+        onTraceRunStart: async (row) => {
+          await upsertTraceRun(
+            createTraceRun({
+              id: row.id,
+              messageId: row.messageId,
+              threadId: row.threadId,
+              workspaceId: row.workspaceId,
+              traceId: row.traceId,
+              rootSpanId: row.rootSpanId,
+              modelId: row.modelId,
+              status: row.status,
+              startedAt: row.startedAt,
+              endedAt: row.endedAt,
+              durationMs: row.durationMs,
+              errorCode: row.errorCode,
+              errorMessage: row.errorMessage,
+              attrs: typeof row.attrsJson === "string" ? parseJson(row.attrsJson) : {},
+            }),
+          );
+        },
+        onTraceRunFinish: async (row) => {
+          const current = traceRuns.get(row.id);
+          if (!current) return;
+          await upsertTraceRun(
+            decodeTraceRunRow({
+              ...current,
+              ...row,
+            }),
+          );
+        },
+        onSpanStart: async (row) => {
+          await upsertTraceSpan(
+            createTraceSpan({
+              id: row.id,
+              traceRunId: row.traceRunId,
+              traceId: row.traceId,
+              parentSpanId: row.parentSpanId,
+              messageId: row.messageId,
+              name: row.name,
+              kind: row.kind,
+              status: row.status,
+              startedAt: row.startedAt,
+              endedAt: row.endedAt,
+              durationMs: row.durationMs,
+              errorCode: row.errorCode,
+              errorMessage: row.errorMessage,
+              attrs: typeof row.attrsJson === "string" ? parseJson(row.attrsJson) : {},
+              events: typeof row.eventsJson === "string" ? parseJson(row.eventsJson) : [],
+            }),
+          );
+        },
+        onSpanFinish: async (row) => {
+          const current = traceSpans.get(row.id);
+          if (!current) return;
+          await upsertTraceSpan(
+            decodeTraceSpanRow({
+              ...current,
+              ...row,
+            }),
+          );
+        },
+      });
+
+      const traceRuntime = {
+        env: this.env,
+        traceRecorder: recorder,
+        traceContext: childTraceContext,
+      } satisfies Parameters<typeof runAppEffect>[1];
+
+      const traceAsync = <A>(
+        name: string,
+        kind: TraceSpan["kind"],
+        attrs: Record<string, unknown>,
+        run: () => Promise<A>,
+      ) => runAppEffect(traceEffect(name, kind, attrs, Effect.tryPromise(run)), traceRuntime);
+
+      const traceSync = <A>(
+        name: string,
+        kind: TraceSpan["kind"],
+        attrs: Record<string, unknown>,
+        run: () => A,
+      ) => runAppEffect(traceEffect(name, kind, attrs, Effect.sync(run)), traceRuntime);
+
+      syncLog("assistant_turn_start", {
+        threadId: payload.threadId,
+        assistantMessageId: payload.assistantMessage.id,
+        modelId: payload.modelId,
+        reasoningLevel: payload.reasoningLevel,
+        search: payload.search,
+        traceId: traceContext.traceId,
+        traceRunId: traceContext.traceRunId,
+      });
+
+      await recorder.startTraceRun({
+        traceRunId: traceContext.traceRunId,
+        traceId: traceContext.traceId,
+        rootSpanId,
+        messageId: payload.assistantMessage.id,
+        threadId: payload.threadId,
+        workspaceId: payload.thread.workspaceId,
+        modelId: payload.modelId || payload.assistantMessage.modelId || null,
+        attrs: {
+          reasoningLevel: payload.reasoningLevel,
+          searchEnabled: payload.search,
+        },
+      });
+      await recorder.startSpan({
+        spanId: rootSpanId,
+        traceRunId: traceContext.traceRunId,
+        traceId: traceContext.traceId,
+        parentSpanId: null,
+        messageId: payload.assistantMessage.id,
+        name: "assistant.turn",
+        kind: "root",
+        attrs: {
+          workspaceId: payload.thread.workspaceId,
+          threadId: payload.threadId,
+          messageId: payload.assistantMessage.id,
+          modelId: payload.modelId || payload.assistantMessage.modelId || null,
+          reasoningLevel: payload.reasoningLevel,
+          searchEnabled: payload.search,
+        },
+      });
+
+      const snapshot = await traceAsync("assistant.snapshot.load", "io", {}, () =>
+        this.getSnapshot(),
       );
-      const searchTool = payload.search
-        ? createExaSearchTool({
-            env: this.env,
-            assistantMessageId: payload.assistantMessage.id,
-            log: syncLog,
-            trace: (name, attrs, run) =>
-              traceAsync(
-                name,
-                name === "assistant.search.prepare" ? "internal" : "tool",
-                attrs,
-                run,
-              ),
-            onProgress: reportActivity,
-            onSearchStateChange: async (state) => {
-              const searchRunEvent = await this.appendServerEvent(null, "search_runs_replaced", {
-                messageId: payload.assistantMessage.id,
-                rows: state.searchRuns,
-              });
-              this.broadcast(searchRunEvent);
+      const thread = this.getThread(payload.threadId);
+      if (!thread) {
+        await recorder.finishSpan({
+          spanId: rootSpanId,
+          status: "failed",
+          errorCode: "ThreadNotFound",
+          errorMessage: "Thread not found",
+        });
+        await recorder.finishTraceRun({
+          traceRunId: traceContext.traceRunId,
+          status: "failed",
+          errorCode: "ThreadNotFound",
+          errorMessage: "Thread not found",
+        });
+        return;
+      }
+      const workspace = this.getWorkspace(thread.workspaceId);
+      if (!workspace) {
+        await recorder.finishSpan({
+          spanId: rootSpanId,
+          status: "failed",
+          errorCode: "WorkspaceNotFound",
+          errorMessage: "Workspace not found",
+        });
+        await recorder.finishTraceRun({
+          traceRunId: traceContext.traceRunId,
+          status: "failed",
+          errorCode: "WorkspaceNotFound",
+          errorMessage: "Workspace not found",
+        });
+        return;
+      }
+      const modelId = payload.modelId || workspace.defaultModelId || getDefaultModelId(this.env);
+      childTraceContext.workspaceId = workspace.id;
+      childTraceContext.modelId = modelId;
+      let seq = 0;
 
-              const searchEvent = await this.appendServerEvent(null, "search_results_replaced", {
-                messageId: payload.assistantMessage.id,
-                rows: state.searchResults,
-              });
-              this.broadcast(searchEvent);
-            },
-          })
-        : null;
+      /**
+       * Callback the stream-consumer wires up. When invoked, it flushes any
+       * buffered text deltas and appends a `text` message_part covering the
+       * text accumulated since the last commit. We call this before every
+       * non-text message_part so that text and activities interleave in the
+       * correct seq order (T3-style inline activity chips).
+       */
+      let commitPendingText: () => Promise<void> = async () => {};
 
-      // Extract pairs with search: only attach it when the user opted into
-      // network tools for this turn AND the Cloudflare Browser Rendering
-      // binding is wired up. Otherwise skip quietly — no point advertising a
-      // tool the model would get a structured "not_configured" error from.
-      const extractToolConfigured = Boolean(this.env.BROWSER);
-      const extractTool =
-        payload.search && extractToolConfigured
-          ? createBrowserExtractTool({
+      const rawAppendMessagePart = async (
+        kind: "activity" | "thinking_tokens" | "text" | "reasoning",
+        input: {
+          text?: string;
+          json?: string | null;
+        },
+      ) => {
+        const part = createMessagePart({
+          messageId: payload.assistantMessage.id,
+          seq: seq++,
+          kind,
+          text: input.text ?? "",
+          json: input.json ?? null,
+        });
+        const event = await this.appendServerEvent(null, "message_part_appended", { row: part });
+        this.broadcast(event);
+        return part;
+      };
+
+      const appendMessagePart = async (
+        kind: "activity" | "thinking_tokens" | "text" | "reasoning",
+        input: {
+          text?: string;
+          json?: string | null;
+        },
+      ) => {
+        if (kind !== "text") {
+          await commitPendingText();
+        }
+        return rawAppendMessagePart(kind, input);
+      };
+
+      const reportActivity = async (activity: ToolProgressEvent) => {
+        await appendMessagePart("activity", {
+          text: activity.label,
+          json: json(activity),
+        });
+      };
+
+      try {
+        const threadMessages = await traceSync("assistant.thread_messages.load", "sync", {}, () =>
+          this.getThreadMessages(snapshot, thread, [payload.userMessage, payload.assistantMessage]),
+        );
+        const searchTool = payload.search
+          ? createExaSearchTool({
               env: this.env,
               assistantMessageId: payload.assistantMessage.id,
+              signal: abortController.signal,
               log: syncLog,
               trace: (name, attrs, run) =>
                 traceAsync(
                   name,
-                  name === "assistant.extract.prepare" ? "internal" : "tool",
+                  name === "assistant.search.prepare" ? "internal" : "tool",
                   attrs,
                   run,
                 ),
               onProgress: reportActivity,
-              onExtractStateChange: async (state) => {
-                const extractEvent = await this.appendServerEvent(null, "extract_runs_replaced", {
+              onSearchStateChange: async (state) => {
+                const searchRunEvent = await this.appendServerEvent(null, "search_runs_replaced", {
                   messageId: payload.assistantMessage.id,
-                  rows: state.extractRuns,
+                  rows: state.searchRuns,
                 });
-                this.broadcast(extractEvent);
+                this.broadcast(searchRunEvent);
+
+                const searchEvent = await this.appendServerEvent(null, "search_results_replaced", {
+                  messageId: payload.assistantMessage.id,
+                  rows: state.searchResults,
+                });
+                this.broadcast(searchEvent);
               },
             })
           : null;
 
-      const activeTools = [
-        ...(searchTool ? [searchTool.tool] : []),
-        ...(extractTool ? [extractTool.tool] : []),
-      ];
-      const toolCount = activeTools.length;
+        // Extract pairs with search: only attach it when the user opted into
+        // network tools for this turn AND the Cloudflare Browser Rendering
+        // binding is wired up. Otherwise skip quietly — no point advertising a
+        // tool the model would get a structured "not_configured" error from.
+        const extractToolConfigured = Boolean(this.env.BROWSER);
+        const extractTool =
+          payload.search && extractToolConfigured
+            ? createBrowserExtractTool({
+                env: this.env,
+                assistantMessageId: payload.assistantMessage.id,
+                signal: abortController.signal,
+                log: syncLog,
+                trace: (name, attrs, run) =>
+                  traceAsync(
+                    name,
+                    name === "assistant.extract.prepare" ? "internal" : "tool",
+                    attrs,
+                    run,
+                  ),
+                onProgress: reportActivity,
+                onExtractStateChange: async (state) => {
+                  const extractEvent = await this.appendServerEvent(null, "extract_runs_replaced", {
+                    messageId: payload.assistantMessage.id,
+                    rows: state.extractRuns,
+                  });
+                  this.broadcast(extractEvent);
+                },
+              })
+            : null;
 
-      const { messages: modelMessages, systemPrompts } = await traceAsync(
-        "assistant.attachments.resolve",
-        "io",
-        { threadMessageCount: threadMessages.length },
-        () => this.buildModelMessages(snapshot, workspace.id, threadMessages),
-      );
-      if (searchTool) {
-        systemPrompts.push(SEARCH_TOOL_SYSTEM_PROMPT);
-      }
-      if (extractTool) {
-        systemPrompts.push(EXTRACT_TOOL_SYSTEM_PROMPT);
-      }
+        const activeTools = [
+          ...(searchTool ? [searchTool.tool] : []),
+          ...(extractTool ? [extractTool.tool] : []),
+        ];
+        const toolCount = activeTools.length;
 
-      // Inject current date so models use correct year when searching
-      const now = new Date();
-      const datePrompt = `Current date: ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. When searching for current/recent information, use this date as reference—do not default to years from your training data.`;
-      systemPrompts.push(datePrompt);
+        const { messages: modelMessages, systemPrompts } = await traceAsync(
+          "assistant.attachments.resolve",
+          "io",
+          { threadMessageCount: threadMessages.length },
+          () => this.buildModelMessages(snapshot, workspace.id, threadMessages),
+        );
+        if (searchTool) {
+          systemPrompts.push(SEARCH_TOOL_SYSTEM_PROMPT);
+        }
+        if (extractTool) {
+          systemPrompts.push(EXTRACT_TOOL_SYSTEM_PROMPT);
+        }
 
-      // Create adapter for TanStack AI chat()
-      const adapter = createChatCompletionsAdapter(
-        {
-          baseUrl: this.env.OPENCODE_GO_BASE_URL,
-          apiKey: this.env.OPENCODE_GO_API_KEY,
-          trace: (name, kind, attrs, run) => traceAsync(name, kind, attrs, run),
-        },
-        modelId,
-      );
-      const providerOptions = await traceSync(
-        "assistant.provider.options",
-        "model",
-        {
+        // Inject current date so models use correct year when searching
+        const now = new Date();
+        const datePrompt = `Current date: ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. When searching for current/recent information, use this date as reference—do not default to years from your training data.`;
+        systemPrompts.push(datePrompt);
+
+        // Create adapter for TanStack AI chat()
+        const adapter = createChatCompletionsAdapter(
+          {
+            baseUrl: this.env.OPENCODE_GO_BASE_URL,
+            apiKey: this.env.OPENCODE_GO_API_KEY,
+            trace: (name, kind, attrs, run) => traceAsync(name, kind, attrs, run),
+          },
           modelId,
-          reasoningLevel: payload.reasoningLevel,
-          toolCount,
-          searchEnabled: payload.search,
-          extractToolConfigured,
-        },
-        () =>
-          getProviderModelOptions(
+        );
+        const providerOptions = await traceSync(
+          "assistant.provider.options",
+          "model",
+          {
             modelId,
+            reasoningLevel: payload.reasoningLevel,
             toolCount,
-            payload.reasoningLevel,
-            payload.modelInterleavedField,
-          ),
-      );
-      const modelOptions = providerOptions.modelOptions;
+            searchEnabled: payload.search,
+            extractToolConfigured,
+          },
+          () =>
+            getProviderModelOptions(
+              modelId,
+              toolCount,
+              payload.reasoningLevel,
+              payload.modelInterleavedField,
+            ),
+        );
+        const modelOptions = providerOptions.modelOptions;
 
-      if (!modelOptions && payload.reasoningLevel !== "off") {
-        syncLog("reasoning_mapping_unavailable", {
+        if (!modelOptions && payload.reasoningLevel !== "off") {
+          syncLog("reasoning_mapping_unavailable", {
+            assistantMessageId: payload.assistantMessage.id,
+            modelId,
+            requestedReasoningLevel: payload.reasoningLevel,
+          });
+        }
+
+        syncLog("assistant_turn_upstream", {
           assistantMessageId: payload.assistantMessage.id,
           modelId,
+          messageCount: modelMessages.length,
+          systemPromptCount: systemPrompts.length,
+          toolCount,
+          toolNames: activeTools.map((tool) => (tool as { name?: string }).name ?? "unknown"),
+          modelInterleavedField: payload.modelInterleavedField ?? null,
           requestedReasoningLevel: payload.reasoningLevel,
+          effectiveReasoningLevel: providerOptions.effectiveReasoningLevel,
+          overrideReason: providerOptions.overrideReason,
+          modelOptions,
         });
-      }
 
-      syncLog("assistant_turn_upstream", {
-        assistantMessageId: payload.assistantMessage.id,
-        modelId,
-        messageCount: modelMessages.length,
-        systemPromptCount: systemPrompts.length,
-        toolCount,
-        toolNames: activeTools.map((tool) => (tool as { name?: string }).name ?? "unknown"),
-        modelInterleavedField: payload.modelInterleavedField ?? null,
-        requestedReasoningLevel: payload.reasoningLevel,
-        effectiveReasoningLevel: providerOptions.effectiveReasoningLevel,
-        overrideReason: providerOptions.overrideReason,
-        modelOptions,
-      });
-
-      // Create stream consumer dependencies
-      const consumerDeps: StreamConsumerDeps = {
-        appendServerEvent: (opId, eventType, eventPayload) =>
-          this.appendServerEvent(opId, eventType as any, eventPayload as any),
-        broadcast: (envelope) => this.broadcast(envelope as any),
-        appendMessagePart,
-        rawAppendMessagePart,
-        setCommitPendingText: (fn) => {
-          commitPendingText = fn;
-        },
-        reportActivity,
-        messageId: payload.assistantMessage.id,
-        // If the request ran with reasoning off — either because the user
-        // selected "Off" or because we forced it off on a tool turn for a
-        // reasoning_content model — drop any reasoning tokens the upstream
-        // leaks so the UI doesn't show a Reasoning chip the user never
-        // asked for.
-        suppressReasoningTokens: providerOptions.effectiveReasoningLevel === "off",
-        log: syncLog,
-        trace: (name, kind, attrs, run) => traceAsync(name, kind, attrs, run),
-      };
-
-      // Agent loop strategy:
-      //   - With tools, cap at 5 iterations AND stop immediately if the
-      //     model finishes with "stop", "length", or "content_filter".
-      //     The `untilFinishReason` guard is defensive: TanStack AI
-      //     already stops on non-tool_calls reasons, but combining it
-      //     makes the intent explicit and protects against future changes.
-      //   - Without tools, the loop is a single model pass anyway, but
-      //     a 1-iteration cap keeps behavior predictable and prevents
-      //     accidental continuation if a provider emits tool_calls for
-      //     a tool we didn't send.
-      const agentLoopStrategy =
-        toolCount > 0
-          ? combineStrategies([
-              maxIterations(5),
-              untilFinishReason(["stop", "length", "content_filter"]),
-            ])
-          : maxIterations(1);
-
-      // Stream using TanStack AI's chat() function
-      // Cast messages to work around strict ConstrainedModelMessage type constraints
-      const stream = chat({
-        adapter,
-        messages: modelMessages as any,
-        systemPrompts,
-        agentLoopStrategy,
-        ...(modelOptions ? { modelOptions } : {}),
-        ...(activeTools.length ? { tools: activeTools } : {}),
-      });
-
-      const result = await traceAsync("assistant.stream.consume", "io", { modelId }, () =>
-        consumeAssistantStream(stream, consumerDeps),
-      );
-      const searchRuns = searchTool?.state.searchRuns ?? [];
-      const extractRuns = extractTool?.state.extractRuns ?? [];
-
-      // Log completion metrics
-      syncLog("assistant_turn_search_summary", {
-        assistantMessageId: payload.assistantMessage.id,
-        toolCallIterations: result.toolCallIterations,
-        toolNamesUsed: result.toolNamesUsed,
-        searchRuns: searchRuns.map((run) => ({
-          step: run.step,
-          query: run.query,
-          status: run.status,
-          resultCount: run.resultCount,
-        })),
-        extractRuns: extractRuns.map((run) => ({
-          step: run.step,
-          url: run.url,
-          status: run.status,
-          originalLength: run.originalLength ?? null,
-          truncated: run.truncated ?? null,
-        })),
-      });
-      syncLog("assistant_turn_answer_sanity", {
-        assistantMessageId: payload.assistantMessage.id,
-        searched: searchRuns.length > 0,
-        toolCallIterations: result.toolCallIterations,
-        likelyIgnoredGrounding:
-          searchRuns.length > 0 && looksLikeMissingRealtimeAccess(result.text),
-        answerPreview: previewText(result.text),
-      });
-      await recorder.finishSpan({
-        spanId: rootSpanId,
-        status: "completed",
-        attrs: {
-          searchRunCount: searchRuns.length,
-          toolCallIterations: result.toolCallIterations,
-          answerPreview: previewText(result.text),
-        },
-      });
-      await recorder.finishTraceRun({
-        traceRunId: traceContext.traceRunId,
-        status: "completed",
-        attrs: {
-          resultTextLength: result.text.length,
-          searchRunCount: searchRuns.length,
-        },
-      });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const normalizedError = normalizeAssistantError({
-        errorCode: "assistant_turn_error",
-        errorMessage,
-        modelId,
-      });
-      syncLog("assistant_turn_exception", {
-        assistantMessageId: payload.assistantMessage.id,
-        modelId,
-        search: payload.search,
-        error: errorMessage,
-        normalizedErrorCode: normalizedError.errorCode,
-        providerName: normalizedError.providerName,
-        retryable: normalizedError.retryable,
-        stack: error instanceof Error ? error.stack : undefined,
-      });
-
-      // Only emit the message_failed event and "Response failed" activity
-      // if the stream consumer didn't already mark the message as failed.
-      // Otherwise we'd duplicate the failure marker (the consumer's
-      // failMessage already emits both, and both reach the inline layout).
-      const current = this.getMessage(payload.assistantMessage.id);
-      if (current && current.status !== "completed" && current.status !== "failed") {
-        const failed = await this.appendServerEvent(null, "message_failed", {
+        // Create stream consumer dependencies
+        const consumerDeps: StreamConsumerDeps = {
+          appendServerEvent: (opId, eventType, eventPayload) =>
+            this.appendServerEvent(opId, eventType as any, eventPayload as any),
+          broadcast: (envelope) => this.broadcast(envelope as any),
+          appendMessagePart,
+          rawAppendMessagePart,
+          setCommitPendingText: (fn) => {
+            commitPendingText = fn;
+          },
+          reportActivity,
           messageId: payload.assistantMessage.id,
+          // If the request ran with reasoning off — either because the user
+          // selected "Off" or because we forced it off on a tool turn for a
+          // reasoning_content model — drop any reasoning tokens the upstream
+          // leaks so the UI doesn't show a Reasoning chip the user never
+          // asked for.
+          suppressReasoningTokens: providerOptions.effectiveReasoningLevel === "off",
+          log: syncLog,
+          trace: (name, kind, attrs, run) => traceAsync(name, kind, attrs, run),
+        };
+
+        // Agent loop strategy:
+        //   - With tools, cap at 5 iterations AND stop immediately if the
+        //     model finishes with "stop", "length", or "content_filter".
+        //     The `untilFinishReason` guard is defensive: TanStack AI
+        //     already stops on non-tool_calls reasons, but combining it
+        //     makes the intent explicit and protects against future changes.
+        //   - Without tools, the loop is a single model pass anyway, but
+        //     a 1-iteration cap keeps behavior predictable and prevents
+        //     accidental continuation if a provider emits tool_calls for
+        //     a tool we didn't send.
+        const agentLoopStrategy =
+          toolCount > 0
+            ? combineStrategies([
+                maxIterations(5),
+                untilFinishReason(["stop", "length", "content_filter"]),
+              ])
+            : maxIterations(1);
+
+        // Stream using TanStack AI's chat() function
+        // Cast messages to work around strict ConstrainedModelMessage type constraints
+        const stream = chat({
+          adapter,
+          messages: modelMessages as any,
+          systemPrompts,
+          agentLoopStrategy,
+          // TanStack AI forwards this to the adapter; the adapter attaches it
+          // to the upstream /chat/completions fetch so aborting the turn
+          // tears down the open SSE connection immediately.
+          abortController,
+          ...(modelOptions ? { modelOptions } : {}),
+          ...(activeTools.length ? { tools: activeTools } : {}),
+        });
+
+        const result = await traceAsync("assistant.stream.consume", "io", { modelId }, () =>
+          consumeAssistantStream(stream, consumerDeps),
+        );
+        const searchRuns = searchTool?.state.searchRuns ?? [];
+        const extractRuns = extractTool?.state.extractRuns ?? [];
+
+        // Log completion metrics
+        syncLog("assistant_turn_search_summary", {
+          assistantMessageId: payload.assistantMessage.id,
+          toolCallIterations: result.toolCallIterations,
+          toolNamesUsed: result.toolNamesUsed,
+          searchRuns: searchRuns.map((run) => ({
+            step: run.step,
+            query: run.query,
+            status: run.status,
+            resultCount: run.resultCount,
+          })),
+          extractRuns: extractRuns.map((run) => ({
+            step: run.step,
+            url: run.url,
+            status: run.status,
+            originalLength: run.originalLength ?? null,
+            truncated: run.truncated ?? null,
+          })),
+        });
+        syncLog("assistant_turn_answer_sanity", {
+          assistantMessageId: payload.assistantMessage.id,
+          searched: searchRuns.length > 0,
+          toolCallIterations: result.toolCallIterations,
+          likelyIgnoredGrounding:
+            searchRuns.length > 0 && looksLikeMissingRealtimeAccess(result.text),
+          answerPreview: previewText(result.text),
+        });
+        await recorder.finishSpan({
+          spanId: rootSpanId,
+          status: "completed",
+          attrs: {
+            searchRunCount: searchRuns.length,
+            toolCallIterations: result.toolCallIterations,
+            answerPreview: previewText(result.text),
+          },
+        });
+        await recorder.finishTraceRun({
+          traceRunId: traceContext.traceRunId,
+          status: "completed",
+          attrs: {
+            resultTextLength: result.text.length,
+            searchRunCount: searchRuns.length,
+          },
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const normalizedError = normalizeAssistantError({
+          errorCode: "assistant_turn_error",
+          errorMessage,
+          modelId,
+        });
+        syncLog("assistant_turn_exception", {
+          assistantMessageId: payload.assistantMessage.id,
+          modelId,
+          search: payload.search,
+          error: errorMessage,
+          normalizedErrorCode: normalizedError.errorCode,
+          providerName: normalizedError.providerName,
+          retryable: normalizedError.retryable,
+          stack: error instanceof Error ? error.stack : undefined,
+        });
+
+        // Only emit the message_failed event and "Response failed" activity
+        // if the stream consumer didn't already mark the message as failed.
+        // Otherwise we'd duplicate the failure marker (the consumer's
+        // failMessage already emits both, and both reach the inline layout).
+        const current = this.getMessage(payload.assistantMessage.id);
+        if (current && current.status !== "completed" && current.status !== "failed") {
+          const failed = await this.appendServerEvent(null, "message_failed", {
+            messageId: payload.assistantMessage.id,
+            errorCode: normalizedError.errorCode,
+            errorMessage: normalizedError.errorMessage,
+            updatedAt: nowIso(),
+          });
+          this.broadcast(failed);
+
+          await appendMessagePart("activity", {
+            text: "Response failed",
+            json: json({
+              label: "Response failed",
+              state: "failed",
+              detail: normalizedError.errorMessage,
+            } satisfies ToolProgressEvent),
+          });
+        }
+        await recorder.finishSpan({
+          spanId: rootSpanId,
+          status: normalizedError.errorCode === "cancelled" ? "cancelled" : "failed",
           errorCode: normalizedError.errorCode,
           errorMessage: normalizedError.errorMessage,
-          updatedAt: nowIso(),
         });
-        this.broadcast(failed);
-
-        await appendMessagePart("activity", {
-          text: "Response failed",
-          json: json({
-            label: "Response failed",
-            state: "failed",
-            detail: normalizedError.errorMessage,
-          } satisfies ToolProgressEvent),
+        await recorder.finishTraceRun({
+          traceRunId: traceContext.traceRunId,
+          status: normalizedError.errorCode === "cancelled" ? "cancelled" : "failed",
+          errorCode: normalizedError.errorCode,
+          errorMessage: normalizedError.errorMessage,
         });
       }
-      await recorder.finishSpan({
-        spanId: rootSpanId,
-        status: normalizedError.errorCode === "cancelled" ? "cancelled" : "failed",
-        errorCode: normalizedError.errorCode,
-        errorMessage: normalizedError.errorMessage,
-      });
-      await recorder.finishTraceRun({
-        traceRunId: traceContext.traceRunId,
-        status: normalizedError.errorCode === "cancelled" ? "cancelled" : "failed",
-        errorCode: normalizedError.errorCode,
-        errorMessage: normalizedError.errorMessage,
-      });
+    } finally {
+      // Clear the registry entry regardless of success/failure/cancel so a
+      // subsequent cancel command for this message id becomes a no-op at
+      // this layer (it still inserts the `message_failed` event, which is
+      // idempotent against the current status guard).
+      this.assistantTurnControllers.delete(payload.assistantMessage.id);
     }
   }
 

@@ -388,16 +388,33 @@ async function fetchWithTimeout(
   url: string,
   init: RequestInit,
   timeoutMs: number,
+  externalSignal?: AbortSignal,
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(
     () => controller.abort(new Error(`Request timed out after ${timeoutMs}ms`)),
     timeoutMs,
   );
+  // Link an external signal (e.g. the assistant-turn abort) into our
+  // internal controller so user-initiated cancel and timeout both abort
+  // the same fetch. If the external signal is already aborted, fire
+  // synchronously — fetch() will reject before sending a single byte.
+  let externalListener: (() => void) | null = null;
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort(externalSignal.reason);
+    } else {
+      externalListener = () => controller.abort(externalSignal.reason);
+      externalSignal.addEventListener("abort", externalListener, { once: true });
+    }
+  }
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
+    if (externalSignal && externalListener) {
+      externalSignal.removeEventListener("abort", externalListener);
+    }
   }
 }
 
@@ -405,6 +422,7 @@ async function runExaSearchRequest(
   apiKey: string,
   query: string,
   numResults: number,
+  signal?: AbortSignal,
 ): Promise<ExaSearchResponse> {
   let lastError: ExaSearchError | null = null;
   for (let attempt = 1; attempt <= EXA_MAX_ATTEMPTS; attempt++) {
@@ -444,6 +462,7 @@ async function runExaSearchRequest(
           }),
         },
         EXA_REQUEST_TIMEOUT_MS,
+        signal,
       );
       if (!response.ok) {
         const bodyText = await response.text().catch(() => "");
@@ -464,6 +483,8 @@ async function runExaSearchRequest(
       return json;
     } catch (error) {
       const err = toExaError(error, "network");
+      // If the caller aborted, don't burn a retry cycle — bubble up now.
+      if (signal?.aborted) throw err;
       if (!err.retryable || attempt === EXA_MAX_ATTEMPTS) throw err;
       lastError = err;
       await sleep(EXA_RETRY_BACKOFF_MS * attempt);
@@ -496,7 +517,12 @@ function safeDomain(url: string): string {
   }
 }
 
-export async function exaSearch(env: AppEnv, query: string, numResults = DEFAULT_EXA_RESULTS) {
+export async function exaSearch(
+  env: AppEnv,
+  query: string,
+  numResults = DEFAULT_EXA_RESULTS,
+  signal?: AbortSignal,
+) {
   const apiKey = env.EXA_API_KEY?.trim();
   if (!apiKey) {
     throw new ExaSearchError("Exa API key missing", {
@@ -514,7 +540,7 @@ export async function exaSearch(env: AppEnv, query: string, numResults = DEFAULT
     });
   }
   const clampedResults = clampExaResults(numResults);
-  const json = await runExaSearchRequest(apiKey, trimmedQuery, clampedResults);
+  const json = await runExaSearchRequest(apiKey, trimmedQuery, clampedResults, signal);
   const results = (json.results ?? [])
     .filter((result) => typeof result?.url === "string" && result.url)
     .map((result) => ({
@@ -595,7 +621,11 @@ export function parseExaMcpTextResponse(responseText: string) {
   return "";
 }
 
-export async function exaMcpSearchRawText(query: string, numResults = DEFAULT_EXA_RESULTS) {
+export async function exaMcpSearchRawText(
+  query: string,
+  numResults = DEFAULT_EXA_RESULTS,
+  signal?: AbortSignal,
+) {
   const trimmedQuery = query.trim();
   if (!trimmedQuery) {
     throw new ExaSearchError("Exa MCP query is empty", {
@@ -632,6 +662,7 @@ export async function exaMcpSearchRawText(query: string, numResults = DEFAULT_EX
           }),
         },
         EXA_MCP_REQUEST_TIMEOUT_MS,
+        signal,
       );
       if (!response.ok) {
         const status = response.status;
@@ -657,6 +688,8 @@ export async function exaMcpSearchRawText(query: string, numResults = DEFAULT_EX
       return text;
     } catch (error) {
       const err = toExaError(error, "network");
+      // If the caller aborted, stop retrying and bubble the error up.
+      if (signal?.aborted) throw err;
       if (!err.retryable || attempt === EXA_MAX_ATTEMPTS) throw err;
       lastError = err;
       await sleep(EXA_RETRY_BACKOFF_MS * attempt);
@@ -899,7 +932,11 @@ function extractMarkdownInPage(): string {
  * Throws `BrowserRenderError` on failure; the tool handler maps it to a
  * structured result for the model.
  */
-export async function cloudflareBrowserMarkdown(env: AppEnv, rawUrl: string): Promise<string> {
+export async function cloudflareBrowserMarkdown(
+  env: AppEnv,
+  rawUrl: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const binding = env.BROWSER as unknown;
   if (!binding) {
     throw new BrowserRenderError("Browser Rendering binding is not configured", {
@@ -919,9 +956,26 @@ export async function cloudflareBrowserMarkdown(env: AppEnv, rawUrl: string): Pr
   }
   const target = parsed.toString();
 
+  // If the caller's signal is already aborted, bail before spending a
+  // concurrent-session slot on a session we'd immediately tear down.
+  // Map the abort through `toBrowserRenderError` in the catch block —
+  // "aborted" flows into the "timeout" bucket since `BrowserRenderError`
+  // doesn't have a dedicated `aborted` reason and the classification is
+  // treated as retryable-but-don't-retry at the tool layer.
+  if (signal?.aborted) {
+    throw toBrowserRenderError(signal.reason ?? new Error("Browser Rendering aborted"), "network");
+  }
+
   let lastError: BrowserRenderError | null = null;
   for (let attempt = 1; attempt <= BROWSER_RENDER_MAX_ATTEMPTS; attempt++) {
     let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
+    // Listener that tears down the in-flight browser session when the
+    // caller aborts. Closing the browser mid-`page.goto` / `page.evaluate`
+    // makes those calls reject, which propagates back into the catch
+    // below. Registered per attempt because `browser` is recreated each
+    // iteration; removed in `finally` so we don't leak listeners across
+    // retries.
+    let abortListener: (() => void) | null = null;
     try {
       // `keep_alive` lets Cloudflare reuse this session for up to 10 min if
       // another extract call lands on the same Worker isolate. We still
@@ -930,6 +984,24 @@ export async function cloudflareBrowserMarkdown(env: AppEnv, rawUrl: string): Pr
       browser = await puppeteer.launch(binding as Parameters<typeof puppeteer.launch>[0], {
         keep_alive: 60_000,
       });
+      if (signal) {
+        // If abort fires while we were awaiting `puppeteer.launch`, the
+        // listener will run synchronously after registration and close the
+        // browser we just opened. If it fires later, closing rejects the
+        // pending `page.goto` / `page.evaluate` promise with an error
+        // whose message contains "closed" / "disconnected", which
+        // `toBrowserRenderError` maps to a network error.
+        abortListener = () => {
+          browser?.close().catch(() => {
+            // Closing a browser mid-teardown is expected to fail; swallow.
+          });
+        };
+        if (signal.aborted) {
+          abortListener();
+        } else {
+          signal.addEventListener("abort", abortListener, { once: true });
+        }
+      }
       const page = await browser.newPage();
 
       // Block heavy resources we don't need for text extraction. This
@@ -976,10 +1048,19 @@ export async function cloudflareBrowserMarkdown(env: AppEnv, rawUrl: string): Pr
       return markdown;
     } catch (error) {
       const err = toBrowserRenderError(error, "network");
+      // If the caller aborted, stop immediately — don't sleep through a
+      // retry cycle the user already said they don't want. We bubble the
+      // (likely "timed out"-classified) error up; the tool layer checks
+      // `signal.aborted` and presents it as a cancellation rather than a
+      // render failure.
+      if (signal?.aborted) throw err;
       if (!err.retryable || attempt === BROWSER_RENDER_MAX_ATTEMPTS) throw err;
       lastError = err;
       await sleep(BROWSER_RENDER_RETRY_BACKOFF_MS * attempt);
     } finally {
+      if (signal && abortListener) {
+        signal.removeEventListener("abort", abortListener);
+      }
       if (browser) {
         try {
           await browser.close();

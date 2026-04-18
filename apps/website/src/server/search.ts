@@ -184,6 +184,13 @@ function classifyExaError(error: unknown): {
 export function createExaSearchTool(input: {
   env: AppEnv;
   assistantMessageId: string;
+  /**
+   * Abort signal tied to the assistant turn. When the user presses Stop
+   * the turn controller aborts and this signal propagates into the Exa
+   * fetch (API or MCP fallback) so the in-flight request tears down
+   * instead of running to completion.
+   */
+  signal?: AbortSignal;
   log?: (event: string, details?: Record<string, unknown>) => void;
   trace?: <A>(name: string, attrs: Record<string, unknown>, run: () => Promise<A>) => Promise<A>;
   onProgress?: (event: SearchProgressEvent) => void | Promise<void>;
@@ -245,6 +252,18 @@ export function createExaSearchTool(input: {
       additionalProperties: false,
     },
   }).server(async (args: any): Promise<SearchToolResult> => {
+    // Guard -1: the user already pressed Stop. The model may still emit
+    // queued tool_calls from before the abort landed; short-circuit them
+    // so we don't fire a web search whose result will be thrown away.
+    if (input.signal?.aborted) {
+      return {
+        ok: false,
+        query: typeof args?.query === "string" ? args.query : "",
+        error: "Request was cancelled.",
+        reason: "exa_unknown",
+        hint: "The user cancelled the turn; do not retry.",
+      };
+    }
     const rawQuery = typeof args?.query === "string" ? args.query : "";
     const query = rawQuery.trim().replace(/\s+/g, " ");
     const numResults = clampExaResults(args?.numResults ?? SEARCH_RESULTS_PER_RUN);
@@ -336,12 +355,13 @@ export function createExaSearchTool(input: {
           let resultCount = 0;
 
           if (input.env.EXA_API_KEY) {
-            const runRows = (await exaSearch(input.env, query, numResults)).map((row) =>
-              decodeSearchResultRow({
-                ...row,
-                searchRunId: "",
-                messageId: input.assistantMessageId,
-              }),
+            const runRows = (await exaSearch(input.env, query, numResults, input.signal)).map(
+              (row) =>
+                decodeSearchResultRow({
+                  ...row,
+                  searchRunId: "",
+                  messageId: input.assistantMessageId,
+                }),
             );
             const run = createSearchRun({
               messageId: input.assistantMessageId,
@@ -392,7 +412,7 @@ export function createExaSearchTool(input: {
               detail: run.previewText || undefined,
             });
           } else {
-            const rawText = await exaMcpSearchRawText(query, numResults);
+            const rawText = await exaMcpSearchRawText(query, numResults, input.signal);
             const run = createSearchRun({
               messageId: input.assistantMessageId,
               query,
@@ -439,6 +459,12 @@ export function createExaSearchTool(input: {
           } satisfies SearchToolResult;
         } catch (error) {
           const { reason, message, hint } = classifyExaError(error);
+          // If the user pressed Stop mid-search, the cancel handler already
+          // drove the UI into the cancelled state. Keep the run row so the
+          // Searching chip doesn't stay "active", but suppress the "Search
+          // failed for X" activity chip — that would lie about what
+          // happened.
+          const cancelled = Boolean(input.signal?.aborted);
           state.searchRuns.push(
             createSearchRun({
               messageId: input.assistantMessageId,
@@ -446,7 +472,7 @@ export function createExaSearchTool(input: {
               status: "failed",
               step,
               numResults,
-              errorMessage: message,
+              errorMessage: cancelled ? "Cancelled" : message,
             }),
           );
           await publishState();
@@ -456,24 +482,27 @@ export function createExaSearchTool(input: {
             query,
             error: message,
             reason,
+            cancelled,
           });
-          await input.onProgress?.({
-            tool: "search",
-            label: `Search failed for "${query}"`,
-            state: "failed",
-            step,
-            query,
-            detail: message,
-          });
+          if (!cancelled) {
+            await input.onProgress?.({
+              tool: "search",
+              label: `Search failed for "${query}"`,
+              state: "failed",
+              step,
+              query,
+              detail: message,
+            });
+          }
           // Return a structured failure — do NOT throw. Throwing aborts the
           // turn; we want the model to see the failure, adjust, and
           // continue (or decide to answer without search).
           return {
             ok: false,
             query,
-            error: message,
-            reason,
-            hint,
+            error: cancelled ? "Request was cancelled." : message,
+            reason: cancelled ? "exa_unknown" : reason,
+            hint: cancelled ? "The user cancelled the turn; do not retry." : hint,
           } satisfies SearchToolResult;
         }
       });
