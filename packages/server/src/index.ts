@@ -84,7 +84,7 @@ const verification = sqliteTable("verification", {
 });
 
 const authSchema = { user, session, account, verification };
-const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 const DEFAULT_EXA_RESULTS = 5;
 const MIN_EXA_RESULTS = 3;
 const MAX_EXA_RESULTS = 8;
@@ -266,13 +266,18 @@ export async function sendInternalSyncCommand<T extends SyncCommandType>(
   return (await response.json()) as InternalCommandResponse;
 }
 
+const MODELS_CATALOG_URL = "https://models.dev/api.json";
+
+export async function purgeModelsCatalogCache(cache: Cache) {
+  await cache.delete(new Request(MODELS_CATALOG_URL));
+}
+
 export async function fetchModelsCatalog(env: AppEnv, cache: Cache) {
-  const url = "https://models.dev/api.json";
-  const cacheKey = new Request(url);
+  const cacheKey = new Request(MODELS_CATALOG_URL);
   const cached = await cache.match(cacheKey);
   if (cached) return cached.json();
 
-  const response = await fetch(url, {
+  const response = await fetch(MODELS_CATALOG_URL, {
     headers: { accept: "application/json" },
   });
   if (!response.ok) throw new Error(`Failed to fetch models catalog: ${response.status}`);
@@ -282,7 +287,7 @@ export async function fetchModelsCatalog(env: AppEnv, cache: Cache) {
     new Response(JSON.stringify(json), {
       headers: {
         "content-type": "application/json",
-        "cache-control": `public, max-age=${DAY_MS / 1000}`,
+        "cache-control": `public, max-age=${HOUR_MS / 1000}`,
       },
     }),
   );
