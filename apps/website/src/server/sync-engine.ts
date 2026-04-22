@@ -1917,69 +1917,71 @@ export class SyncEngineDurableObject {
   }
 
   private replaceSnapshot(snapshot: SyncSnapshot) {
-    const tables = snapshot.tables ?? {};
-    for (const tableName of [
-      "workspaces",
-      "threads",
-      "messages",
-      "message_parts",
-      "attachments",
-      "search_runs",
-      "search_results",
-      "extract_runs",
-      "trace_runs",
-      "trace_spans",
-    ]) {
-      this.exec(`DELETE FROM ${tableName}`);
-    }
-    for (const row of Object.values<Workspace>(tables[TABLES.workspaces] ?? {})) {
-      this.applyEventToMaterializedState("workspace_upserted", { row });
-    }
-    for (const row of Object.values<Thread>(tables[TABLES.threads] ?? {})) {
-      this.applyEventToMaterializedState("thread_upserted", { row });
-    }
-    for (const row of Object.values<Message>(tables[TABLES.messages] ?? {})) {
-      this.applyEventToMaterializedState("message_upserted", { row });
-    }
-    for (const row of Object.values<any>(tables[TABLES.messageParts] ?? {})) {
-      this.applyEventToMaterializedState("message_part_appended", { row });
-    }
-    for (const row of Object.values<Attachment>(tables[TABLES.attachments] ?? {})) {
-      this.applyEventToMaterializedState("attachment_upserted", { row });
-    }
-    const runsByMessage = new Map<string, SearchRun[]>();
-    for (const row of Object.values<SearchRun>(tables[TABLES.searchRuns] ?? {})) {
-      const list = runsByMessage.get(row.messageId) ?? [];
-      list.push(row);
-      runsByMessage.set(row.messageId, list);
-    }
-    for (const [messageId, rows] of runsByMessage) {
-      this.applyEventToMaterializedState("search_runs_replaced", { messageId, rows });
-    }
-    const resultsByMessage = new Map<string, SearchResult[]>();
-    for (const row of Object.values<SearchResult>(tables[TABLES.searchResults] ?? {})) {
-      const list = resultsByMessage.get(row.messageId) ?? [];
-      list.push(row);
-      resultsByMessage.set(row.messageId, list);
-    }
-    for (const [messageId, rows] of resultsByMessage) {
-      this.applyEventToMaterializedState("search_results_replaced", { messageId, rows });
-    }
-    const extractRunsByMessage = new Map<string, ExtractRun[]>();
-    for (const row of Object.values<ExtractRun>(tables[TABLES.extractRuns] ?? {})) {
-      const list = extractRunsByMessage.get(row.messageId) ?? [];
-      list.push(row);
-      extractRunsByMessage.set(row.messageId, list);
-    }
-    for (const [messageId, rows] of extractRunsByMessage) {
-      this.applyEventToMaterializedState("extract_runs_replaced", { messageId, rows });
-    }
-    for (const row of Object.values<TraceRun>(tables[TABLES.traceRuns] ?? {})) {
-      this.applyEventToMaterializedState("trace_run_upserted", { row });
-    }
-    for (const row of Object.values<TraceSpan>(tables[TABLES.traceSpans] ?? {})) {
-      this.applyEventToMaterializedState("trace_span_upserted", { row });
-    }
+    this.ctx.storage.transactionSync(() => {
+      const tables = snapshot.tables ?? {};
+      for (const tableName of [
+        "workspaces",
+        "threads",
+        "messages",
+        "message_parts",
+        "attachments",
+        "search_runs",
+        "search_results",
+        "extract_runs",
+        "trace_runs",
+        "trace_spans",
+      ]) {
+        this.exec(`DELETE FROM ${tableName}`);
+      }
+      for (const row of Object.values<Workspace>(tables[TABLES.workspaces] ?? {})) {
+        this.applyEventToMaterializedState("workspace_upserted", { row });
+      }
+      for (const row of Object.values<Thread>(tables[TABLES.threads] ?? {})) {
+        this.applyEventToMaterializedState("thread_upserted", { row });
+      }
+      for (const row of Object.values<Message>(tables[TABLES.messages] ?? {})) {
+        this.applyEventToMaterializedState("message_upserted", { row });
+      }
+      for (const row of Object.values<any>(tables[TABLES.messageParts] ?? {})) {
+        this.applyEventToMaterializedState("message_part_appended", { row });
+      }
+      for (const row of Object.values<Attachment>(tables[TABLES.attachments] ?? {})) {
+        this.applyEventToMaterializedState("attachment_upserted", { row });
+      }
+      const runsByMessage = new Map<string, SearchRun[]>();
+      for (const row of Object.values<SearchRun>(tables[TABLES.searchRuns] ?? {})) {
+        const list = runsByMessage.get(row.messageId) ?? [];
+        list.push(row);
+        runsByMessage.set(row.messageId, list);
+      }
+      for (const [messageId, rows] of runsByMessage) {
+        this.applyEventToMaterializedState("search_runs_replaced", { messageId, rows });
+      }
+      const resultsByMessage = new Map<string, SearchResult[]>();
+      for (const row of Object.values<SearchResult>(tables[TABLES.searchResults] ?? {})) {
+        const list = resultsByMessage.get(row.messageId) ?? [];
+        list.push(row);
+        resultsByMessage.set(row.messageId, list);
+      }
+      for (const [messageId, rows] of resultsByMessage) {
+        this.applyEventToMaterializedState("search_results_replaced", { messageId, rows });
+      }
+      const extractRunsByMessage = new Map<string, ExtractRun[]>();
+      for (const row of Object.values<ExtractRun>(tables[TABLES.extractRuns] ?? {})) {
+        const list = extractRunsByMessage.get(row.messageId) ?? [];
+        list.push(row);
+        extractRunsByMessage.set(row.messageId, list);
+      }
+      for (const [messageId, rows] of extractRunsByMessage) {
+        this.applyEventToMaterializedState("extract_runs_replaced", { messageId, rows });
+      }
+      for (const row of Object.values<TraceRun>(tables[TABLES.traceRuns] ?? {})) {
+        this.applyEventToMaterializedState("trace_run_upserted", { row });
+      }
+      for (const row of Object.values<TraceSpan>(tables[TABLES.traceSpans] ?? {})) {
+        this.applyEventToMaterializedState("trace_span_upserted", { row });
+      }
+    });
   }
 
   private getEventsAfter(afterSeq: number) {

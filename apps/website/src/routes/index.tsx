@@ -808,13 +808,16 @@ export default function Home() {
       removedUploadLocalIds.add(cleanup.localId);
     }
   });
-  const messageIds = createMemo(() =>
-    resolveThreadMessagePath(
-      (allMessages() as Message[]).filter(
-        (message) => message.threadId === selectedConversationThread()?.id,
-      ),
-      selectedConversationThread()?.headMessageId ?? null,
-    ).map((message) => message.id),
+  const messageIds = createMemo(
+    () =>
+      resolveThreadMessagePath(
+        (allMessages() as Message[]).filter(
+          (message) => message.threadId === selectedConversationThread()?.id,
+        ),
+        selectedConversationThread()?.headMessageId ?? null,
+      ).map((message) => message.id),
+    undefined,
+    { equals: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]) },
   );
   const messagesById = createMemo(() => {
     const byId = new Map<string, Message>();
@@ -824,15 +827,26 @@ export default function Home() {
     return byId;
   });
   const messageById = (messageId: string) => messagesById().get(messageId);
-  const streamingThreadIds = createMemo(() => {
-    const ids = new Set<string>();
-    for (const msg of allMessages() as Message[]) {
-      if (msg.status === "streaming" || msg.status === "pending" || msg.status === "queued") {
-        ids.add(msg.threadId);
+  const streamingThreadIds = createMemo(
+    () => {
+      const ids = new Set<string>();
+      for (const msg of allMessages() as Message[]) {
+        if (msg.status === "streaming" || msg.status === "pending" || msg.status === "queued") {
+          ids.add(msg.threadId);
+        }
       }
-    }
-    return ids;
-  });
+      return ids;
+    },
+    undefined,
+    {
+      equals: (a, b) => {
+        if (a === b) return true;
+        if (a.size !== b.size) return false;
+        for (const v of a) if (!b.has(v)) return false;
+        return true;
+      },
+    },
+  );
   const searchRunsMemo = createMemo(() => {
     const resultsByRun = new Map<string, SearchResult[]>();
     for (const row of allSearchResults() as SearchResult[]) {
@@ -1239,10 +1253,19 @@ export default function Home() {
     return !streaming;
   };
 
-  // Auto-scroll only when user is already near the bottom
+  // Auto-scroll only when user is already near the bottom.
+  // Fingerprint isolates the scroll trigger so the effect doesn't re-run
+  // on every unrelated message or activity change.
+  const scrollFingerprint = createMemo(() => {
+    const ids = messageIds();
+    const lastId = ids[ids.length - 1];
+    if (!lastId) return "";
+    const msg = messageById(lastId);
+    if (!msg) return "";
+    return `${msg.id}:${msg.status}:${msg.text?.length ?? 0}`;
+  });
   createEffect(() => {
-    const _messageIds = messageIds();
-    const _activities = assistantActivities();
+    scrollFingerprint();
     if (timelineRef && isNearBottom()) {
       requestAnimationFrame(() => {
         timelineRef!.scrollTop = timelineRef!.scrollHeight;
@@ -1382,7 +1405,28 @@ export default function Home() {
   });
   const traceTreesForMessage = (messageId: string) => traceTreesByMessage().get(messageId) ?? [];
 
+  // Auto-collapse assistant prelude once text arrives.
+  // Fingerprint isolates the trigger so the effect doesn't re-run
+  // on every streaming delta or unrelated activity.
+  const autoCollapseFingerprint = createMemo(() => {
+    const ids: string[] = [];
+    for (const messageId of messageIds()) {
+      const message = messageById(messageId);
+      if (!message) continue;
+      if (
+        message.role !== "assistant" ||
+        !hasAssistantPrelude(message) ||
+        !message.text?.trim() ||
+        didAutoCollapseProgressByMessage[message.id]
+      ) {
+        continue;
+      }
+      ids.push(message.id);
+    }
+    return ids.join(",");
+  });
   createEffect(() => {
+    autoCollapseFingerprint();
     for (const messageId of messageIds()) {
       const message = messageById(messageId);
       if (!message) continue;

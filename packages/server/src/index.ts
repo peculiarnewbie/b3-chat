@@ -276,9 +276,13 @@ export async function fetchModelsCatalog(env: AppEnv, cache: Cache) {
   const cached = await cache.match(cacheKey);
   if (cached) return cached.json();
 
-  const response = await fetch(MODELS_CATALOG_URL, {
-    headers: { accept: "application/json" },
-  });
+  const response = await fetchWithTimeout(
+    MODELS_CATALOG_URL,
+    {
+      headers: { accept: "application/json" },
+    },
+    10_000,
+  );
   if (!response.ok) throw new Error(`Failed to fetch models catalog: ${response.status}`);
   const json = await response.json();
   await cache.put(
