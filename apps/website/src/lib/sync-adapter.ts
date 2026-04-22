@@ -1,6 +1,7 @@
 import {
   mergeAttachmentLink,
   SYNC_PROTOCOL_VERSION,
+  TABLES,
   type SyncEventPayloadMap,
   type SyncServerEnvelope,
 } from "@b3-chat/domain";
@@ -32,6 +33,25 @@ import { readCachedSnapshot, writeCachedSnapshot } from "./offline-cache";
 // ---------------------------------------------------------------------------
 
 type EventEnvelope = Extract<SyncServerEnvelope, { type: "event" }>;
+
+function rowsById<T extends { id: string }>(rows: Iterable<T>) {
+  return Object.fromEntries(Array.from(rows, (row) => [row.id, row]));
+}
+
+function buildCachedSnapshotTables() {
+  return {
+    [TABLES.workspaces]: rowsById(workspaces.state.values() as Iterable<Workspace>),
+    [TABLES.threads]: rowsById(threads.state.values() as Iterable<Thread>),
+    [TABLES.messages]: rowsById(messages.state.values() as Iterable<Message>),
+    [TABLES.messageParts]: rowsById(messageParts.state.values() as Iterable<any>),
+    [TABLES.attachments]: rowsById(attachments.state.values() as Iterable<Attachment>),
+    [TABLES.searchRuns]: rowsById(searchRuns.state.values() as Iterable<any>),
+    [TABLES.searchResults]: rowsById(searchResults.state.values() as Iterable<any>),
+    [TABLES.extractRuns]: rowsById(extractRuns.state.values() as Iterable<any>),
+    [TABLES.traceRuns]: rowsById(traceRuns.state.values() as Iterable<any>),
+    [TABLES.traceSpans]: rowsById(traceSpans.state.values() as Iterable<any>),
+  };
+}
 
 function coalesceDeltas(envelopes: EventEnvelope[]): EventEnvelope[] {
   const merged: EventEnvelope[] = [];
@@ -366,6 +386,7 @@ function collectWorkspacesAndThreads(): { workspaces: Workspace[]; threads: Thre
 export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
   let index = 0;
   let needsSelectionCheck = false;
+  let shouldRefreshCachedSnapshot = false;
 
   while (index < envelopes.length) {
     const envelope = envelopes[index]!;
@@ -384,6 +405,9 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
       beginBatch();
       for (const evt of coalesced) {
         applyEvent(evt.eventType, evt.payload);
+        if (evt.eventType !== "message_delta") {
+          shouldRefreshCachedSnapshot = true;
+        }
       }
       flushBatch();
       needsSelectionCheck = true;
@@ -433,6 +457,7 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
         }
         applySnapshot(envelope.snapshot.tables);
         needsSelectionCheck = true;
+        shouldRefreshCachedSnapshot = true;
         // Persist snapshot so next page load can hydrate instantly
         void writeCachedSnapshot(envelope.snapshot.tables ?? {}, conn.getLastServerSeq());
         break;
@@ -452,6 +477,10 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
       workspaceIds: ws.map((w) => w.id),
     });
     ensureActiveSelection(ws, ts);
+  }
+
+  if (shouldRefreshCachedSnapshot) {
+    void writeCachedSnapshot(buildCachedSnapshotTables(), conn.getLastServerSeq());
   }
 }
 
