@@ -8,6 +8,7 @@ import {
   createMemo,
   createResource,
   createSignal,
+  onCleanup,
   onMount,
 } from "solid-js";
 import { createStore } from "solid-js/store";
@@ -468,6 +469,8 @@ export default function Home() {
   const allTraceSpans = useLiveQuery(() => traceSpansCollection);
   const [theme, setTheme] = createSignal<Theme>(getInitialTheme());
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
+  const [showComposerMenu, setShowComposerMenu] = createSignal(false);
+  const [headerVisible, setHeaderVisible] = createSignal(true);
   const [collapsedProgressByMessage, setCollapsedProgressByMessage] = createStore<
     Record<string, boolean>
   >({});
@@ -521,6 +524,8 @@ export default function Home() {
   let timelineRef: HTMLElement | undefined;
   // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref attribute
   let fileInputRef: HTMLInputElement | undefined;
+  // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref attribute
+  let composerInputRef: HTMLTextAreaElement | undefined;
 
   // Drag-and-drop state
   const [isDragging, setIsDragging] = createSignal(false);
@@ -716,6 +721,8 @@ export default function Home() {
 
   const SCROLL_THRESHOLD = 80; // px from bottom to consider "at bottom"
 
+  let lastScrollTop = 0;
+
   const handleTimelineScroll = () => {
     if (!timelineRef) return;
     const { scrollTop, scrollHeight, clientHeight } = timelineRef;
@@ -723,6 +730,22 @@ export default function Home() {
     const nearBottom = distanceFromBottom <= SCROLL_THRESHOLD;
     setIsNearBottom(nearBottom);
     setShowScrollBtn(!nearBottom);
+
+    // Mobile header show/hide on scroll direction
+    if (window.innerWidth <= 700) {
+      const scrollUp = scrollTop < lastScrollTop;
+      const scrollDown = scrollTop > lastScrollTop;
+      const notAtTop = scrollTop > 60;
+
+      if (scrollUp && notAtTop) {
+        setHeaderVisible(true);
+      } else if (scrollDown) {
+        setHeaderVisible(false);
+      } else if (scrollTop <= 10) {
+        setHeaderVisible(true);
+      }
+      lastScrollTop = scrollTop;
+    }
   };
 
   const scrollToBottom = () => {
@@ -734,6 +757,30 @@ export default function Home() {
   createEffect(() => {
     document.documentElement.setAttribute("data-theme", theme());
     localStorage.setItem("b3-theme", theme());
+  });
+
+  // Auto-resize composer input
+  createEffect(() => {
+    composerText();
+    const el = composerInputRef;
+    if (!el) return;
+    requestAnimationFrame(() => {
+      el.style.height = "auto";
+      el.style.height = Math.min(el.scrollHeight, 160) + "px";
+    });
+  });
+
+  // Close composer menu on outside click
+  createEffect(() => {
+    if (!showComposerMenu()) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest(".composer-dropdown")) {
+        setShowComposerMenu(false);
+      }
+    };
+    document.addEventListener("click", handler);
+    onCleanup(() => document.removeEventListener("click", handler));
   });
 
   // Sync system prompt draft when settings opens or workspace changes
@@ -782,17 +829,8 @@ export default function Home() {
     (models()?.models ?? []).find((model) => model.id === modelId)?.interleaved?.field?.trim() ||
     null;
   const selectedModelSupportsReasoning = createMemo(() => Boolean(selectedModel()?.reasoning));
-  const selectedModelInterleavedField = createMemo(
-    () => selectedModel()?.interleaved?.field?.trim() || null,
-  );
   const effectiveComposerReasoningLevel = createMemo<ReasoningLevel>(() =>
     selectedModelSupportsReasoning() ? composerReasoningLevel() : "off",
-  );
-  const willDisableReasoningForToolTurn = createMemo(
-    () =>
-      composerSearch() &&
-      effectiveComposerReasoningLevel() !== "off" &&
-      selectedModelInterleavedField() === "reasoning_content",
   );
 
   createEffect(() => {
@@ -2896,7 +2934,7 @@ export default function Home() {
           </div>
         </aside>
 
-        <main class="main-pane">
+        <main class="main-pane" classList={{ "header-hidden": !headerVisible() }}>
           <Show
             when={!settingsOpen()}
             fallback={
@@ -2951,7 +2989,7 @@ export default function Home() {
               </div>
             }
           >
-            <header class="thread-header">
+            <header class="thread-header" classList={{ "is-hidden": !headerVisible() }}>
               <button class="menu-btn" onClick={() => setSidebarOpen(true)}>
                 ☰
               </button>
@@ -2968,20 +3006,6 @@ export default function Home() {
               <For each={messageIds()}>{renderMessage}</For>
             </section>
 
-            <Show when={showScrollBtn()}>
-              <button class="scroll-to-bottom" onClick={scrollToBottom} title="Scroll to bottom">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                  <path
-                    d="M8 3v10M4 9l4 4 4-4"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  />
-                </svg>
-              </button>
-            </Show>
-
             <Show when={!isConnected()}>
               <div class="connection-banner">Connecting…</div>
             </Show>
@@ -2994,6 +3018,20 @@ export default function Home() {
               onDragOver={handleDragOver}
               onDrop={handleDrop}
             >
+              <Show when={showScrollBtn()}>
+                <button class="scroll-to-bottom" onClick={scrollToBottom} title="Scroll to bottom">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M8 3v10M4 9l4 4 4-4"
+                      stroke="currentColor"
+                      stroke-width="1.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                </button>
+              </Show>
+
               <Show when={composerAttachments().length > 0}>
                 <div class="attachment-strip">
                   <For each={composerAttachments()}>
@@ -3031,17 +3069,8 @@ export default function Home() {
                   </For>
                 </div>
               </Show>
-              <textarea
-                value={composerText()}
-                onInput={(event) => setComposerTextValue(event.currentTarget.value)}
-                onKeyDown={handleKeyDown}
-                onPaste={handlePaste}
-                placeholder={
-                  composerAttachments().length > 0 ? "Add a message (optional)..." : "Message..."
-                }
-                disabled={!isConnected()}
-              />
-              <div class="composer-bar">
+
+              <div class="composer-row">
                 <button
                   class="attach-btn"
                   onClick={() => fileInputRef?.click()}
@@ -3058,6 +3087,7 @@ export default function Home() {
                   onChange={(e) => handleFileSelect(e.currentTarget.files)}
                 />
                 <select
+                  class="composer-model"
                   value={composerModelId()}
                   onChange={(event) => handleModelChange(event.currentTarget.value)}
                 >
@@ -3065,75 +3095,146 @@ export default function Home() {
                     {(model) => <option value={model.id}>{model.name}</option>}
                   </For>
                 </select>
-                <Show when={selectedModelSupportsReasoning()}>
-                  <select
-                    value={composerReasoningLevel()}
-                    title="Reasoning level"
-                    aria-label="Reasoning level"
-                    onChange={(event) =>
-                      handleReasoningChange(event.currentTarget.value as ReasoningLevel)
-                    }
-                  >
-                    <For each={REASONING_OPTIONS}>
-                      {(option) => <option value={option.value}>{option.label}</option>}
-                    </For>
-                  </select>
-                </Show>
-                <label class="search-toggle">
-                  <input
-                    type="checkbox"
-                    checked={composerSearch()}
-                    onChange={(event) => handleSearchChange(event.currentTarget.checked)}
-                  />
-                  Search
-                </label>
-                <span class="kbd-hint">Enter to send</span>
-                <Show
-                  when={isSelectedThreadBusy() && streamingAssistantMessageId()}
-                  fallback={
-                    <button
-                      class="btn btn-primary"
-                      disabled={
-                        !isConnected() ||
-                        composer.sending ||
-                        composerAttachments().some(
-                          (attachment) => attachment.status === "uploading",
-                        )
-                      }
-                      onClick={sendMessage}
-                    >
-                      {!isConnected() ? "Connecting…" : composer.sending ? "Sending…" : "Send"}
-                    </button>
+                <textarea
+                  ref={composerInputRef!}
+                  class="composer-input"
+                  value={composerText()}
+                  onInput={(event) => {
+                    setComposerTextValue(event.currentTarget.value);
+                    const el = event.currentTarget;
+                    el.style.height = "auto";
+                    el.style.height = Math.min(el.scrollHeight, 160) + "px";
+                  }}
+                  onKeyDown={handleKeyDown}
+                  onPaste={handlePaste}
+                  placeholder={
+                    composerAttachments().length > 0 ? "Add a message (optional)..." : "Message..."
                   }
-                >
+                  disabled={!isConnected()}
+                  rows={1}
+                />
+                <div class="composer-actions">
                   <button
                     type="button"
-                    class="btn btn-stop"
-                    aria-label="Stop response"
-                    title="Stop response"
-                    onClick={cancelActiveResponse}
+                    class="composer-action-btn"
+                    classList={{ "is-active": composerSearch() }}
+                    title={composerSearch() ? "Disable search" : "Enable search"}
+                    onClick={() => handleSearchChange(!composerSearch())}
                   >
                     <svg
-                      width="14"
-                      height="14"
+                      width="16"
+                      height="16"
                       viewBox="0 0 24 24"
-                      fill="currentColor"
-                      stroke="none"
-                      aria-hidden="true"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
                     >
-                      <rect x="6" y="6" width="12" height="12" rx="2" />
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="2" y1="12" x2="22" y2="12" />
+                      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
                     </svg>
-                    Stop
                   </button>
-                </Show>
+                  <div class="composer-dropdown">
+                    <button
+                      type="button"
+                      class="composer-action-btn"
+                      title="More options"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowComposerMenu((v) => !v);
+                      }}
+                    >
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      >
+                        <circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none" />
+                        <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
+                        <circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none" />
+                      </svg>
+                    </button>
+                    <Show when={showComposerMenu()}>
+                      <div class="composer-dropdown-panel" onClick={(e) => e.stopPropagation()}>
+                        <Show when={selectedModelSupportsReasoning()}>
+                          <label>Reasoning</label>
+                          <select
+                            value={composerReasoningLevel()}
+                            title="Reasoning level"
+                            aria-label="Reasoning level"
+                            onChange={(event) =>
+                              handleReasoningChange(event.currentTarget.value as ReasoningLevel)
+                            }
+                          >
+                            <For each={REASONING_OPTIONS}>
+                              {(option) => <option value={option.value}>{option.label}</option>}
+                            </For>
+                          </select>
+                        </Show>
+                      </div>
+                    </Show>
+                  </div>
+                  <Show
+                    when={isSelectedThreadBusy() && streamingAssistantMessageId()}
+                    fallback={
+                      <button
+                        type="button"
+                        class="composer-send-btn"
+                        disabled={
+                          !isConnected() ||
+                          composer.sending ||
+                          composerAttachments().some(
+                            (attachment) => attachment.status === "uploading",
+                          )
+                        }
+                        onClick={sendMessage}
+                        title={
+                          !isConnected() ? "Connecting…" : composer.sending ? "Sending…" : "Send"
+                        }
+                      >
+                        <svg
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                        >
+                          <line x1="22" y1="2" x2="11" y2="13" />
+                          <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                        </svg>
+                      </button>
+                    }
+                  >
+                    <button
+                      type="button"
+                      class="composer-stop-btn"
+                      aria-label="Stop response"
+                      title="Stop response"
+                      onClick={cancelActiveResponse}
+                    >
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="currentColor"
+                        stroke="none"
+                      >
+                        <rect x="6" y="6" width="12" height="12" rx="2" />
+                      </svg>
+                    </button>
+                  </Show>
+                </div>
               </div>
-              <Show when={willDisableReasoningForToolTurn()}>
-                <p class="composer-note">
-                  Thinking will be disabled for this turn because this model uses interleaved
-                  reasoning replay (`reasoning_content`) across tool continuations, and search is
-                  more reliable when tool turns run without visible reasoning.
-                </p>
-              </Show>
             </footer>
           </Show>
         </main>
