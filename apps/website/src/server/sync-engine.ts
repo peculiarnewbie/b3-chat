@@ -101,41 +101,14 @@ function looksLikeMissingRealtimeAccess(text: string) {
   );
 }
 
-/**
- * System prompt that governs how models use exa_web_search.
- *
- * This is tuned for the failure modes we've observed:
- *  1. Thinking models re-issuing the same query multiple times. → explicit
- *     rule about not repeating queries.
- *  2. Models writing natural-language full-sentence queries that return
- *     poor Exa results. → explicit keyword-dense style guidance with
- *     good/bad examples.
- *  3. Models over-searching (2-4 searches for a single question that one
- *     good query could answer). → explicit "prefer a single search" directive,
- *     framing multiple searches as the exception rather than the norm.
- *  4. Models claiming they can't access real-time info instead of using
- *     the tool. → explicit "don't refuse without trying".
- *  5. Models sending tool results verbatim to the user. → unchanged from the
- *     grounding block's own instructions but reinforced here.
- */
 const SEARCH_TOOL_SYSTEM_PROMPT = [
   "You have access to the exa_web_search tool for current or external information.",
   "",
-  "When to call it (this is a MUST, not a MAY):",
-  "- The user asks about something you don't know, or aren't sure about. Prefer searching over guessing or hedging.",
-  "- The answer depends on facts that may have changed since your training, anything user-specific, recent events, live data, or any claim the user would expect you to verify.",
-  "- Do NOT refuse by saying you lack real-time access or that your knowledge is dated — try the tool first, then answer.",
-  "",
-  "How to write good queries:",
-  "- Keyword-dense, not conversational. Good: `Oscar Piastri 2026 F1 WDC points`. Bad: `Who is currently leading the 2026 Formula 1 Drivers Championship?`.",
-  "- Include concrete entities (names, years, versions, locations). Include the current year for anything time-sensitive.",
-  "- Prefer one well-crafted query that covers the whole question. A single good search is almost always enough.",
-  "",
-  "Budget and loop control:",
-  "- Strongly prefer a SINGLE search per turn. Multiple searches are the exception, not the rule — only issue more than one when a single search genuinely cannot answer (e.g., the user asked about two unrelated topics, or the first result was clearly off-target) or when the user explicitly asked you to research several things. The hard cap is 4, but reaching 2+ searches should be rare.",
-  "- Never repeat an identical or near-identical query — the tool will refuse duplicates. If the first query was weak, reformulate with *different* keywords rather than retrying.",
+  "Use it when external grounding would materially improve the answer.",
+  "If the user explicitly asks you to browse, verify, or research something, using the tool is usually appropriate.",
+  "- Never repeat an identical or near-identical query — the tool will refuse duplicates. If the first query was weak, reformulate it rather than retrying.",
   "- If the tool returns `{ ok: false, ... }`, read the `hint` field and follow it. Do not retry the same failed query. If a second attempt also fails, stop searching and answer with what you know, explicitly acknowledging the gap.",
-  "- After searching, write the final answer. Do not keep searching to be exhaustive.",
+  "- Prefer one good search when possible. After searching, answer instead of continuing to browse for completeness.",
   "",
   "How to use results: cite inline by source number when relevant. Do not mention the search tool, the query, or that a search happened unless the user asks.",
 ].join("\n");

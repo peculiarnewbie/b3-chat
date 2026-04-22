@@ -219,14 +219,8 @@ export function createExaSearchTool(input: {
     name: "exa_web_search",
     description: [
       "Run a web search through Exa and receive a grounded block of ranked results (title, URL, snippet).",
-      "Use this whenever the answer depends on facts that may have changed since training, anything user-specific or organization-specific, recent events, live data (prices, scores, standings), breaking news, release notes, or any claim the user would expect you to verify.",
-      "",
-      "Query style (this matters a lot):",
-      "- Write keyword-dense queries, not full natural-language questions. Good: `Oscar Piastri 2026 F1 WDC standings`. Bad: `who is currently leading the 2026 Formula 1 World Drivers Championship right now`.",
-      "- Include concrete entities: names, versions, years, product/repo names, locations. These are what Exa indexes against.",
-      "- When the user's question has multiple facets (e.g. comparison, multi-topic), issue separate focused searches rather than one long combined query.",
-      "- Include the current year for time-sensitive info so you don't get stale results.",
-      "- If a query returned poor or irrelevant results, reformulate with *different* keywords. Do not re-issue the same or near-identical query — the tool will refuse it.",
+      "Use this when external or current information would help answer the user's request.",
+      "- If a query returned poor or irrelevant results, reformulate it. Do not re-issue the same or near-identical query — the tool will refuse it.",
       "",
       "Budget: at most a handful of searches per turn. Stop once you have enough to answer, and answer — do not keep searching to be thorough.",
     ].join("\n"),
@@ -235,8 +229,7 @@ export function createExaSearchTool(input: {
       properties: {
         query: {
           type: "string",
-          description:
-            "Keyword-dense search query (typically 3–10 terms). Prefer concrete entities over natural-language phrasing.",
+          description: "Search query.",
           minLength: 2,
           maxLength: 400,
         },
@@ -279,7 +272,7 @@ export function createExaSearchTool(input: {
         query: "",
         error: "Query was empty.",
         reason: "empty_query",
-        hint: "Provide a non-empty keyword-dense query. Do not retry with an empty query.",
+        hint: "Provide a non-empty search query. Do not retry with an empty query.",
       };
     }
 
@@ -290,7 +283,7 @@ export function createExaSearchTool(input: {
         query,
         error: `Query is too short (${query.length} chars).`,
         reason: "query_too_short",
-        hint: "Use a keyword-dense query with at least a few concrete terms.",
+        hint: "Use a longer search query.",
       };
     }
 
