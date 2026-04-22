@@ -1361,12 +1361,26 @@ export default function Home() {
   const toggleTraceDrawer = (messageId: string) =>
     setCollapsedTraceByMessage(messageId, !isTraceCollapsed(messageId));
   const traceRunsForMessage = (messageId: string) => traceRunsByMessage().get(messageId) ?? [];
-  const traceTreesForMessage = (messageId: string) =>
-    traceRunsForMessage(messageId).map((run) => ({
-      run,
-      spans: buildTraceTree(traceSpansByRun().get(run.id) ?? []),
-      attrs: parseTraceJson(run.attrsJson),
-    }));
+  type TraceTree = {
+    run: TraceRun;
+    spans: ParsedTraceSpan[];
+    attrs: Record<string, unknown>;
+  };
+  const traceTreesByMessage = createMemo(() => {
+    const trees = new Map<string, TraceTree[]>();
+    for (const [messageId, runs] of traceRunsByMessage()) {
+      trees.set(
+        messageId,
+        runs.map((run) => ({
+          run,
+          spans: buildTraceTree(traceSpansByRun().get(run.id) ?? []),
+          attrs: parseTraceJson(run.attrsJson),
+        })),
+      );
+    }
+    return trees;
+  });
+  const traceTreesForMessage = (messageId: string) => traceTreesByMessage().get(messageId) ?? [];
 
   createEffect(() => {
     for (const messageId of messageIds()) {
@@ -1385,11 +1399,19 @@ export default function Home() {
     }
   });
 
-  const userAttachments = (messageId: string) => {
-    return (allAttachments() as Attachment[]).filter(
-      (a) => a.messageId === messageId && a.status !== "failed",
-    );
-  };
+  // Pre-index attachments by messageId so filtering is O(1) per message
+  const attachmentsByMessage = createMemo(() => {
+    const byMessage = new Map<string, Attachment[]>();
+    for (const att of allAttachments() as Attachment[]) {
+      if (att.status === "failed" || !att.messageId) continue;
+      const list = byMessage.get(att.messageId) ?? [];
+      list.push(att);
+      byMessage.set(att.messageId, list);
+    }
+    return byMessage;
+  });
+
+  const userAttachments = (messageId: string) => attachmentsByMessage().get(messageId) ?? [];
   const userImageAttachments = (messageId: string) =>
     userAttachments(messageId).filter((attachment) => isImageMime(attachment.mimeType));
   const userFileAttachments = (messageId: string) =>

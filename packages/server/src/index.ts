@@ -1092,15 +1092,27 @@ export async function completeTextAttachment(env: AppEnv, objectKey: string) {
   return object.text();
 }
 
+const signedUrlCache = new Map<string, { url: string; expiresAt: number }>();
+
 export async function getSignedAttachmentUrl(env: AppEnv, objectKey: string) {
+  const now = Date.now();
+  const cached = signedUrlCache.get(objectKey);
+  // Refresh with 60-second buffer so the URL doesn't expire mid-conversation
+  if (cached && cached.expiresAt > now + 60_000) {
+    return cached.url;
+  }
+
   const url = new URL(`/api/uploads/blob/${encodeURIComponent(objectKey)}`, env.BETTER_AUTH_URL);
+  const expiresAt = now + 10 * 60 * 1000;
   const token = await signUploadToken(env, {
     action: "read_attachment",
     objectKey,
-    expiresAt: Date.now() + 10 * 60 * 1000,
+    expiresAt,
   });
   url.searchParams.set("token", token);
-  return url.toString();
+  const result = url.toString();
+  signedUrlCache.set(objectKey, { url: result, expiresAt });
+  return result;
 }
 
 export function isInlineTextAttachment(mimeType: string, sizeBytes: number) {

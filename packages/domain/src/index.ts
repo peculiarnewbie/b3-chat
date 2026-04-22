@@ -861,26 +861,29 @@ export function resolveThreadMessagePath<
     parentMessageId?: string | null;
   },
 >(messages: readonly T[], headMessageId?: string | null) {
-  const ordered = sortConversationMessages(messages);
-  if (ordered.length <= 1) return ordered;
+  if (messages.length <= 1) return [...messages];
 
-  const byId = new Map(ordered.map((message) => [message.id, message] as const));
+  const byId = new Map(messages.map((message) => [message.id, message] as const));
   const headId = headMessageId ?? null;
-  if (!headId) return ordered;
 
-  const head = byId.get(headId);
-  if (!head) return ordered;
+  if (headId) {
+    const head = byId.get(headId);
+    if (head) {
+      const path: T[] = [];
+      const seen = new Set<string>();
+      let current: T | undefined = head;
 
-  const path: T[] = [];
-  const seen = new Set<string>();
-  let current: T | undefined = head;
+      while (current && !seen.has(current.id)) {
+        path.push(current);
+        seen.add(current.id);
+        const parentId: string | null = current.parentMessageId ?? null;
+        current = parentId ? byId.get(parentId) : undefined;
+      }
 
-  while (current && !seen.has(current.id)) {
-    path.push(current);
-    seen.add(current.id);
-    const parentId: string | null = current.parentMessageId ?? null;
-    current = parentId ? byId.get(parentId) : undefined;
+      if (path.length > 0) return path.reverse();
+    }
   }
 
-  return path.length > 0 ? path.reverse() : ordered;
+  // Fallback: sort and return all
+  return sortConversationMessages(messages);
 }

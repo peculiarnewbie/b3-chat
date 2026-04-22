@@ -38,4 +38,25 @@ export default defineConfig({
   server: {
     allowedHosts: true,
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/solid-js") || id.includes("node_modules/@solidjs")) {
+            return "vendor";
+          }
+          if (id.includes("node_modules/@tanstack")) {
+            return "db";
+          }
+          if (
+            id.includes("node_modules/marked") ||
+            id.includes("node_modules/dompurify") ||
+            id.includes("node_modules/highlight.js")
+          ) {
+            return "markdown";
+          }
+        },
+      },
+    },
+  },
 });

@@ -20,23 +20,23 @@ export default {
     setRuntimeEnv(env);
 
     const withVersionHeader = (response: Response) => {
-      const next = new Response(response.body, response);
-      next.headers.set("x-b3-version", BUILD_INFO.version);
-      return next;
+      const headers = new Headers(response.headers);
+      headers.set("x-b3-version", BUILD_INFO.version);
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
     };
 
     const url = new URL(request.url);
     const { pathname } = url;
     const method = request.method;
 
-    // Debug: log every request that reaches the worker
-    console.log(`[worker] ${method} ${pathname}`);
-
     try {
       // API routing
       if (pathname.startsWith("/api/")) {
         if (pathname.startsWith("/api/auth/")) {
-          console.log(`[worker] routing to handleAuth: ${method} ${pathname}`);
           return withVersionHeader(await handleAuth(request));
         }
 
@@ -69,7 +69,16 @@ export default {
           await env.ASSETS.fetch(new Request(new URL("/index.html", url.origin))),
         );
       }
-      return withVersionHeader(assetResponse);
+
+      // Fingerprinted static assets (Vite build output) can be cached forever
+      const headers = new Headers(assetResponse.headers);
+      headers.set("cache-control", "public, max-age=31536000, immutable");
+      headers.set("x-b3-version", BUILD_INFO.version);
+      return new Response(assetResponse.body, {
+        status: assetResponse.status,
+        statusText: assetResponse.statusText,
+        headers,
+      });
     } catch (error) {
       if (error instanceof Response) return withVersionHeader(error);
       console.error("Unhandled error:", error);
