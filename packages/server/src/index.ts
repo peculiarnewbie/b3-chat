@@ -10,7 +10,6 @@ export {
   type ExtendedStreamChunk,
 } from "./chat-completions-adapter.js";
 export { chat } from "@tanstack/ai";
-import puppeteer from "@cloudflare/puppeteer";
 import { decodeAppEnv, type AppEnv } from "@b3-chat/effect";
 import { betterAuth } from "better-auth";
 import { dash } from "@better-auth/infra";
@@ -974,7 +973,7 @@ export async function cloudflareBrowserMarkdown(
 
   let lastError: BrowserRenderError | null = null;
   for (let attempt = 1; attempt <= BROWSER_RENDER_MAX_ATTEMPTS; attempt++) {
-    let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
+    let browser: any = null;
     // Listener that tears down the in-flight browser session when the
     // caller aborts. Closing the browser mid-`page.goto` / `page.evaluate`
     // makes those calls reject, which propagates back into the catch
@@ -987,7 +986,8 @@ export async function cloudflareBrowserMarkdown(
       // another extract call lands on the same Worker isolate. We still
       // close the browser in `finally` to release the concurrent-session
       // slot — the underlying session stays warm server-side.
-      browser = await puppeteer.launch(binding as Parameters<typeof puppeteer.launch>[0], {
+      const puppeteer = (await import("@cloudflare/puppeteer")).default;
+      browser = await puppeteer.launch(binding as any, {
         keep_alive: 60_000,
       });
       if (signal) {

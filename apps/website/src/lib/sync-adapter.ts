@@ -90,30 +90,61 @@ function hasRow(collectionId: string, key: string) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Batched sync writes — consecutive server events are grouped into one
+// begin()/commit() per collection, cutting reactive churn in TanStack DB.
+// ---------------------------------------------------------------------------
+
+type BatchEntry = { type: "insert" | "update"; value: object } | { type: "delete"; key: string };
+
+let activeBatch: Map<string, BatchEntry[]> | null = null;
+
+function beginBatch() {
+  activeBatch = new Map();
+}
+
+function pushBatchOp(collectionId: string, op: BatchEntry) {
+  if (!activeBatch) {
+    const writer = getSyncWriter(collectionId);
+    if (!writer) return;
+    writer.begin({ immediate: true });
+    writer.write(
+      op.type === "delete" ? { key: op.key, type: "delete" } : { type: op.type, value: op.value },
+    );
+    writer.commit();
+    return;
+  }
+  const list = activeBatch.get(collectionId) ?? [];
+  list.push(op);
+  activeBatch.set(collectionId, list);
+}
+
+function flushBatch() {
+  if (!activeBatch) return;
+  for (const [collectionId, ops] of activeBatch) {
+    const writer = getSyncWriter(collectionId);
+    if (!writer) continue;
+    writer.begin();
+    for (const op of ops) {
+      writer.write(
+        op.type === "delete" ? { key: op.key, type: "delete" } : { type: op.type, value: op.value },
+      );
+    }
+    writer.commit();
+  }
+  activeBatch = null;
+}
+
 function syncUpsert<T extends object>(collectionId: string, _key: string, value: T) {
-  const writer = getSyncWriter<T>(collectionId);
-  if (!writer) return;
-  writer.begin();
-  // Key is derived from getKey(value) by the collection; no key field for insert/update
-  writer.write({ type: hasRow(collectionId, _key) ? "update" : "insert", value });
-  writer.commit();
+  pushBatchOp(collectionId, { type: hasRow(collectionId, _key) ? "update" : "insert", value });
 }
 
 function syncUpdate<T extends object>(collectionId: string, _key: string, value: T) {
-  const writer = getSyncWriter<T>(collectionId);
-  if (!writer) return;
-  writer.begin();
-  writer.write({ type: "update", value });
-  writer.commit();
+  pushBatchOp(collectionId, { type: "update", value });
 }
 
 function syncDelete(collectionId: string, key: string) {
-  const writer = getSyncWriter(collectionId);
-  if (!writer) return;
-  writer.begin();
-  // Delete uses key directly since there's no value to derive it from
-  writer.write({ key, type: "delete" });
-  writer.commit();
+  pushBatchOp(collectionId, { type: "delete", key });
 }
 
 // ---------------------------------------------------------------------------
@@ -349,9 +380,11 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
       conn.setLastServerSeq(lastSeq);
 
       const coalesced = coalesceDeltas(events);
+      beginBatch();
       for (const evt of coalesced) {
         applyEvent(evt.eventType, evt.payload);
       }
+      flushBatch();
       needsSelectionCheck = true;
       continue;
     }

@@ -1,4 +1,4 @@
-import { createMemo, Show, type Component } from "solid-js";
+import { createEffect, createMemo, createSignal, Show, type Component } from "solid-js";
 import { Marked, Renderer } from "marked";
 import { markedHighlight } from "marked-highlight";
 import DOMPurify from "dompurify";
@@ -111,8 +111,41 @@ const Markdown: Component<{
   streaming?: boolean;
   citations?: Citation[];
 }> = (props) => {
+  const [displayText, setDisplayText] = createSignal(props.text);
+  let pending = props.text;
+  let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+  let streamingStarted = false;
+
+  createEffect(() => {
+    const text = props.text;
+    const streaming = props.streaming;
+    pending = text;
+
+    if (!streaming) {
+      if (throttleTimer) {
+        clearTimeout(throttleTimer);
+        throttleTimer = null;
+      }
+      streamingStarted = false;
+      setDisplayText(pending);
+      return;
+    }
+
+    if (!streamingStarted) {
+      streamingStarted = true;
+      setDisplayText(pending);
+      return;
+    }
+
+    if (throttleTimer) return;
+    throttleTimer = setTimeout(() => {
+      throttleTimer = null;
+      setDisplayText(pending);
+    }, 150);
+  });
+
   const html = createMemo(() => {
-    const raw = props.text || "";
+    const raw = displayText() || "";
     const rendered = marked.parse(raw, { async: false }) as string;
     const sanitized = DOMPurify.sanitize(rendered, { ADD_ATTR: ["data-code"] });
     let result = sanitized

@@ -1104,9 +1104,6 @@ export class SyncEngineDurableObject {
         },
       });
 
-      const snapshot = await traceAsync("assistant.snapshot.load", "io", {}, () =>
-        this.getSnapshot(),
-      );
       const thread = this.getThread(payload.threadId);
       if (!thread) {
         await recorder.finishSpan({
@@ -1194,7 +1191,7 @@ export class SyncEngineDurableObject {
 
       try {
         const threadMessages = await traceSync("assistant.thread_messages.load", "sync", {}, () =>
-          this.getThreadMessages(snapshot, thread, [payload.userMessage, payload.assistantMessage]),
+          this.getThreadMessages(thread, [payload.userMessage, payload.assistantMessage]),
         );
         const searchTool = payload.search
           ? createExaSearchTool({
@@ -1266,7 +1263,7 @@ export class SyncEngineDurableObject {
           "assistant.attachments.resolve",
           "io",
           { threadMessageCount: threadMessages.length },
-          () => this.buildModelMessages(snapshot, workspace.id, threadMessages),
+          () => this.buildModelMessages(workspace.id, threadMessages),
         );
         if (searchTool) {
           systemPrompts.push(SEARCH_TOOL_SYSTEM_PROMPT);
@@ -1500,18 +1497,20 @@ export class SyncEngineDurableObject {
   }
 
   private getThreadMessages(
-    snapshot: SyncSnapshot,
     thread: Pick<Thread, "id" | "headMessageId">,
     additionalMessages: Message[] = [],
   ) {
     const byId = new Map<string, Message>();
-    for (const message of Object.values<any>(snapshot.tables?.[TABLES.messages] ?? {})) {
-      if (message.threadId !== thread.id) continue;
+    const rows = this.queryAll<{ row_json: string }>(
+      `SELECT row_json FROM messages WHERE thread_id = ?`,
+      thread.id,
+    );
+    for (const row of rows) {
+      const message = parseJson<Message>(row.row_json);
       byId.set(message.id, message);
     }
     for (const message of additionalMessages) {
-      if (message.threadId !== thread.id) continue;
-      byId.set(message.id, message);
+      if (message.threadId === thread.id) byId.set(message.id, message);
     }
     return resolveThreadMessagePath([...byId.values()], thread.headMessageId ?? null);
   }
@@ -1522,15 +1521,23 @@ export class SyncEngineDurableObject {
    * Returns messages and system prompts separately for TanStack AI's chat().
    */
   private async buildModelMessages(
-    snapshot: SyncSnapshot,
     workspaceId: string,
     threadMessages: Message[],
   ): Promise<{ messages: ModelMessage[]; systemPrompts: string[] }> {
-    const workspace = snapshot.tables?.[TABLES.workspaces]?.[workspaceId];
-    const threadId = threadMessages[0]?.threadId;
-    const attachments = Object.values<any>(snapshot.tables?.[TABLES.attachments] ?? {}).filter(
-      (attachment) => attachment.threadId === threadId && attachment.status === "ready",
+    const workspaceRow = this.queryOne<{ row_json: string }>(
+      `SELECT row_json FROM workspaces WHERE id = ?`,
+      workspaceId,
     );
+    const workspace = workspaceRow ? parseJson<Workspace>(workspaceRow.row_json) : undefined;
+    const threadId = threadMessages[0]?.threadId;
+    const attachmentRows = threadId
+      ? this.queryAll<{ row_json: string }>(
+          `SELECT row_json FROM attachments WHERE thread_id = ? AND status = ?`,
+          threadId,
+          "ready",
+        )
+      : [];
+    const attachments = attachmentRows.map((row) => parseJson<Attachment>(row.row_json));
 
     const systemPrompts: string[] = [];
     if (workspace?.systemPrompt) {
@@ -1553,21 +1560,30 @@ export class SyncEngineDurableObject {
       }
 
       if (message.role === "user") {
-        for (const attachment of attachments) {
-          if (attachment.messageId !== message.id) continue;
-          if (isImageAttachment(attachment.mimeType)) {
-            const signedUrl = await getSignedAttachmentUrl(this.env, attachment.objectKey);
-            contentParts.push({
-              type: "image",
-              source: { type: "url", value: signedUrl },
-            });
-            continue;
-          }
-          if (isInlineTextAttachment(attachment.mimeType, attachment.sizeBytes)) {
-            const text = await completeTextAttachment(this.env, attachment.objectKey);
-            if (text) {
-              contentParts.push(`Attachment ${attachment.fileName}:\n${text.slice(0, 10_000)}`);
+        const tasks = attachments
+          .filter((attachment) => attachment.messageId === message.id)
+          .map(async (attachment) => {
+            if (isImageAttachment(attachment.mimeType)) {
+              const signedUrl = await getSignedAttachmentUrl(this.env, attachment.objectKey);
+              return {
+                type: "image" as const,
+                source: { type: "url" as const, value: signedUrl },
+              };
             }
+            if (isInlineTextAttachment(attachment.mimeType, attachment.sizeBytes)) {
+              const text = await completeTextAttachment(this.env, attachment.objectKey);
+              if (text) {
+                return `Attachment ${attachment.fileName}:\n${text.slice(0, 10_000)}`;
+              }
+            }
+            return null;
+          });
+
+        const settled = await Promise.allSettled(tasks);
+        for (const result of settled) {
+          if (result.status === "rejected") continue;
+          if (result.value !== null) {
+            contentParts.push(result.value as (typeof contentParts)[number]);
           }
         }
       }
