@@ -37,7 +37,7 @@
     "vite": "npm:@voidzero-dev/vite-plus-core@^0.1.18",
     "vite-plugin-solid": "^2.11.12",
     "vite-plus": "catalog:",
-    "wrangler": "^4.83.0"
+    "wrangler": "catalog:"
   },
   "cloudflare": {
     "bindings": {

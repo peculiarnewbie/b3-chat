@@ -10,7 +10,8 @@
     "prepare": "vp config"
   },
   "devDependencies": {
-    "vite-plus": "catalog:"
+    "vite-plus": "catalog:",
+    "wrangler": "catalog:"
   },
   "engines": {
     "node": ">=22.12.0"
