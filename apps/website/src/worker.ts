@@ -26,6 +26,7 @@ export default {
         status: response.status,
         statusText: response.statusText,
         headers,
+        webSocket: (response as any).webSocket,
       });
     };
 
@@ -78,6 +79,7 @@ export default {
         status: assetResponse.status,
         statusText: assetResponse.statusText,
         headers,
+        webSocket: (assetResponse as any).webSocket,
       });
     } catch (error) {
       if (error instanceof Response) return withVersionHeader(error);
