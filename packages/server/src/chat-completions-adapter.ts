@@ -12,6 +12,8 @@ export type ChatCompletionsAdapterConfig = {
   baseUrl: string;
   apiKey: string;
   headers?: Record<string, string>;
+  firstByteTimeout?: number;
+  overallTimeout?: number;
   timeout?: number;
   trace?: <A>(
     name: string,
@@ -47,12 +49,19 @@ export const REASONING_CONTENT_EVENT = "reasoning_content" as const;
 // Re-export types for consumers
 export type { ModelMessage, ContentPart, StreamChunk };
 
-const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const DEFAULT_FIRST_BYTE_TIMEOUT_MS = 60_000;
+const DEFAULT_OVERALL_REQUEST_TIMEOUT_MS = 300_000;
 
-function createRequestSignal(input: { externalSignal?: AbortSignal; timeoutMs?: number }) {
+function createRequestLifecycle(input: {
+  externalSignal?: AbortSignal;
+  overallTimeoutMs?: number;
+  firstByteTimeoutMs?: number;
+}) {
   const controller = new AbortController();
-  const timeoutMs = input.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  const overallTimeoutMs = input.overallTimeoutMs ?? DEFAULT_OVERALL_REQUEST_TIMEOUT_MS;
+  const firstByteTimeoutMs = input.firstByteTimeoutMs ?? DEFAULT_FIRST_BYTE_TIMEOUT_MS;
+  let overallTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  let firstByteTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
   let abortListener: (() => void) | null = null;
 
   const abort = (reason?: unknown) => {
@@ -70,17 +79,38 @@ function createRequestSignal(input: { externalSignal?: AbortSignal; timeoutMs?: 
     }
   }
 
-  if (timeoutMs > 0) {
-    timeoutHandle = setTimeout(() => {
-      abort(new Error(`Upstream chat completion timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
+  if (overallTimeoutMs > 0) {
+    overallTimeoutHandle = setTimeout(() => {
+      abort(
+        new Error(`Upstream chat completion exceeded overall timeout after ${overallTimeoutMs}ms`),
+      );
+    }, overallTimeoutMs);
+  }
+
+  if (firstByteTimeoutMs > 0) {
+    firstByteTimeoutHandle = setTimeout(() => {
+      abort(
+        new Error(
+          `Upstream chat completion did not produce a first byte within ${firstByteTimeoutMs}ms`,
+        ),
+      );
+    }, firstByteTimeoutMs);
   }
 
   return {
     signal: controller.signal,
+    markFirstByteReceived() {
+      if (firstByteTimeoutHandle) {
+        clearTimeout(firstByteTimeoutHandle);
+        firstByteTimeoutHandle = null;
+      }
+    },
     cleanup() {
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
+      if (overallTimeoutHandle) {
+        clearTimeout(overallTimeoutHandle);
+      }
+      if (firstByteTimeoutHandle) {
+        clearTimeout(firstByteTimeoutHandle);
       }
       if (input.externalSignal && abortListener) {
         input.externalSignal.removeEventListener("abort", abortListener);
@@ -416,9 +446,10 @@ export class ChatCompletionsAdapter {
 
     const runId = generateId();
     const messageId = generateId();
-    const request = createRequestSignal({
+    const request = createRequestLifecycle({
       externalSignal: options.abortController?.signal,
-      timeoutMs: this.config.timeout,
+      overallTimeoutMs: this.config.overallTimeout ?? this.config.timeout,
+      firstByteTimeoutMs: this.config.firstByteTimeout,
     });
 
     // Emit RUN_STARTED
@@ -503,6 +534,9 @@ export class ChatCompletionsAdapter {
 
       while (true) {
         const { done, value } = await reader.read();
+        if (value && value.byteLength > 0) {
+          request.markFirstByteReceived();
+        }
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
@@ -770,9 +804,10 @@ export class ChatCompletionsAdapter {
       this.config.trace ??
       ((_: string, __: TraceSpanKind, ___: Record<string, unknown>, run: () => Promise<any>) =>
         run());
-    const request = createRequestSignal({
+    const request = createRequestLifecycle({
       externalSignal: options.chatOptions.abortController?.signal,
-      timeoutMs: this.config.timeout,
+      overallTimeoutMs: this.config.overallTimeout ?? this.config.timeout,
+      firstByteTimeoutMs: 0,
     });
 
     try {
