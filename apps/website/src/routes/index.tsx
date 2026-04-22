@@ -74,7 +74,7 @@ import {
   removeWorkspaceDraftAttachment,
   updateWorkspaceDraft,
 } from "../lib/draft-state";
-import { start as startConnection } from "../lib/ws-connection";
+import { start as startConnection, isConnected } from "../lib/ws-connection";
 import { init as initSyncAdapter } from "../lib/sync-adapter";
 
 type SessionPayload = {
@@ -450,8 +450,8 @@ export default function Home() {
   const [models] = createResource(fetchModels);
 
   // Initialize sync layer
-  onMount(() => {
-    initSyncAdapter();
+  onMount(async () => {
+    await initSyncAdapter();
     startConnection();
   });
 
@@ -2982,9 +2982,13 @@ export default function Home() {
               </button>
             </Show>
 
+            <Show when={!isConnected()}>
+              <div class="connection-banner">Connecting…</div>
+            </Show>
+
             <footer
               class="composer"
-              classList={{ "composer-dragging": isDragging() }}
+              classList={{ "composer-dragging": isDragging(), "composer-disabled": !isConnected() }}
               onDragEnter={handleDragEnter}
               onDragLeave={handleDragLeave}
               onDragOver={handleDragOver}
@@ -3035,6 +3039,7 @@ export default function Home() {
                 placeholder={
                   composerAttachments().length > 0 ? "Add a message (optional)..." : "Message..."
                 }
+                disabled={!isConnected()}
               />
               <div class="composer-bar">
                 <button
@@ -3089,6 +3094,7 @@ export default function Home() {
                     <button
                       class="btn btn-primary"
                       disabled={
+                        !isConnected() ||
                         composer.sending ||
                         composerAttachments().some(
                           (attachment) => attachment.status === "uploading",
@@ -3096,7 +3102,7 @@ export default function Home() {
                       }
                       onClick={sendMessage}
                     >
-                      {composer.sending ? "Sending…" : "Send"}
+                      {!isConnected() ? "Connecting…" : composer.sending ? "Sending…" : "Send"}
                     </button>
                   }
                 >

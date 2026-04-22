@@ -25,6 +25,7 @@ import {
 } from "./collections";
 import { reconcileDraftState } from "./draft-state";
 import { confirmOp, rollbackOp } from "./actions";
+import { readCachedSnapshot, writeCachedSnapshot } from "./offline-cache";
 
 // ---------------------------------------------------------------------------
 // Delta coalescing
@@ -432,6 +433,8 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
         }
         applySnapshot(envelope.snapshot.tables);
         needsSelectionCheck = true;
+        // Persist snapshot so next page load can hydrate instantly
+        void writeCachedSnapshot(envelope.snapshot.tables ?? {}, conn.getLastServerSeq());
         break;
 
       case "pong":
@@ -456,8 +459,23 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
 // Initialization — wire up the ws-connection callback
 // ---------------------------------------------------------------------------
 
-export function init() {
+export async function init() {
   conn.setOnEnvelopes(processEnvelopes);
+
+  // Try to hydrate from IndexedDB cache before WS connects
+  const cached = await readCachedSnapshot();
+  if (cached) {
+    console.log("[sync] hydrating from offline cache", {
+      lastServerSeq: cached.lastServerSeq,
+      tableCount: Object.keys(cached.tables).length,
+    });
+    conn.setLastServerSeq(cached.lastServerSeq);
+    applySnapshot(cached.tables);
+    const { workspaces: ws, threads: ts } = collectWorkspacesAndThreads();
+    reconcileDraftState(ws, ts);
+    ensureActiveSelection(ws, ts);
+  }
+
   // Mark all collections as ready (they start empty and get populated on sync_reset)
   for (const [, collectionId] of Object.entries(TABLE_TO_COLLECTION)) {
     const writer = getSyncWriter(collectionId);

@@ -1,4 +1,5 @@
 import { SYNC_PROTOCOL_VERSION, createId, type SyncServerEnvelope } from "@b3-chat/domain";
+import { createSignal } from "solid-js";
 import * as pendingOps from "./pending-ops";
 
 // ---------------------------------------------------------------------------
@@ -84,6 +85,9 @@ let reconnectAttempt = 0;
 let reconnectTimer: number | undefined;
 let started = false;
 
+const [isConnected, setIsConnected] = createSignal(false);
+export { isConnected };
+
 function syncLog(message: string, details?: Record<string, unknown>) {
   if (details) {
     console.log(`[ws] ${message}`, details);
@@ -107,6 +111,7 @@ function connect() {
 
   ws.addEventListener("open", () => {
     reconnectAttempt = 0;
+    setIsConnected(true);
     syncLog("open", { pendingOps: pendingOps.unackedOpIds().length });
     send({
       type: "hello",
@@ -124,11 +129,13 @@ function connect() {
 
   ws.addEventListener("close", () => {
     syncLog("close");
+    setIsConnected(false);
     scheduleReconnect();
   });
 
   ws.addEventListener("error", () => {
     syncLog("error");
+    setIsConnected(false);
   });
 }
 
