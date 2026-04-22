@@ -247,6 +247,8 @@ export function sendMessageAction(input: {
     title:
       input.thread.title === "New Chat" ? summarizeThreadTitle(input.text) : input.thread.title,
     headMessageId: assistantMessage.id,
+    modelId: input.modelId,
+    reasoningLevel: input.reasoningLevel,
     updatedAt,
     lastMessageAt: updatedAt,
   };
@@ -325,6 +327,8 @@ export function retryMessageAction(input: {
   const threadUpdate: Thread = {
     ...input.thread,
     headMessageId: assistantMessage.id,
+    modelId: input.modelId,
+    reasoningLevel: input.reasoningLevel,
     updatedAt,
     lastMessageAt: updatedAt,
   };
@@ -394,6 +398,8 @@ export function editUserMessageAction(input: {
   const threadUpdate: Thread = {
     ...input.thread,
     headMessageId: assistantMessage.id,
+    modelId: input.modelId,
+    reasoningLevel: input.reasoningLevel,
     updatedAt,
     lastMessageAt: updatedAt,
   };

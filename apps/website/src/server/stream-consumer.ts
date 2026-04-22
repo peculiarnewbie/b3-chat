@@ -173,26 +173,19 @@ export async function consumeAssistantStream(
     if (!pendingDelta) return;
     const delta = pendingDelta;
     pendingDelta = "";
-    await trace(
-      "assistant.stream.delta.flush",
-      "io",
-      { messageId, chars: delta.length },
-      async () => {
-        deltaCount += 1;
-        accumulated += delta;
-        const deltaEvent = await appendServerEvent(null, "message_delta", {
-          messageId,
-          delta,
-          updatedAt: nowIso(),
-        });
-        broadcast(deltaEvent);
-        log?.("assistant_turn_delta", {
-          assistantMessageId: messageId,
-          chars: delta.length,
-          totalChars: accumulated.length,
-        });
-      },
-    );
+    deltaCount += 1;
+    accumulated += delta;
+    const deltaEvent = await appendServerEvent(null, "message_delta", {
+      messageId,
+      delta,
+      updatedAt: nowIso(),
+    });
+    broadcast(deltaEvent);
+    log?.("assistant_turn_delta", {
+      assistantMessageId: messageId,
+      chars: delta.length,
+      totalChars: accumulated.length,
+    });
   };
 
   /**

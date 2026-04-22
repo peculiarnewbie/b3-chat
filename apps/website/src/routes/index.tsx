@@ -154,6 +154,10 @@ function groupThreadsByDate(threads: any[]): { label: string; threads: any[] }[]
     .map((label) => ({ label, threads: groups[label] }));
 }
 
+function isBusyMessageStatus(status: Message["status"] | undefined) {
+  return status === "queued" || status === "pending" || status === "streaming";
+}
+
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
@@ -865,12 +869,23 @@ export default function Home() {
     return byId;
   });
   const messageById = (messageId: string) => messagesById().get(messageId);
-  const streamingThreadIds = createMemo(
+  const busyThreadIds = createMemo(
     () => {
-      const ids = new Set<string>();
+      const messagesByThread = new Map<string, Message[]>();
       for (const msg of allMessages() as Message[]) {
-        if (msg.status === "streaming" || msg.status === "pending" || msg.status === "queued") {
-          ids.add(msg.threadId);
+        const list = messagesByThread.get(msg.threadId) ?? [];
+        list.push(msg);
+        messagesByThread.set(msg.threadId, list);
+      }
+
+      const ids = new Set<string>();
+      for (const thread of threads()) {
+        const path = resolveThreadMessagePath(
+          messagesByThread.get(thread.id) ?? [],
+          thread.headMessageId ?? null,
+        );
+        if (path.some((msg) => isBusyMessageStatus(msg.status))) {
+          ids.add(thread.id);
         }
       }
       return ids;
@@ -2584,7 +2599,7 @@ export default function Home() {
 
   const isSelectedThreadBusy = createMemo(() => {
     const thread = selectedConversationThread();
-    return thread ? streamingThreadIds().has(thread.id) : false;
+    return thread ? busyThreadIds().has(thread.id) : false;
   });
 
   /**
@@ -2856,7 +2871,7 @@ export default function Home() {
                           when={editingThreadId() === thread.id}
                           fallback={
                             <div class="nav-item-row">
-                              <Show when={streamingThreadIds().has(thread.id)}>
+                              <Show when={busyThreadIds().has(thread.id)}>
                                 <span class="thread-spinner" />
                               </Show>
                               <strong>{thread.title}</strong>

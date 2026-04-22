@@ -473,7 +473,6 @@ export async function init() {
     applySnapshot(cached.tables);
     const { workspaces: ws, threads: ts } = collectWorkspacesAndThreads();
     reconcileDraftState(ws, ts);
-    ensureActiveSelection(ws, ts);
   }
 
   // Mark all collections as ready (they start empty and get populated on sync_reset)

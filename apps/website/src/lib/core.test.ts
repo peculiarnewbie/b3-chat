@@ -245,6 +245,8 @@ describe("domain helpers", () => {
     expect(workspaces.get(workspace.id)).toBeTruthy();
     expect(persistedThread?.title).toBe("hello");
     expect(persistedThread?.headMessageId).toBeTruthy();
+    expect(persistedThread?.modelId).toBe(workspace.defaultModelId);
+    expect(persistedThread?.reasoningLevel).toBe("medium");
     expect(optimisticMessages).toHaveLength(2);
     expect(optimisticMessages.map((message) => message.role).sort()).toEqual(["assistant", "user"]);
     expect(optimisticMessages.map((message) => message.reasoningLevel)).toEqual([
@@ -278,6 +280,7 @@ describe("domain helpers", () => {
     });
 
     expect(threads.get(draftThread.id)?.title).toBe("draft hello");
+    expect(threads.get(draftThread.id)?.modelId).toBe(workspace.defaultModelId);
     expect(
       [...messages.state.values()].filter((message) => message.threadId === draftThread.id),
     ).toHaveLength(2);
@@ -329,6 +332,8 @@ describe("domain helpers", () => {
     expect(retriedAssistant?.parentMessageId).toBe(userMessage.id);
     expect(retriedAssistant?.status).toBe("pending");
     expect(threadAfterRetry?.headMessageId).toBe(retriedAssistant?.id);
+    expect(threadAfterRetry?.modelId).toBe(workspace.defaultModelId);
+    expect(threadAfterRetry?.reasoningLevel).toBe("off");
   });
 
   it("edits a user turn by creating a new user branch and cloned attachments", () => {
@@ -393,6 +398,8 @@ describe("domain helpers", () => {
     expect(editedUser?.sourceMessageId).toBe(originalUser.id);
     expect(editedAssistant?.parentMessageId).toBe(editedUser?.id);
     expect(threadAfterEdit?.headMessageId).toBe(editedAssistant?.id);
+    expect(threadAfterEdit?.modelId).toBe(workspace.defaultModelId);
+    expect(threadAfterEdit?.reasoningLevel).toBe("off");
     expect(clonedAttachments).toHaveLength(1);
     expect(clonedAttachments[0]?.messageId).toBe(editedUser?.id);
     expect(clonedAttachments[0]?.objectKey).toBe(originalAttachment.objectKey);
