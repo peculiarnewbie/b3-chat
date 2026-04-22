@@ -2989,6 +2989,11 @@ export default function Home() {
               </div>
             }
           >
+            <Show when={!headerVisible()}>
+              <button class="menu-btn-floating" onClick={() => setSidebarOpen(true)} title="Menu">
+                ☰
+              </button>
+            </Show>
             <header class="thread-header" classList={{ "is-hidden": !headerVisible() }}>
               <button class="menu-btn" onClick={() => setSidebarOpen(true)}>
                 ☰
@@ -3070,6 +3075,24 @@ export default function Home() {
                 </div>
               </Show>
 
+              <textarea
+                ref={composerInputRef!}
+                class="composer-input"
+                value={composerText()}
+                onInput={(event) => {
+                  setComposerTextValue(event.currentTarget.value);
+                  const el = event.currentTarget;
+                  el.style.height = "auto";
+                  el.style.height = Math.min(el.scrollHeight, 160) + "px";
+                }}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                placeholder={
+                  composerAttachments().length > 0 ? "Add a message (optional)..." : "Message..."
+                }
+                disabled={!isConnected()}
+                rows={1}
+              />
               <div class="composer-row">
                 <button
                   class="attach-btn"
@@ -3095,24 +3118,6 @@ export default function Home() {
                     {(model) => <option value={model.id}>{model.name}</option>}
                   </For>
                 </select>
-                <textarea
-                  ref={composerInputRef!}
-                  class="composer-input"
-                  value={composerText()}
-                  onInput={(event) => {
-                    setComposerTextValue(event.currentTarget.value);
-                    const el = event.currentTarget;
-                    el.style.height = "auto";
-                    el.style.height = Math.min(el.scrollHeight, 160) + "px";
-                  }}
-                  onKeyDown={handleKeyDown}
-                  onPaste={handlePaste}
-                  placeholder={
-                    composerAttachments().length > 0 ? "Add a message (optional)..." : "Message..."
-                  }
-                  disabled={!isConnected()}
-                  rows={1}
-                />
                 <div class="composer-actions">
                   <button
                     type="button"
