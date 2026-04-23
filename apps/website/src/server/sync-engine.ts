@@ -898,7 +898,12 @@ export class SyncEngineDurableObject {
   private async runAssistantTurn(
     payload: Pick<
       CreateUserMessagePayload,
-      "threadId" | "modelId" | "modelInterleavedField" | "reasoningLevel" | "search"
+      | "threadId"
+      | "modelId"
+      | "modelInterleavedField"
+      | "reasoningLevel"
+      | "search"
+      | "preferFreeSearch"
     > & {
       thread: Thread;
       userMessage: Message;
@@ -1170,6 +1175,7 @@ export class SyncEngineDurableObject {
           ? createExaSearchTool({
               env: this.env,
               assistantMessageId: payload.assistantMessage.id,
+              preferFreeExa: payload.preferFreeSearch ?? false,
               signal: abortController.signal,
               log: syncLog,
               trace: (name, attrs, run) =>
@@ -2033,6 +2039,7 @@ export class SyncEngineDurableObject {
 
   private async getSnapshot(): Promise<SyncSnapshot> {
     return {
+      serverSeq: this.getLastServerSeq(),
       tables: {
         [TABLES.workspaces]: this.readTable("workspaces"),
         [TABLES.threads]: this.readTable("threads"),

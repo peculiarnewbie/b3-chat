@@ -339,6 +339,15 @@ export async function consumeAssistantStream(
     );
   };
 
+  const noVisibleAnswerError = () =>
+    normalizeAssistantError({
+      errorCode: "assistant_no_output",
+      errorMessage:
+        toolCallIterations > 0
+          ? "The assistant reached the tool-call limit without producing an answer."
+          : "The assistant finished without producing an answer.",
+    });
+
   const flushThinkingTokens = async (tokens: number) => {
     if (lastReportedReasoningTokens != null && tokens <= lastReportedReasoningTokens) {
       return;
@@ -556,6 +565,10 @@ export async function consumeAssistantStream(
             elapsedMs: Date.now() - streamStartedAt,
           });
 
+          if (!accumulated.trim()) {
+            return failMessage(noVisibleAnswerError());
+          }
+
           return completeMessage();
         }
 
@@ -584,8 +597,8 @@ export async function consumeAssistantStream(
     const durationMs = Date.now() - streamStartedAt;
     const ttftMs = firstTokenAt !== null ? firstTokenAt - streamStartedAt : null;
 
-    // Still emit completion since we have accumulated text
-    if (accumulated) {
+    // Still emit completion since we have accumulated visible text.
+    if (accumulated.trim()) {
       await trace("assistant.message.complete", "sync", { messageId, durationMs }, async () => {
         const completed = await appendServerEvent(null, "message_completed", {
           messageId,
@@ -598,6 +611,8 @@ export async function consumeAssistantStream(
         });
         broadcast(completed);
       });
+    } else {
+      return failMessage(noVisibleAnswerError());
     }
 
     log?.("assistant_turn_stream_ended_without_finish", {

@@ -19,7 +19,7 @@ const SEARCH_RESULTS_PER_RUN = 5;
  *  searches and tell the model to answer with what it has. This is the
  *  primary defence against "stuck in a search loop" failures with thinking
  *  models that keep reformulating the same question. */
-const MAX_SEARCHES_PER_TURN = 4;
+export const MAX_SEARCHES_PER_TURN = 4;
 /** Minimum normalized query length. Anything shorter is probably garbage
  *  (the model accidentally sending a single word or an empty string). */
 const MIN_QUERY_CHARS = 2;
@@ -113,6 +113,8 @@ type SearchToolResult =
       query: string;
       resultCount: number;
       context: string;
+      disableFurtherToolCalls?: boolean;
+      hint?: string;
     }
   | {
       ok: false;
@@ -120,6 +122,7 @@ type SearchToolResult =
       error: string;
       reason: SearchFailureReason;
       hint: string;
+      disableFurtherToolCalls?: boolean;
     };
 
 function classifyExaError(error: unknown): {
@@ -184,6 +187,13 @@ function classifyExaError(error: unknown): {
 export function createExaSearchTool(input: {
   env: AppEnv;
   assistantMessageId: string;
+  /**
+   * When true, skip the Exa API path even if EXA_API_KEY is configured
+   * and use the public MCP endpoint instead. Surfaced as a user-facing
+   * setting ("Use free web search") so users on a shared deployment
+   * can opt out of the paid API.
+   */
+  preferFreeExa?: boolean;
   /**
    * Abort signal tied to the assistant turn. When the user presses Stop
    * the turn controller aborts and this signal propagates into the Exa
@@ -309,6 +319,7 @@ export function createExaSearchTool(input: {
         error: `Search budget reached: ${MAX_SEARCHES_PER_TURN} searches already performed this turn.`,
         reason: "max_searches_reached",
         hint: "Do not call exa_web_search again this turn. Answer using the results you already have.",
+        disableFurtherToolCalls: true,
       };
     }
 
@@ -347,7 +358,7 @@ export function createExaSearchTool(input: {
           let context: string;
           let resultCount = 0;
 
-          if (input.env.EXA_API_KEY) {
+          if (input.env.EXA_API_KEY && !input.preferFreeExa) {
             const runRows = (await exaSearch(input.env, query, numResults, input.signal)).map(
               (row) =>
                 decodeSearchResultRow({
@@ -364,6 +375,7 @@ export function createExaSearchTool(input: {
               numResults,
               resultCount: runRows.length,
               previewText: summarizeStructuredResults(runRows),
+              mode: "api",
             });
             const normalizedRows = runRows.map((row) =>
               decodeSearchResultRow({
@@ -414,6 +426,7 @@ export function createExaSearchTool(input: {
               numResults,
               resultCount: 0,
               previewText: summarizeRawText(rawText),
+              mode: "mcp",
             });
 
             state.searchRuns.push(run);
@@ -444,11 +457,18 @@ export function createExaSearchTool(input: {
           context = buildMultiSearchContext({ runs: [groundingRun] });
           queryCache.set(queryKey, context);
           await publishState();
+          const budgetExhausted = state.searchRuns.length >= MAX_SEARCHES_PER_TURN;
           return {
             ok: true,
             query,
             resultCount,
             context,
+            ...(budgetExhausted
+              ? {
+                  disableFurtherToolCalls: true,
+                  hint: "Search budget is exhausted. Do not call tools again; answer using the search results already provided.",
+                }
+              : {}),
           } satisfies SearchToolResult;
         } catch (error) {
           const { reason, message, hint } = classifyExaError(error);
@@ -466,6 +486,7 @@ export function createExaSearchTool(input: {
               step,
               numResults,
               errorMessage: cancelled ? "Cancelled" : message,
+              mode: input.env.EXA_API_KEY && !input.preferFreeExa ? "api" : "mcp",
             }),
           );
           await publishState();
@@ -490,12 +511,14 @@ export function createExaSearchTool(input: {
           // Return a structured failure — do NOT throw. Throwing aborts the
           // turn; we want the model to see the failure, adjust, and
           // continue (or decide to answer without search).
+          const budgetExhausted = state.searchRuns.length >= MAX_SEARCHES_PER_TURN;
           return {
             ok: false,
             query,
             error: cancelled ? "Request was cancelled." : message,
             reason: cancelled ? "exa_unknown" : reason,
             hint: cancelled ? "The user cancelled the turn; do not retry." : hint,
+            ...(budgetExhausted ? { disableFurtherToolCalls: true } : {}),
           } satisfies SearchToolResult;
         }
       });

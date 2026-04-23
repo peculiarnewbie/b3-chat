@@ -32,6 +32,7 @@ import {
 } from "@b3-chat/server";
 import { createExaSearchTool } from "../server/search";
 import { createBrowserExtractTool } from "../server/extract";
+import { consumeAssistantStream } from "../server/stream-consumer";
 import { toolDefinition } from "@tanstack/ai";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { explainAssistantError } from "./assistant-errors";
@@ -57,12 +58,14 @@ import {
 } from "./draft-state";
 import { resetPendingOps } from "./pending-ops";
 import { processEnvelopes } from "./sync-adapter";
+import { getLastServerSeq, setLastServerSeq } from "./ws-connection";
 import { normalizeAssistantError } from "../server/error-normalization";
 
 beforeEach(() => {
   resetCollections();
   resetPendingOps();
   clearAllDraftState();
+  setLastServerSeq(0);
   if (typeof localStorage !== "undefined") {
     localStorage.clear();
   }
@@ -443,6 +446,33 @@ describe("domain helpers", () => {
 
     expect(workspaces.get(workspace.id)?.id).toBe(workspace.id);
     expect(threads.get(originalThread.id)?.title).toBe("what time is it?");
+  });
+
+  it("uses the sync snapshot server cursor when applying a reset", () => {
+    const workspace = createWorkspace({
+      name: "Writing",
+      defaultModelId: "openai/gpt-4.1",
+    });
+
+    setLastServerSeq(99);
+    processEnvelopes([
+      {
+        type: "sync_reset",
+        reason: "initial_sync",
+        protocolVersion: "test",
+        snapshot: {
+          serverSeq: 7,
+          tables: {
+            workspaces: {
+              [workspace.id]: workspace,
+            },
+          },
+        },
+      },
+    ]);
+
+    expect(getLastServerSeq()).toBe(7);
+    expect(workspaces.get(workspace.id)?.id).toBe(workspace.id);
   });
 
   it("reuses the same draft for a workspace", () => {
@@ -1153,6 +1183,97 @@ describe("server helpers", () => {
     }
   });
 
+  it("omits tools on continuation after a tool result disables further tool calls", async () => {
+    const requests: Array<Record<string, any>> = [];
+    const originalFetch = globalThis.fetch;
+    let callCount = 0;
+    const encoder = new TextEncoder();
+
+    globalThis.fetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const rawBody = typeof init?.body === "string" ? init.body : "";
+      const body = JSON.parse(rawBody);
+      requests.push(body);
+      callCount += 1;
+
+      const sse =
+        callCount === 1
+          ? [
+              'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exa_web_search","arguments":"{\\"query\\":\\"current f1 standings\\"}"}}]}}]}\n\n',
+              'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":5}}\n\n',
+              "data: [DONE]\n\n",
+            ]
+          : [
+              'data: {"choices":[{"delta":{"content":"Answer from existing results."}}]}\n\n',
+              'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":7}}\n\n',
+              "data: [DONE]\n\n",
+            ];
+
+      const stream = new ReadableStream({
+        start(controller) {
+          for (const chunk of sse) controller.enqueue(encoder.encode(chunk));
+          controller.close();
+        },
+      });
+
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const adapter = createChatCompletionsAdapter(
+        {
+          baseUrl: "https://api.example.com",
+          apiKey: "test-key",
+        },
+        "openai/gpt-4.1",
+      );
+
+      const searchTool = toolDefinition({
+        name: "exa_web_search",
+        description: "Search the web",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+          },
+          required: ["query"],
+          additionalProperties: false,
+        },
+      }).server(async () => ({
+        ok: true,
+        query: "current f1 standings",
+        resultCount: 1,
+        context: "Search grounding",
+        disableFurtherToolCalls: true,
+      }));
+
+      const chunks = [];
+      for await (const chunk of chat({
+        adapter,
+        messages: [{ role: "user", content: "who leads the 2026 f1 wdc?" }],
+        tools: [searchTool],
+      })) {
+        chunks.push(chunk);
+      }
+
+      expect(requests).toHaveLength(2);
+      expect(requests[0]?.tools).toHaveLength(1);
+      expect(requests[1]?.tools).toBeUndefined();
+      expect(
+        (requests[1]?.messages ?? []).some(
+          (message: any) =>
+            message.role === "system" &&
+            String(message.content).includes("tool budget for this turn is exhausted"),
+        ),
+      ).toBe(true);
+      expect(chunks.some((chunk: any) => chunk.type === "RUN_ERROR")).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("fails streaming chat when the first byte deadline is exceeded", async () => {
     const originalFetch = globalThis.fetch;
 
@@ -1739,5 +1860,59 @@ describe("server helpers", () => {
     });
     expect(authErr.retryable).toBe(false);
     expect(authErr.reason).toBe("auth");
+  });
+
+  it("marks empty final streams as failed instead of leaving the message pending", async () => {
+    const events: any[] = [];
+    const activities: any[] = [];
+
+    const result = await consumeAssistantStream(
+      (async function* () {
+        yield {
+          type: "RUN_FINISHED",
+          finishReason: "stop",
+          timestamp: Date.now(),
+          model: "test-model",
+        } as any;
+      })(),
+      {
+        messageId: "msg_empty",
+        appendServerEvent: async (_opId, eventType, payload) => {
+          const event = {
+            type: "event",
+            serverSeq: events.length + 1,
+            eventId: `evt_${events.length + 1}`,
+            eventType,
+            payload,
+          };
+          events.push(event);
+          return event as any;
+        },
+        broadcast: () => {},
+        appendMessagePart: async (kind, input) => ({
+          id: `part_${activities.length + 1}`,
+          messageId: "msg_empty",
+          seq: activities.length,
+          kind,
+          text: input.text ?? "",
+          json: input.json ?? null,
+        }),
+        rawAppendMessagePart: async (kind, input) => ({
+          id: `part_${activities.length + 1}`,
+          messageId: "msg_empty",
+          seq: activities.length,
+          kind,
+          text: input.text ?? "",
+          json: input.json ?? null,
+        }),
+        reportActivity: async (activity) => {
+          activities.push(activity);
+        },
+      },
+    );
+
+    expect(result.success).toBe(false);
+    expect(events.some((event) => event.eventType === "message_failed")).toBe(true);
+    expect(activities.some((activity) => activity.label === "Response failed")).toBe(true);
   });
 });

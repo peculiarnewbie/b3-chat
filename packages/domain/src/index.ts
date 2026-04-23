@@ -136,6 +136,12 @@ export const SearchRunRow = Schema.Struct({
   resultCount: Schema.Number,
   previewText: Schema.String,
   errorMessage: NullableString,
+  /**
+   * Which Exa endpoint produced this run. "api" is the paid, structured-rows
+   * path; "mcp" is the public raw-text fallback. Optional for backward
+   * compatibility with runs persisted before the field was introduced.
+   */
+  mode: Schema.optional(Schema.Literals(["api", "mcp"])),
   createdAt: Schema.String,
 });
 
@@ -260,6 +266,7 @@ export function mergeAttachmentLink(
 export type SyncTables = Partial<Record<(typeof TABLES)[keyof typeof TABLES], Record<string, any>>>;
 
 export type SyncSnapshot = {
+  serverSeq?: number;
   tables: SyncTables;
 };
 
@@ -304,6 +311,7 @@ export type CreateUserMessagePayload = {
   modelInterleavedField?: string | null;
   reasoningLevel: ReasoningLevel;
   search: boolean;
+  preferFreeSearch?: boolean;
   attachmentIds: string[];
 };
 
@@ -316,6 +324,7 @@ export type RetryMessagePayload = {
   modelInterleavedField?: string | null;
   reasoningLevel: ReasoningLevel;
   search: boolean;
+  preferFreeSearch?: boolean;
 };
 
 export type EditUserMessagePayload = {
@@ -329,6 +338,7 @@ export type EditUserMessagePayload = {
   modelInterleavedField?: string | null;
   reasoningLevel: ReasoningLevel;
   search: boolean;
+  preferFreeSearch?: boolean;
   attachments: Attachment[];
 };
 
@@ -802,6 +812,7 @@ export function createSearchRun(input: {
   resultCount?: number;
   previewText?: string;
   errorMessage?: string | null;
+  mode?: "api" | "mcp";
 }) {
   return decodeSearchRunRow({
     id: createId("srn"),
@@ -813,6 +824,7 @@ export function createSearchRun(input: {
     resultCount: input.resultCount ?? 0,
     previewText: input.previewText ?? "",
     errorMessage: input.errorMessage ?? null,
+    ...(input.mode ? { mode: input.mode } : {}),
     createdAt: nowIso(),
   });
 }

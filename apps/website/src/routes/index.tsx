@@ -434,6 +434,20 @@ function getInitialTheme(): Theme {
   return "clean";
 }
 
+function getInitialExpandReasoning(): boolean {
+  if (typeof localStorage !== "undefined") {
+    return localStorage.getItem("b3-expand-reasoning") === "1";
+  }
+  return false;
+}
+
+function getInitialPreferFreeSearch(): boolean {
+  if (typeof localStorage !== "undefined") {
+    return localStorage.getItem("b3-prefer-free-search") === "1";
+  }
+  return false;
+}
+
 const fetchSession = async () => {
   const response = await fetch("/api/session");
   if (response.status === 401) return null;
@@ -472,6 +486,12 @@ export default function Home() {
   const allTraceRuns = useLiveQuery(() => traceRunsCollection);
   const allTraceSpans = useLiveQuery(() => traceSpansCollection);
   const [theme, setTheme] = createSignal<Theme>(getInitialTheme());
+  const [expandReasoningByDefault, setExpandReasoningByDefault] = createSignal<boolean>(
+    getInitialExpandReasoning(),
+  );
+  const [preferFreeSearch, setPreferFreeSearch] = createSignal<boolean>(
+    getInitialPreferFreeSearch(),
+  );
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
   const [showComposerMenu, setShowComposerMenu] = createSignal(false);
   const [headerVisible, setHeaderVisible] = createSignal(true);
@@ -761,6 +781,14 @@ export default function Home() {
   createEffect(() => {
     document.documentElement.setAttribute("data-theme", theme());
     localStorage.setItem("b3-theme", theme());
+  });
+
+  createEffect(() => {
+    localStorage.setItem("b3-expand-reasoning", expandReasoningByDefault() ? "1" : "0");
+  });
+
+  createEffect(() => {
+    localStorage.setItem("b3-prefer-free-search", preferFreeSearch() ? "1" : "0");
   });
 
   // Auto-resize composer input
@@ -1303,6 +1331,7 @@ export default function Home() {
   const isReasoningCollapsed = (messageId: string, key: string, streaming: boolean) => {
     const explicit = collapsedChipByKey[chipCollapseKey(messageId, key)];
     if (explicit !== undefined) return explicit;
+    if (expandReasoningByDefault()) return false;
     return !streaming;
   };
 
@@ -1705,6 +1734,12 @@ export default function Home() {
                                   searchResultsForStep(message().id, data().step);
                                 const hasResults = () =>
                                   (resultsData()?.run.results.length ?? 0) > 0;
+                                const runMode = () => resultsData()?.run.mode;
+                                const rawPreview = () => {
+                                  if (runMode() !== "mcp") return "";
+                                  return resultsData()?.run.previewText ?? "";
+                                };
+                                const hasRawPreview = () => rawPreview().length > 0;
                                 const statusLabel = () => {
                                   if (data().status === "failed") return "Search failed";
                                   if (data().status === "active") return "Searching the web";
@@ -1730,7 +1765,11 @@ export default function Home() {
                                       class="assistant-chip-toggle"
                                       aria-expanded={!collapsed()}
                                       onClick={() => toggleChipCollapse(message().id, data().key)}
-                                      disabled={!hasResults() && data().status !== "failed"}
+                                      disabled={
+                                        !hasResults() &&
+                                        !hasRawPreview() &&
+                                        data().status !== "failed"
+                                      }
                                     >
                                       <span class="assistant-chip-icon" aria-hidden="true">
                                         <Show
@@ -1755,6 +1794,14 @@ export default function Home() {
                                         </Show>
                                       </span>
                                       <span class="assistant-chip-label">{statusLabel()}</span>
+                                      <Show when={runMode() === "mcp"}>
+                                        <span
+                                          class="assistant-chip-badge"
+                                          title="Search ran through Exa's free public endpoint — returns raw text, no ranked link results."
+                                        >
+                                          raw text
+                                        </span>
+                                      </Show>
                                       <Show when={data().query}>
                                         <span class="assistant-chip-detail">"{data().query}"</span>
                                       </Show>
@@ -1763,7 +1810,13 @@ export default function Home() {
                                           <span class="assistant-chip-meta">{label()}</span>
                                         )}
                                       </Show>
-                                      <Show when={hasResults() || data().status === "failed"}>
+                                      <Show
+                                        when={
+                                          hasResults() ||
+                                          hasRawPreview() ||
+                                          data().status === "failed"
+                                        }
+                                      >
                                         <span
                                           classList={{
                                             "assistant-chip-chevron": true,
@@ -1775,6 +1828,9 @@ export default function Home() {
                                         </span>
                                       </Show>
                                     </button>
+                                    <Show when={!collapsed() && hasRawPreview() && !hasResults()}>
+                                      <div class="search-raw-preview">{rawPreview()}</div>
+                                    </Show>
                                     <Show when={!collapsed() && hasResults()}>
                                       <Show when={resultsData()}>
                                         {(d) => (
@@ -2654,6 +2710,7 @@ export default function Home() {
       modelInterleavedField: modelInterleavedFieldFor(modelId),
       reasoningLevel: (msg.reasoningLevel ?? "off") as ReasoningLevel,
       search: Boolean(msg.searchEnabled),
+      preferFreeSearch: preferFreeSearch(),
       attachmentIds,
     });
   };
@@ -2670,6 +2727,7 @@ export default function Home() {
       modelInterleavedField: modelInterleavedFieldFor(modelId),
       reasoningLevel: (msg.reasoningLevel ?? "off") as ReasoningLevel,
       search: Boolean(msg.searchEnabled),
+      preferFreeSearch: preferFreeSearch(),
     });
   };
 
@@ -2713,6 +2771,7 @@ export default function Home() {
         modelInterleavedField: modelInterleavedFieldFor(modelId),
         reasoningLevel: effectiveComposerReasoningLevel(),
         search: composerSearch(),
+        preferFreeSearch: preferFreeSearch(),
         attachmentIds,
       });
       for (const att of composerAttachments()) {
@@ -2982,6 +3041,37 @@ export default function Home() {
                     <button class="btn btn-primary" onClick={saveSystemPrompt}>
                       Save
                     </button>
+                  </div>
+
+                  <div class="settings-section">
+                    <label class="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={expandReasoningByDefault()}
+                        onChange={(e) => setExpandReasoningByDefault(e.currentTarget.checked)}
+                      />
+                      <span class="settings-label">Expand reasoning by default</span>
+                    </label>
+                    <p class="settings-hint">
+                      Keep the reasoning chip open after a response finishes, instead of
+                      auto-collapsing it.
+                    </p>
+                  </div>
+
+                  <div class="settings-section">
+                    <label class="settings-toggle">
+                      <input
+                        type="checkbox"
+                        checked={preferFreeSearch()}
+                        onChange={(e) => setPreferFreeSearch(e.currentTarget.checked)}
+                      />
+                      <span class="settings-label">Use free web search</span>
+                    </label>
+                    <p class="settings-hint">
+                      Route web searches through Exa's public MCP endpoint instead of the paid API.
+                      Slower and returns raw text instead of ranked results, but avoids usage on
+                      your Exa API key.
+                    </p>
                   </div>
 
                   <div class="settings-section settings-danger">

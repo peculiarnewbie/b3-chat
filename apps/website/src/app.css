@@ -926,6 +926,31 @@ a {
   border-top: 1px solid var(--line);
 }
 
+.assistant-chip-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  border-radius: 3px;
+}
+
+.search-raw-preview {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .assistant-chip-error {
   font-size: 0.72rem;
   color: #b94a48;
@@ -2132,6 +2157,17 @@ a {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.settings-toggle input[type="checkbox"] {
+  cursor: pointer;
 }
 
 .settings-danger {

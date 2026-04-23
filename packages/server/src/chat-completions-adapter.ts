@@ -46,6 +46,11 @@ export type ExtendedStreamChunk = StreamChunk & {
  */
 export const REASONING_CONTENT_EVENT = "reasoning_content" as const;
 
+const DISABLE_FURTHER_TOOL_CALLS_SYSTEM_PROMPT = [
+  "A previous tool result indicated that the available tool budget for this turn is exhausted.",
+  "Do not request or mention tools. Answer directly now using the conversation and prior tool results.",
+].join(" ");
+
 // Re-export types for consumers
 export type { ModelMessage, ContentPart, StreamChunk };
 
@@ -270,6 +275,47 @@ function convertToOpenAITools(
   }));
 }
 
+function parseJsonObject(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function contentDisablesFurtherToolCalls(content: ModelMessage["content"]): boolean {
+  if (typeof content === "string") {
+    return parseJsonObject(content)?.disableFurtherToolCalls === true;
+  }
+  if (!Array.isArray(content)) return false;
+  return content.some((part) => {
+    const text = (() => {
+      if (typeof part === "string") return part;
+      if (!part || typeof part !== "object" || !("content" in part)) return "";
+      const value = (part as { content?: unknown }).content;
+      return typeof value === "string" ? value : "";
+    })();
+    return text ? parseJsonObject(text)?.disableFurtherToolCalls === true : false;
+  });
+}
+
+function shouldDisableFurtherToolCalls(messages: ModelMessage[] | undefined): boolean {
+  if (!messages?.length) return false;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (!message || message.role !== "tool") {
+      // Only inspect the latest contiguous tool-result block.
+      if (i !== messages.length - 1) break;
+      continue;
+    }
+    if (contentDisablesFurtherToolCalls(message.content)) return true;
+  }
+  return false;
+}
+
 /**
  * Converts ModelMessage content to OpenAI format.
  */
@@ -432,13 +478,18 @@ export class ChatCompletionsAdapter {
     }
     const effectiveModelOptions = options.modelOptions ?? this.persistedModelOptions;
 
+    const disableFurtherToolCalls = shouldDisableFurtherToolCalls(options.messages);
+    const systemPrompts = disableFurtherToolCalls
+      ? [...(options.systemPrompts ?? []), DISABLE_FURTHER_TOOL_CALLS_SYSTEM_PROMPT]
+      : options.systemPrompts;
+
     const messages = convertToOpenAIMessages(
       options.messages ?? [],
-      options.systemPrompts,
+      systemPrompts,
       reasoningToInclude,
       this.assistantToolCallMessageHistory,
     );
-    const tools = convertToOpenAITools(options.tools);
+    const tools = disableFurtherToolCalls ? undefined : convertToOpenAITools(options.tools);
     const trace =
       this.config.trace ??
       ((_: string, __: TraceSpanKind, ___: Record<string, unknown>, run: () => Promise<any>) =>
@@ -470,6 +521,7 @@ export class ChatCompletionsAdapter {
           stream: true,
           messageCount: messages.length,
           toolCount: tools?.length ?? 0,
+          toolsDisabled: disableFurtherToolCalls,
         },
         () =>
           fetch(url, {

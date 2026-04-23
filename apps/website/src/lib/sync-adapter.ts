@@ -448,6 +448,7 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
       case "sync_reset":
         console.log(`[sync] sync_reset reason=${envelope.reason}`, {
           protocolVersion: envelope.protocolVersion,
+          serverSeq: envelope.snapshot.serverSeq ?? null,
           tables: Object.keys(envelope.snapshot.tables ?? {}),
           workspaceCount: Object.keys(envelope.snapshot.tables?.workspaces ?? {}).length,
           threadCount: Object.keys(envelope.snapshot.tables?.threads ?? {}).length,
@@ -456,10 +457,16 @@ export function processEnvelopes(envelopes: SyncServerEnvelope[]) {
           pendingOps.clear();
         }
         applySnapshot(envelope.snapshot.tables);
+        if (typeof envelope.snapshot.serverSeq === "number") {
+          conn.setLastServerSeq(envelope.snapshot.serverSeq);
+        }
         needsSelectionCheck = true;
         shouldRefreshCachedSnapshot = true;
         // Persist snapshot so next page load can hydrate instantly
-        void writeCachedSnapshot(envelope.snapshot.tables ?? {}, conn.getLastServerSeq());
+        void writeCachedSnapshot(
+          envelope.snapshot.tables ?? {},
+          envelope.snapshot.serverSeq ?? conn.getLastServerSeq(),
+        );
         break;
 
       case "pong":

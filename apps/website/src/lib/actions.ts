@@ -218,6 +218,7 @@ export function sendMessageAction(input: {
   modelInterleavedField?: string | null;
   reasoningLevel: ReasoningLevel;
   search: boolean;
+  preferFreeSearch?: boolean;
   attachmentIds?: string[];
 }) {
   const opId = createId("op");
@@ -298,6 +299,7 @@ export function sendMessageAction(input: {
       modelInterleavedField: input.modelInterleavedField ?? null,
       reasoningLevel: input.reasoningLevel,
       search: input.search,
+      preferFreeSearch: input.preferFreeSearch,
       attachmentIds: input.attachmentIds ?? [],
     } satisfies CreateUserMessagePayload,
     { opId },
@@ -311,6 +313,7 @@ export function retryMessageAction(input: {
   modelInterleavedField?: string | null;
   reasoningLevel: ReasoningLevel;
   search: boolean;
+  preferFreeSearch?: boolean;
 }) {
   const opId = createId("op");
   const updatedAt = nowIso();
@@ -357,6 +360,7 @@ export function retryMessageAction(input: {
       modelInterleavedField: input.modelInterleavedField ?? null,
       reasoningLevel: input.reasoningLevel,
       search: input.search,
+      preferFreeSearch: input.preferFreeSearch,
     } satisfies RetryMessagePayload,
     { opId },
   );
@@ -370,6 +374,7 @@ export function editUserMessageAction(input: {
   modelInterleavedField?: string | null;
   reasoningLevel: ReasoningLevel;
   search: boolean;
+  preferFreeSearch?: boolean;
   attachmentIds?: string[];
 }) {
   const opId = createId("op");
@@ -459,6 +464,7 @@ export function editUserMessageAction(input: {
       modelInterleavedField: input.modelInterleavedField ?? null,
       reasoningLevel: input.reasoningLevel,
       search: input.search,
+      preferFreeSearch: input.preferFreeSearch,
       attachments: clonedAttachments.map((attachment) => toWire(attachment, opId)),
     } satisfies EditUserMessagePayload,
     { opId },
