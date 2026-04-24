@@ -461,6 +461,7 @@ export default function Home() {
   );
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
   const [showComposerMenu, setShowComposerMenu] = createSignal(false);
+  const [showTraces, setShowTraces] = createSignal(false);
   const [headerVisible, setHeaderVisible] = createSignal(true);
   const [collapsedProgressByMessage, setCollapsedProgressByMessage] = createStore<
     Record<string, boolean>
@@ -1338,6 +1339,23 @@ export default function Home() {
     return !streaming;
   };
 
+  const expandedStreamingReasoningFingerprint = createMemo(() => {
+    const messageId = messageIds().find((id) => {
+      const msg = messageById(id);
+      if (!msg || msg.role !== "assistant") return false;
+      const status = effectiveMessageStatus(msg);
+      return status === "streaming" || status === "pending" || status === "queued";
+    });
+    if (!messageId) return "";
+    const reasoning = assistantTimeline(messageId).find(
+      (item): item is Extract<TimelineItem, { kind: "reasoning" }> =>
+        item.kind === "reasoning" &&
+        item.streaming &&
+        !isReasoningCollapsed(messageId, item.key, item.streaming),
+    );
+    return reasoning ? `${messageId}:${reasoning.key}:${reasoning.text.length}` : "";
+  });
+
   // Auto-scroll only when user is already near the bottom.
   // Fingerprint isolates the scroll trigger so the effect doesn't re-run
   // on every unrelated message or activity change.
@@ -1351,6 +1369,7 @@ export default function Home() {
   });
   createEffect(() => {
     scrollFingerprint();
+    expandedStreamingReasoningFingerprint();
     if (timelineRef && isNearBottom()) {
       requestAnimationFrame(() => {
         timelineRef!.scrollTop = timelineRef!.scrollHeight;
@@ -1389,7 +1408,7 @@ export default function Home() {
     (activitiesForMessage(message.id).length > 0 ||
       isWaitingForVisibleAnswer(message) ||
       thinkingTokens(message.id) != null ||
-      traceRunsForMessage(message.id).length > 0);
+      (showTraces() && traceRunsForMessage(message.id).length > 0));
   const hasAssistantStats = (message: Message) =>
     message.role === "assistant" &&
     (thinkingTokens(message.id) != null ||
@@ -1431,7 +1450,7 @@ export default function Home() {
     if (tokens != null) {
       parts.push(`${formatTokenCount(tokens)} thinking tokens`);
     }
-    if (traceRunsForMessage(message.id).length > 0) {
+    if (showTraces() && traceRunsForMessage(message.id).length > 0) {
       parts.push(`trace ${traceRunsForMessage(message.id).length}`);
     }
     if (isWaitingForVisibleAnswer(message)) {
@@ -1460,6 +1479,8 @@ export default function Home() {
     setCollapsedTraceByMessage(messageId, !isTraceCollapsed(messageId));
   const traceRunsForMessage = (messageId: string) => traceRunsByMessage().get(messageId) ?? [];
   const openTraceMessageIdSet = createMemo(() => {
+    if (!showTraces()) return new Set<string>();
+
     const openIds = new Set<string>();
     for (const messageId of messageIds()) {
       if (!isTraceCollapsed(messageId) && traceRunsForMessage(messageId).length > 0) {
@@ -2218,7 +2239,7 @@ export default function Home() {
                           </Show>
                         </div>
                       </Show>
-                      <Show when={traceRunsForMessage(message().id).length > 0}>
+                      <Show when={showTraces() && traceRunsForMessage(message().id).length > 0}>
                         <div class="trace-shell">
                           <button
                             type="button"
@@ -2390,7 +2411,7 @@ export default function Home() {
                               <span>{thinkingLabel(message().id)}</span>
                             </div>
                           </Show>
-                          <Show when={traceRunsForMessage(message().id).length > 0}>
+                          <Show when={showTraces() && traceRunsForMessage(message().id).length > 0}>
                             <div class="trace-shell">
                               <button
                                 type="button"
@@ -2820,6 +2841,32 @@ export default function Home() {
     }
   };
 
+  const ComposerOptions = () => (
+    <>
+      <Show when={selectedModelSupportsReasoning()}>
+        <label>Reasoning</label>
+        <select
+          value={composerReasoningLevel()}
+          title="Reasoning level"
+          aria-label="Reasoning level"
+          onChange={(event) => handleReasoningChange(event.currentTarget.value as ReasoningLevel)}
+        >
+          <For each={REASONING_OPTIONS}>
+            {(option) => <option value={option.value}>{option.label}</option>}
+          </For>
+        </select>
+      </Show>
+      <label class="composer-menu-row">
+        <input
+          type="checkbox"
+          checked={showTraces()}
+          onChange={(event) => setShowTraces(event.currentTarget.checked)}
+        />
+        <span>Show traces</span>
+      </label>
+    </>
+  );
+
   return (
     <Show
       when={session()}
@@ -3230,6 +3277,9 @@ export default function Home() {
                       <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
                     </svg>
                   </button>
+                  <div class="composer-inline-options">
+                    <ComposerOptions />
+                  </div>
                   <div class="composer-dropdown">
                     <button
                       type="button"
@@ -3257,21 +3307,7 @@ export default function Home() {
                     </button>
                     <Show when={showComposerMenu()}>
                       <div class="composer-dropdown-panel" onClick={(e) => e.stopPropagation()}>
-                        <Show when={selectedModelSupportsReasoning()}>
-                          <label>Reasoning</label>
-                          <select
-                            value={composerReasoningLevel()}
-                            title="Reasoning level"
-                            aria-label="Reasoning level"
-                            onChange={(event) =>
-                              handleReasoningChange(event.currentTarget.value as ReasoningLevel)
-                            }
-                          >
-                            <For each={REASONING_OPTIONS}>
-                              {(option) => <option value={option.value}>{option.label}</option>}
-                            </For>
-                          </select>
-                        </Show>
+                        <ComposerOptions />
                       </div>
                     </Show>
                   </div>

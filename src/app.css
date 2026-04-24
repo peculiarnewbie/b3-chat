@@ -1391,7 +1391,6 @@ a {
 }
 
 .assistant-streaming-text {
-  white-space: pre-wrap;
   word-break: break-word;
 }
 
@@ -1733,6 +1732,29 @@ a {
   margin-left: auto;
 }
 
+.composer-inline-options {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.composer-inline-options label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.composer-inline-options select {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  font-size: 0.78rem;
+  outline: none;
+}
+
 .composer-action-btn,
 .composer-send-btn,
 .composer-stop-btn {
@@ -1786,6 +1808,7 @@ a {
 }
 
 .composer-dropdown {
+  display: none;
   position: relative;
 }
 
@@ -1821,6 +1844,23 @@ a {
   font-size: 0.78rem;
   outline: none;
   width: 100%;
+}
+
+.composer-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+.composer-menu-row input {
+  margin: 0;
 }
 
 .composer-note {
@@ -2280,5 +2320,11 @@ a {
   }
   .msg.assistant {
     max-width: 100%;
+  }
+  .composer-inline-options {
+    display: none;
+  }
+  .composer-dropdown {
+    display: block;
   }
 }
