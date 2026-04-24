@@ -294,6 +294,12 @@ function formatTraceStatus(status: string) {
   }
 }
 
+function isTerminalTraceStatus(
+  status: string | undefined,
+): status is "completed" | "failed" | "cancelled" {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
 function shortTraceId(value: string) {
   return value.length <= 14 ? value : `${value.slice(0, 14)}…`;
 }
@@ -897,6 +903,24 @@ export default function Home() {
     return byId;
   });
   const messageById = (messageId: string) => messagesById().get(messageId);
+  const terminalTraceStatusByMessage = createMemo(() => {
+    const byMessage = new Map<string, "completed" | "failed" | "cancelled">();
+    const startedAtByMessage = new Map<string, string>();
+    for (const run of allTraceRuns() as TraceRun[]) {
+      if (!run.messageId || !isTerminalTraceStatus(run.status)) continue;
+      const previousStartedAt = startedAtByMessage.get(run.messageId);
+      if (previousStartedAt && previousStartedAt > run.startedAt) continue;
+      byMessage.set(run.messageId, run.status);
+      startedAtByMessage.set(run.messageId, run.startedAt);
+    }
+    return byMessage;
+  });
+  const effectiveMessageStatus = (message: Message): Message["status"] => {
+    if (message.role !== "assistant" || !isBusyMessageStatus(message.status)) return message.status;
+    const traceStatus = terminalTraceStatusByMessage().get(message.id);
+    if (!traceStatus) return message.status;
+    return traceStatus === "completed" ? "completed" : traceStatus;
+  };
   const busyThreadIds = createMemo(
     () => {
       const messagesByThread = new Map<string, Message[]>();
@@ -912,7 +936,7 @@ export default function Home() {
           messagesByThread.get(thread.id) ?? [],
           thread.headMessageId ?? null,
         );
-        if (path.some((msg) => isBusyMessageStatus(msg.status))) {
+        if (path.some((msg) => isBusyMessageStatus(effectiveMessageStatus(msg)))) {
           ids.add(thread.id);
         }
       }
@@ -1284,10 +1308,8 @@ export default function Home() {
           pendingText += tail;
           if (pendingTextSeq < 0) pendingTextSeq = Number.MAX_SAFE_INTEGER;
         }
-        const streaming =
-          message.status === "streaming" ||
-          message.status === "pending" ||
-          message.status === "queued";
+        const status = effectiveMessageStatus(message);
+        const streaming = status === "streaming" || status === "pending" || status === "queued";
         // If reasoning is still open and the message is mid-stream,
         // leave the chip in its streaming state so the user sees live
         // updates. Once the status flips to completed/failed it closes.
@@ -1384,31 +1406,33 @@ export default function Home() {
 
   const thinkingTokens = (messageId: string) => thinkingTokensByMessage().get(messageId) ?? null;
   const activitiesForMessage = (messageId: string) => assistantActivities().get(messageId) ?? [];
-  const isWaitingForVisibleAnswer = (message: any) =>
-    message.role === "assistant" &&
-    (message.status === "queued" ||
-      message.status === "pending" ||
-      message.status === "streaming") &&
-    !message.text?.trim();
-  const hasAssistantPrelude = (message: any) =>
+  const isWaitingForVisibleAnswer = (message: Message) => {
+    const status = effectiveMessageStatus(message);
+    return (
+      message.role === "assistant" &&
+      (status === "queued" || status === "pending" || status === "streaming") &&
+      !message.text?.trim()
+    );
+  };
+  const hasAssistantPrelude = (message: Message) =>
     message.role === "assistant" &&
     !isInterleavedMessage(message.id) &&
     (activitiesForMessage(message.id).length > 0 ||
       isWaitingForVisibleAnswer(message) ||
       thinkingTokens(message.id) != null ||
       traceRunsForMessage(message.id).length > 0);
-  const hasAssistantStats = (message: any) =>
+  const hasAssistantStats = (message: Message) =>
     message.role === "assistant" &&
     (thinkingTokens(message.id) != null ||
       message.promptTokens != null ||
       message.ttftMs != null ||
       message.durationMs != null ||
       message.completionTokens != null);
-  const hasAssistantAnswerCard = (message: any) =>
+  const hasAssistantAnswerCard = (message: Message) =>
     message.role === "assistant" &&
     !isInterleavedMessage(message.id) &&
     (Boolean(message.text?.trim()) ||
-      message.status === "failed" ||
+      effectiveMessageStatus(message) === "failed" ||
       (searchRunsMemo().get(message.id)?.length ?? 0) > 0 ||
       (extractRunsMemo().get(message.id)?.length ?? 0) > 0 ||
       hasAssistantStats(message));
@@ -1417,7 +1441,7 @@ export default function Home() {
    * T3-style layout (text + inline activity chips in seq order). Controls
    * which rendering branch runs inside `renderMessage`.
    */
-  const hasAssistantInterleavedBody = (message: any) =>
+  const hasAssistantInterleavedBody = (message: Message) =>
     message.role === "assistant" && isInterleavedMessage(message.id);
   const thinkingLabel = (messageId: string) => {
     const tokens = thinkingTokens(messageId);
@@ -1427,7 +1451,7 @@ export default function Home() {
     collapsedProgressByMessage[messageId] ?? false;
   const toggleAssistantPrelude = (messageId: string) =>
     setCollapsedProgressByMessage(messageId, !isAssistantPreludeCollapsed(messageId));
-  const assistantPreludeSummary = (message: any) => {
+  const assistantPreludeSummary = (message: Message) => {
     const parts: string[] = [];
     const activities = activitiesForMessage(message.id);
     const tokens = thinkingTokens(message.id);
@@ -1548,798 +1572,639 @@ export default function Home() {
 
     return (
       <Show when={message()}>
-        {(message) => (
-          <article
-            classList={{
-              msg: true,
-              assistant: message().role === "assistant",
-              user: message().role === "user",
-            }}
-          >
-            <div class="msg-meta">
-              <span class="msg-role">{message().role === "assistant" ? "AI" : "You"}</span>
-              <Show when={message().status && message().status !== "completed"}>
-                <span class="msg-status">{message().status}</span>
-              </Show>
-            </div>
-            <Show
-              when={message().role === "assistant"}
-              fallback={
-                <div class="msg-user-row">
-                  <div class="msg-user-actions">
-                    <button
-                      type="button"
-                      class="msg-action-btn"
-                      aria-label="Edit and regenerate from this point"
-                      title="Edit and regenerate from this point"
-                      disabled={isSelectedThreadBusy()}
-                      onClick={() => startEditingUserMessage(message())}
-                    >
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        aria-hidden="true"
-                      >
-                        <path d="M12 20h9" />
-                        <path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z" />
-                      </svg>
-                    </button>
-                    <button
-                      type="button"
-                      class="msg-action-btn"
-                      aria-label="Retry from this point with original settings"
-                      title="Retry from this point with original settings"
-                      disabled={isSelectedThreadBusy()}
-                      onClick={() => retryMessage(message())}
-                    >
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        aria-hidden="true"
-                      >
-                        <polyline points="1 4 1 10 7 10" />
-                        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
-                      </svg>
-                    </button>
-                  </div>
-                  <div class="msg-user-stack">
-                    <Show when={userImageAttachments(message().id).length > 0}>
-                      <div class="msg-attachment-gallery">
-                        <For each={userImageAttachments(message().id)}>
-                          {(att: any) => (
-                            <a
-                              class="msg-attachment-card"
-                              href={`/api/uploads/blob/${att.objectKey}`}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              <img
-                                class="msg-attachment-img"
-                                src={`/api/uploads/blob/${att.objectKey}`}
-                                alt={att.fileName}
-                                loading="lazy"
-                              />
-                            </a>
-                          )}
-                        </For>
+        {(message) =>
+          (() => {
+            const status = () => effectiveMessageStatus(message());
+            return (
+              <article
+                classList={{
+                  msg: true,
+                  assistant: message().role === "assistant",
+                  user: message().role === "user",
+                }}
+              >
+                <div class="msg-meta">
+                  <span class="msg-role">{message().role === "assistant" ? "AI" : "You"}</span>
+                  <Show when={status() && status() !== "completed"}>
+                    <span class="msg-status">{status()}</span>
+                  </Show>
+                </div>
+                <Show
+                  when={message().role === "assistant"}
+                  fallback={
+                    <div class="msg-user-row">
+                      <div class="msg-user-actions">
+                        <button
+                          type="button"
+                          class="msg-action-btn"
+                          aria-label="Edit and regenerate from this point"
+                          title="Edit and regenerate from this point"
+                          disabled={isSelectedThreadBusy()}
+                          onClick={() => startEditingUserMessage(message())}
+                        >
+                          <svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M12 20h9" />
+                            <path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          class="msg-action-btn"
+                          aria-label="Retry from this point with original settings"
+                          title="Retry from this point with original settings"
+                          disabled={isSelectedThreadBusy()}
+                          onClick={() => retryMessage(message())}
+                        >
+                          <svg
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            aria-hidden="true"
+                          >
+                            <polyline points="1 4 1 10 7 10" />
+                            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                          </svg>
+                        </button>
                       </div>
-                    </Show>
-                    <Show
-                      when={editingUserMessageId() === message().id}
-                      fallback={
-                        <Show when={message().text?.trim()}>
-                          <div class="msg-user-body">
-                            <p>{message().text}</p>
+                      <div class="msg-user-stack">
+                        <Show when={userImageAttachments(message().id).length > 0}>
+                          <div class="msg-attachment-gallery">
+                            <For each={userImageAttachments(message().id)}>
+                              {(att: any) => (
+                                <a
+                                  class="msg-attachment-card"
+                                  href={`/api/uploads/blob/${att.objectKey}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  <img
+                                    class="msg-attachment-img"
+                                    src={`/api/uploads/blob/${att.objectKey}`}
+                                    alt={att.fileName}
+                                    loading="lazy"
+                                  />
+                                </a>
+                              )}
+                            </For>
                           </div>
                         </Show>
-                      }
-                    >
-                      <div class="msg-edit-form">
-                        <textarea
-                          value={editingUserMessageText()}
-                          onInput={(e) => setEditingUserMessageText(e.currentTarget.value)}
-                          onKeyDown={(e) => {
-                            if (e.isComposing) return;
-                            if (e.key === "Escape") {
-                              e.preventDefault();
-                              cancelEditingUserMessage();
-                              return;
-                            }
-                            if (e.key === "Enter" && !e.shiftKey) {
-                              e.preventDefault();
-                              commitUserMessageEdit(message());
-                            }
-                          }}
-                        />
-                        <div class="msg-edit-actions">
-                          <button type="button" onClick={cancelEditingUserMessage}>
-                            Cancel
-                          </button>
-                          <button type="button" onClick={() => commitUserMessageEdit(message())}>
-                            Save
-                          </button>
-                        </div>
-                      </div>
-                    </Show>
-                    <Show when={userFileAttachments(message().id).length > 0}>
-                      <div class="msg-attachments msg-attachments-files">
-                        <For each={userFileAttachments(message().id)}>
-                          {(att: any) => <span class="msg-attachment-file">{att.fileName}</span>}
-                        </For>
-                      </div>
-                    </Show>
-                  </div>
-                </div>
-              }
-            >
-              <Show when={hasAssistantInterleavedBody(message())}>
-                <div class="assistant-interleaved-body">
-                  <Show
-                    when={
-                      isWaitingForVisibleAnswer(message()) &&
-                      assistantTimeline(message().id).length === 0
-                    }
-                  >
-                    <div class="thinking-indicator">
-                      <span class="thinking-spinner" />
-                      <span>Thinking…</span>
-                    </div>
-                  </Show>
-                  <Index each={assistantTimeline(message().id)}>
-                    {(row) => (
-                      <Show when={row()}>
-                        {(item) => (
-                          <Switch>
-                            <Match
-                              when={
-                                item().kind === "markdown"
-                                  ? (item() as Extract<TimelineItem, { kind: "markdown" }>)
-                                  : null
-                              }
-                            >
-                              {(data) => {
-                                const cites = () => citationsForMessage(message().id);
-                                return (
-                                  <Show
-                                    when={data().streaming}
-                                    fallback={<Markdown text={data().text} citations={cites()} />}
-                                  >
-                                    <Markdown text={data().text} streaming citations={cites()} />
-                                  </Show>
-                                );
+                        <Show
+                          when={editingUserMessageId() === message().id}
+                          fallback={
+                            <Show when={message().text?.trim()}>
+                              <div class="msg-user-body">
+                                <p>{message().text}</p>
+                              </div>
+                            </Show>
+                          }
+                        >
+                          <div class="msg-edit-form">
+                            <textarea
+                              value={editingUserMessageText()}
+                              onInput={(e) => setEditingUserMessageText(e.currentTarget.value)}
+                              onKeyDown={(e) => {
+                                if (e.isComposing) return;
+                                if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  cancelEditingUserMessage();
+                                  return;
+                                }
+                                if (e.key === "Enter" && !e.shiftKey) {
+                                  e.preventDefault();
+                                  commitUserMessageEdit(message());
+                                }
                               }}
-                            </Match>
-                            <Match
-                              when={
-                                item().kind === "search"
-                                  ? (item() as Extract<TimelineItem, { kind: "search" }>)
-                                  : null
-                              }
-                            >
-                              {(data) => {
-                                const collapsed = () => isChipCollapsed(message().id, data().key);
-                                const resultsData = () =>
-                                  searchResultsForStep(message().id, data().step);
-                                const hasResults = () =>
-                                  (resultsData()?.run.results.length ?? 0) > 0;
-                                const runMode = () => resultsData()?.run.mode;
-                                const rawPreview = () => {
-                                  if (runMode() !== "mcp") return "";
-                                  return resultsData()?.run.previewText ?? "";
-                                };
-                                const hasRawPreview = () => rawPreview().length > 0;
-                                const statusLabel = () => {
-                                  if (data().status === "failed") return "Search failed";
-                                  if (data().status === "active") return "Searching the web";
-                                  return "Searched the web";
-                                };
-                                const countLabel = () => {
-                                  const count =
-                                    resultsData()?.run.results.length ?? data().resultCount;
-                                  if (!count) return null;
-                                  return `${count} result${count === 1 ? "" : "s"}`;
-                                };
-                                return (
-                                  <div
-                                    classList={{
-                                      "assistant-chip": true,
-                                      "assistant-chip-search": true,
-                                      "is-active": data().status === "active",
-                                      "is-failed": data().status === "failed",
-                                    }}
-                                  >
-                                    <button
-                                      type="button"
-                                      class="assistant-chip-toggle"
-                                      aria-expanded={!collapsed()}
-                                      onClick={() => toggleChipCollapse(message().id, data().key)}
-                                      disabled={
-                                        !hasResults() &&
-                                        !hasRawPreview() &&
-                                        data().status !== "failed"
-                                      }
-                                    >
-                                      <span class="assistant-chip-icon" aria-hidden="true">
-                                        <Show
-                                          when={data().status === "active"}
-                                          fallback={
-                                            <svg
-                                              width="12"
-                                              height="12"
-                                              viewBox="0 0 24 24"
-                                              fill="none"
-                                              stroke="currentColor"
-                                              stroke-width="2"
-                                              stroke-linecap="round"
-                                              stroke-linejoin="round"
-                                            >
-                                              <circle cx="11" cy="11" r="8" />
-                                              <path d="m21 21-4.3-4.3" />
-                                            </svg>
-                                          }
-                                        >
-                                          <span class="thinking-spinner" />
-                                        </Show>
-                                      </span>
-                                      <span class="assistant-chip-label">{statusLabel()}</span>
-                                      <Show when={runMode() === "mcp"}>
-                                        <span
-                                          class="assistant-chip-badge"
-                                          title="Search ran through Exa's free public endpoint — returns raw text, no ranked link results."
-                                        >
-                                          raw text
-                                        </span>
-                                      </Show>
-                                      <Show when={data().query}>
-                                        <span class="assistant-chip-detail">"{data().query}"</span>
-                                      </Show>
-                                      <Show when={countLabel()}>
-                                        {(label) => (
-                                          <span class="assistant-chip-meta">{label()}</span>
-                                        )}
-                                      </Show>
+                            />
+                            <div class="msg-edit-actions">
+                              <button type="button" onClick={cancelEditingUserMessage}>
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => commitUserMessageEdit(message())}
+                              >
+                                Save
+                              </button>
+                            </div>
+                          </div>
+                        </Show>
+                        <Show when={userFileAttachments(message().id).length > 0}>
+                          <div class="msg-attachments msg-attachments-files">
+                            <For each={userFileAttachments(message().id)}>
+                              {(att: any) => (
+                                <span class="msg-attachment-file">{att.fileName}</span>
+                              )}
+                            </For>
+                          </div>
+                        </Show>
+                      </div>
+                    </div>
+                  }
+                >
+                  <Show when={hasAssistantInterleavedBody(message())}>
+                    <div class="assistant-interleaved-body">
+                      <Show
+                        when={
+                          isWaitingForVisibleAnswer(message()) &&
+                          assistantTimeline(message().id).length === 0
+                        }
+                      >
+                        <div class="thinking-indicator">
+                          <span class="thinking-spinner" />
+                          <span>Thinking…</span>
+                        </div>
+                      </Show>
+                      <Index each={assistantTimeline(message().id)}>
+                        {(row) => (
+                          <Show when={row()}>
+                            {(item) => (
+                              <Switch>
+                                <Match
+                                  when={
+                                    item().kind === "markdown"
+                                      ? (item() as Extract<TimelineItem, { kind: "markdown" }>)
+                                      : null
+                                  }
+                                >
+                                  {(data) => {
+                                    const cites = () => citationsForMessage(message().id);
+                                    return (
                                       <Show
-                                        when={
-                                          hasResults() ||
-                                          hasRawPreview() ||
-                                          data().status === "failed"
+                                        when={data().streaming}
+                                        fallback={
+                                          <Markdown text={data().text} citations={cites()} />
                                         }
                                       >
-                                        <span
-                                          classList={{
-                                            "assistant-chip-chevron": true,
-                                            "is-collapsed": collapsed(),
-                                          }}
-                                          aria-hidden="true"
-                                        >
-                                          ▾
-                                        </span>
+                                        <Markdown
+                                          text={data().text}
+                                          streaming
+                                          citations={cites()}
+                                        />
                                       </Show>
-                                    </button>
-                                    <Show when={!collapsed() && hasRawPreview() && !hasResults()}>
-                                      <div class="search-raw-preview">{rawPreview()}</div>
-                                    </Show>
-                                    <Show when={!collapsed() && hasResults()}>
-                                      <Show when={resultsData()}>
-                                        {(d) => (
-                                          <div class="search-results-inline">
-                                            <Index each={d().run.results}>
-                                              {(result, idx) => (
-                                                <a
-                                                  class="search-result-link"
-                                                  href={result().url}
-                                                  target="_blank"
-                                                  rel="noreferrer"
+                                    );
+                                  }}
+                                </Match>
+                                <Match
+                                  when={
+                                    item().kind === "search"
+                                      ? (item() as Extract<TimelineItem, { kind: "search" }>)
+                                      : null
+                                  }
+                                >
+                                  {(data) => {
+                                    const collapsed = () =>
+                                      isChipCollapsed(message().id, data().key);
+                                    const resultsData = () =>
+                                      searchResultsForStep(message().id, data().step);
+                                    const hasResults = () =>
+                                      (resultsData()?.run.results.length ?? 0) > 0;
+                                    const runMode = () => resultsData()?.run.mode;
+                                    const rawPreview = () => {
+                                      if (runMode() !== "mcp") return "";
+                                      return resultsData()?.run.previewText ?? "";
+                                    };
+                                    const hasRawPreview = () => rawPreview().length > 0;
+                                    const statusLabel = () => {
+                                      if (data().status === "failed") return "Search failed";
+                                      if (data().status === "active") return "Searching the web";
+                                      return "Searched the web";
+                                    };
+                                    const countLabel = () => {
+                                      const count =
+                                        resultsData()?.run.results.length ?? data().resultCount;
+                                      if (!count) return null;
+                                      return `${count} result${count === 1 ? "" : "s"}`;
+                                    };
+                                    return (
+                                      <div
+                                        classList={{
+                                          "assistant-chip": true,
+                                          "assistant-chip-search": true,
+                                          "is-active": data().status === "active",
+                                          "is-failed": data().status === "failed",
+                                        }}
+                                      >
+                                        <button
+                                          type="button"
+                                          class="assistant-chip-toggle"
+                                          aria-expanded={!collapsed()}
+                                          onClick={() =>
+                                            toggleChipCollapse(message().id, data().key)
+                                          }
+                                          disabled={
+                                            !hasResults() &&
+                                            !hasRawPreview() &&
+                                            data().status !== "failed"
+                                          }
+                                        >
+                                          <span class="assistant-chip-icon" aria-hidden="true">
+                                            <Show
+                                              when={data().status === "active"}
+                                              fallback={
+                                                <svg
+                                                  width="12"
+                                                  height="12"
+                                                  viewBox="0 0 24 24"
+                                                  fill="none"
+                                                  stroke="currentColor"
+                                                  stroke-width="2"
+                                                  stroke-linecap="round"
+                                                  stroke-linejoin="round"
                                                 >
-                                                  <span class="search-result-num">
-                                                    {d().startIndex + idx}
-                                                  </span>
-                                                  <span class="search-result-title">
-                                                    {result().title}
-                                                  </span>
-                                                  <span class="search-result-domain">
-                                                    {result().domain}
-                                                  </span>
-                                                </a>
-                                              )}
-                                            </Index>
-                                          </div>
-                                        )}
-                                      </Show>
-                                    </Show>
-                                    <Show
-                                      when={
-                                        !collapsed() && data().status === "failed" && data().detail
-                                      }
-                                    >
-                                      <div class="assistant-chip-error">{data().detail}</div>
-                                    </Show>
-                                  </div>
-                                );
-                              }}
-                            </Match>
-                            <Match
-                              when={
-                                item().kind === "extract"
-                                  ? (item() as Extract<TimelineItem, { kind: "extract" }>)
-                                  : null
-                              }
-                            >
-                              {(data) => {
-                                const collapsed = () => isChipCollapsed(message().id, data().key);
-                                const hasDetail = () =>
-                                  Boolean(data().url) ||
-                                  (data().status === "failed" && Boolean(data().detail));
-                                const statusLabel = () => {
-                                  if (data().status === "failed") return "Read failed";
-                                  if (data().status === "active") return "Reading page";
-                                  return "Read page";
-                                };
-                                const metaLabel = () => {
-                                  if (data().status !== "completed") return null;
-                                  const chars = data().originalLength ?? data().charCount;
-                                  if (!chars) return null;
-                                  return data().truncated
-                                    ? `${chars.toLocaleString()} chars (truncated)`
-                                    : `${chars.toLocaleString()} chars`;
-                                };
-                                return (
-                                  <div
-                                    classList={{
-                                      "assistant-chip": true,
-                                      "assistant-chip-search": true,
-                                      "assistant-chip-extract": true,
-                                      "is-active": data().status === "active",
-                                      "is-failed": data().status === "failed",
-                                    }}
-                                  >
-                                    <button
-                                      type="button"
-                                      class="assistant-chip-toggle"
-                                      aria-expanded={!collapsed()}
-                                      onClick={() => toggleChipCollapse(message().id, data().key)}
-                                      disabled={!hasDetail()}
-                                    >
-                                      <span class="assistant-chip-icon" aria-hidden="true">
-                                        <Show
-                                          when={data().status === "active"}
-                                          fallback={
-                                            <svg
-                                              width="12"
-                                              height="12"
-                                              viewBox="0 0 24 24"
-                                              fill="none"
-                                              stroke="currentColor"
-                                              stroke-width="2"
-                                              stroke-linecap="round"
-                                              stroke-linejoin="round"
+                                                  <circle cx="11" cy="11" r="8" />
+                                                  <path d="m21 21-4.3-4.3" />
+                                                </svg>
+                                              }
                                             >
-                                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                                              <path d="M14 2v6h6" />
-                                              <path d="M16 13H8" />
-                                              <path d="M16 17H8" />
-                                              <path d="M10 9H8" />
-                                            </svg>
+                                              <span class="thinking-spinner" />
+                                            </Show>
+                                          </span>
+                                          <span class="assistant-chip-label">{statusLabel()}</span>
+                                          <Show when={runMode() === "mcp"}>
+                                            <span
+                                              class="assistant-chip-badge"
+                                              title="Search ran through Exa's free public endpoint — returns raw text, no ranked link results."
+                                            >
+                                              raw text
+                                            </span>
+                                          </Show>
+                                          <Show when={data().query}>
+                                            <span class="assistant-chip-detail">
+                                              "{data().query}"
+                                            </span>
+                                          </Show>
+                                          <Show when={countLabel()}>
+                                            {(label) => (
+                                              <span class="assistant-chip-meta">{label()}</span>
+                                            )}
+                                          </Show>
+                                          <Show
+                                            when={
+                                              hasResults() ||
+                                              hasRawPreview() ||
+                                              data().status === "failed"
+                                            }
+                                          >
+                                            <span
+                                              classList={{
+                                                "assistant-chip-chevron": true,
+                                                "is-collapsed": collapsed(),
+                                              }}
+                                              aria-hidden="true"
+                                            >
+                                              ▾
+                                            </span>
+                                          </Show>
+                                        </button>
+                                        <Show
+                                          when={!collapsed() && hasRawPreview() && !hasResults()}
+                                        >
+                                          <div class="search-raw-preview">{rawPreview()}</div>
+                                        </Show>
+                                        <Show when={!collapsed() && hasResults()}>
+                                          <Show when={resultsData()}>
+                                            {(d) => (
+                                              <div class="search-results-inline">
+                                                <Index each={d().run.results}>
+                                                  {(result, idx) => (
+                                                    <a
+                                                      class="search-result-link"
+                                                      href={result().url}
+                                                      target="_blank"
+                                                      rel="noreferrer"
+                                                    >
+                                                      <span class="search-result-num">
+                                                        {d().startIndex + idx}
+                                                      </span>
+                                                      <span class="search-result-title">
+                                                        {result().title}
+                                                      </span>
+                                                      <span class="search-result-domain">
+                                                        {result().domain}
+                                                      </span>
+                                                    </a>
+                                                  )}
+                                                </Index>
+                                              </div>
+                                            )}
+                                          </Show>
+                                        </Show>
+                                        <Show
+                                          when={
+                                            !collapsed() &&
+                                            data().status === "failed" &&
+                                            data().detail
                                           }
                                         >
-                                          <span class="thinking-spinner" />
+                                          <div class="assistant-chip-error">{data().detail}</div>
                                         </Show>
-                                      </span>
-                                      <span class="assistant-chip-label">{statusLabel()}</span>
-                                      <Show when={data().host}>
-                                        <span class="assistant-chip-detail">{data().host}</span>
-                                      </Show>
-                                      <Show when={metaLabel()}>
-                                        {(label) => (
-                                          <span class="assistant-chip-meta">{label()}</span>
-                                        )}
-                                      </Show>
-                                      <Show when={hasDetail()}>
-                                        <span
-                                          classList={{
-                                            "assistant-chip-chevron": true,
-                                            "is-collapsed": collapsed(),
-                                          }}
-                                          aria-hidden="true"
-                                        >
-                                          ▾
-                                        </span>
-                                      </Show>
-                                    </button>
-                                    <Show when={!collapsed() && data().url}>
-                                      <div class="search-results-inline">
-                                        <a
-                                          class="search-result-link"
-                                          href={data().url}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                        >
-                                          <span class="search-result-title">{data().url}</span>
-                                        </a>
                                       </div>
-                                    </Show>
-                                    <Show
-                                      when={
-                                        !collapsed() && data().status === "failed" && data().detail
-                                      }
-                                    >
-                                      <div class="assistant-chip-error">{data().detail}</div>
-                                    </Show>
-                                  </div>
-                                );
-                              }}
-                            </Match>
-                            <Match
-                              when={
-                                item().kind === "reasoning"
-                                  ? (item() as Extract<TimelineItem, { kind: "reasoning" }>)
-                                  : null
-                              }
-                            >
-                              {(data) => {
-                                const collapsed = () =>
-                                  isReasoningCollapsed(message().id, data().key, data().streaming);
-                                return (
-                                  <div
-                                    classList={{
-                                      "assistant-chip": true,
-                                      "assistant-chip-reasoning": true,
-                                      "is-active": data().streaming,
-                                    }}
-                                  >
-                                    <button
-                                      type="button"
-                                      class="assistant-chip-toggle"
-                                      aria-expanded={!collapsed()}
-                                      onClick={() => toggleChipCollapse(message().id, data().key)}
-                                    >
-                                      <span class="assistant-chip-icon" aria-hidden="true">
-                                        <Show
-                                          when={data().streaming}
-                                          fallback={
-                                            <svg
-                                              width="12"
-                                              height="12"
-                                              viewBox="0 0 24 24"
-                                              fill="none"
-                                              stroke="currentColor"
-                                              stroke-width="2"
-                                              stroke-linecap="round"
-                                              stroke-linejoin="round"
+                                    );
+                                  }}
+                                </Match>
+                                <Match
+                                  when={
+                                    item().kind === "extract"
+                                      ? (item() as Extract<TimelineItem, { kind: "extract" }>)
+                                      : null
+                                  }
+                                >
+                                  {(data) => {
+                                    const collapsed = () =>
+                                      isChipCollapsed(message().id, data().key);
+                                    const hasDetail = () =>
+                                      Boolean(data().url) ||
+                                      (data().status === "failed" && Boolean(data().detail));
+                                    const statusLabel = () => {
+                                      if (data().status === "failed") return "Read failed";
+                                      if (data().status === "active") return "Reading page";
+                                      return "Read page";
+                                    };
+                                    const metaLabel = () => {
+                                      if (data().status !== "completed") return null;
+                                      const chars = data().originalLength ?? data().charCount;
+                                      if (!chars) return null;
+                                      return data().truncated
+                                        ? `${chars.toLocaleString()} chars (truncated)`
+                                        : `${chars.toLocaleString()} chars`;
+                                    };
+                                    return (
+                                      <div
+                                        classList={{
+                                          "assistant-chip": true,
+                                          "assistant-chip-search": true,
+                                          "assistant-chip-extract": true,
+                                          "is-active": data().status === "active",
+                                          "is-failed": data().status === "failed",
+                                        }}
+                                      >
+                                        <button
+                                          type="button"
+                                          class="assistant-chip-toggle"
+                                          aria-expanded={!collapsed()}
+                                          onClick={() =>
+                                            toggleChipCollapse(message().id, data().key)
+                                          }
+                                          disabled={!hasDetail()}
+                                        >
+                                          <span class="assistant-chip-icon" aria-hidden="true">
+                                            <Show
+                                              when={data().status === "active"}
+                                              fallback={
+                                                <svg
+                                                  width="12"
+                                                  height="12"
+                                                  viewBox="0 0 24 24"
+                                                  fill="none"
+                                                  stroke="currentColor"
+                                                  stroke-width="2"
+                                                  stroke-linecap="round"
+                                                  stroke-linejoin="round"
+                                                >
+                                                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                                  <path d="M14 2v6h6" />
+                                                  <path d="M16 13H8" />
+                                                  <path d="M16 17H8" />
+                                                  <path d="M10 9H8" />
+                                                </svg>
+                                              }
                                             >
-                                              <path d="M12 2a4.5 4.5 0 0 0-4.5 4.5c0 .9.27 1.75.73 2.46A4.5 4.5 0 0 0 8 17.5V19a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-1.5a4.5 4.5 0 0 0-.23-8.54A4.5 4.5 0 0 0 16.5 6.5 4.5 4.5 0 0 0 12 2Z" />
-                                              <path d="M12 2v19" />
-                                              <path d="M9 7h.01" />
-                                              <path d="M15 7h.01" />
-                                            </svg>
+                                              <span class="thinking-spinner" />
+                                            </Show>
+                                          </span>
+                                          <span class="assistant-chip-label">{statusLabel()}</span>
+                                          <Show when={data().host}>
+                                            <span class="assistant-chip-detail">{data().host}</span>
+                                          </Show>
+                                          <Show when={metaLabel()}>
+                                            {(label) => (
+                                              <span class="assistant-chip-meta">{label()}</span>
+                                            )}
+                                          </Show>
+                                          <Show when={hasDetail()}>
+                                            <span
+                                              classList={{
+                                                "assistant-chip-chevron": true,
+                                                "is-collapsed": collapsed(),
+                                              }}
+                                              aria-hidden="true"
+                                            >
+                                              ▾
+                                            </span>
+                                          </Show>
+                                        </button>
+                                        <Show when={!collapsed() && data().url}>
+                                          <div class="search-results-inline">
+                                            <a
+                                              class="search-result-link"
+                                              href={data().url}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                            >
+                                              <span class="search-result-title">{data().url}</span>
+                                            </a>
+                                          </div>
+                                        </Show>
+                                        <Show
+                                          when={
+                                            !collapsed() &&
+                                            data().status === "failed" &&
+                                            data().detail
                                           }
                                         >
-                                          <span class="thinking-spinner" />
+                                          <div class="assistant-chip-error">{data().detail}</div>
                                         </Show>
+                                      </div>
+                                    );
+                                  }}
+                                </Match>
+                                <Match
+                                  when={
+                                    item().kind === "reasoning"
+                                      ? (item() as Extract<TimelineItem, { kind: "reasoning" }>)
+                                      : null
+                                  }
+                                >
+                                  {(data) => {
+                                    const collapsed = () =>
+                                      isReasoningCollapsed(
+                                        message().id,
+                                        data().key,
+                                        data().streaming,
+                                      );
+                                    return (
+                                      <div
+                                        classList={{
+                                          "assistant-chip": true,
+                                          "assistant-chip-reasoning": true,
+                                          "is-active": data().streaming,
+                                        }}
+                                      >
+                                        <button
+                                          type="button"
+                                          class="assistant-chip-toggle"
+                                          aria-expanded={!collapsed()}
+                                          onClick={() =>
+                                            toggleChipCollapse(message().id, data().key)
+                                          }
+                                        >
+                                          <span class="assistant-chip-icon" aria-hidden="true">
+                                            <Show
+                                              when={data().streaming}
+                                              fallback={
+                                                <svg
+                                                  width="12"
+                                                  height="12"
+                                                  viewBox="0 0 24 24"
+                                                  fill="none"
+                                                  stroke="currentColor"
+                                                  stroke-width="2"
+                                                  stroke-linecap="round"
+                                                  stroke-linejoin="round"
+                                                >
+                                                  <path d="M12 2a4.5 4.5 0 0 0-4.5 4.5c0 .9.27 1.75.73 2.46A4.5 4.5 0 0 0 8 17.5V19a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-1.5a4.5 4.5 0 0 0-.23-8.54A4.5 4.5 0 0 0 16.5 6.5 4.5 4.5 0 0 0 12 2Z" />
+                                                  <path d="M12 2v19" />
+                                                  <path d="M9 7h.01" />
+                                                  <path d="M15 7h.01" />
+                                                </svg>
+                                              }
+                                            >
+                                              <span class="thinking-spinner" />
+                                            </Show>
+                                          </span>
+                                          <span class="assistant-chip-label">Reasoning</span>
+                                          <span
+                                            classList={{
+                                              "assistant-chip-chevron": true,
+                                              "is-collapsed": collapsed(),
+                                            }}
+                                            aria-hidden="true"
+                                          >
+                                            ▾
+                                          </span>
+                                        </button>
+                                        <Show when={!collapsed()}>
+                                          <div class="assistant-chip-reasoning-text">
+                                            {data().text}
+                                            <Show when={data().streaming}>
+                                              <span
+                                                class="assistant-chip-reasoning-caret"
+                                                aria-hidden="true"
+                                              />
+                                            </Show>
+                                          </div>
+                                        </Show>
+                                      </div>
+                                    );
+                                  }}
+                                </Match>
+                                <Match
+                                  when={
+                                    item().kind === "thinking"
+                                      ? (item() as Extract<TimelineItem, { kind: "thinking" }>)
+                                      : null
+                                  }
+                                >
+                                  {(data) => (
+                                    <div class="assistant-chip assistant-chip-thinking">
+                                      <span class="assistant-chip-icon" aria-hidden="true">
+                                        <svg
+                                          width="12"
+                                          height="12"
+                                          viewBox="0 0 24 24"
+                                          fill="none"
+                                          stroke="currentColor"
+                                          stroke-width="2"
+                                          stroke-linecap="round"
+                                          stroke-linejoin="round"
+                                        >
+                                          <path d="M9.663 17h4.673M12 3v1M5.64 5.64l.71.71M3 12h1M20 12h1M18.36 5.64l-.71.71M12 18a6 6 0 0 0 3.5-10.9A6 6 0 0 0 8.5 7.1 6 6 0 0 0 12 18Z" />
+                                        </svg>
                                       </span>
                                       <span class="assistant-chip-label">Reasoning</span>
-                                      <span
-                                        classList={{
-                                          "assistant-chip-chevron": true,
-                                          "is-collapsed": collapsed(),
-                                        }}
-                                        aria-hidden="true"
-                                      >
-                                        ▾
+                                      <span class="assistant-chip-meta">
+                                        {formatTokenCount(data().tokens)} tokens
                                       </span>
-                                    </button>
-                                    <Show when={!collapsed()}>
-                                      <div class="assistant-chip-reasoning-text">
-                                        {data().text}
-                                        <Show when={data().streaming}>
-                                          <span
-                                            class="assistant-chip-reasoning-caret"
-                                            aria-hidden="true"
-                                          />
-                                        </Show>
-                                      </div>
-                                    </Show>
+                                    </div>
+                                  )}
+                                </Match>
+                                <Match when={item().kind === "failure"}>
+                                  <div class="assistant-error-card" role="alert">
+                                    <div class="assistant-error-title">
+                                      {assistantError(message()).title}
+                                    </div>
+                                    <div class="assistant-error-summary">
+                                      {assistantError(message()).summary}
+                                    </div>
+                                    <p class="assistant-error-explanation">
+                                      {assistantError(message()).explanation}
+                                    </p>
+                                    <details class="assistant-error-details">
+                                      <summary>Technical details</summary>
+                                      <pre>{assistantError(message()).details}</pre>
+                                    </details>
                                   </div>
-                                );
-                              }}
-                            </Match>
-                            <Match
-                              when={
-                                item().kind === "thinking"
-                                  ? (item() as Extract<TimelineItem, { kind: "thinking" }>)
-                                  : null
-                              }
-                            >
-                              {(data) => (
-                                <div class="assistant-chip assistant-chip-thinking">
-                                  <span class="assistant-chip-icon" aria-hidden="true">
-                                    <svg
-                                      width="12"
-                                      height="12"
-                                      viewBox="0 0 24 24"
-                                      fill="none"
-                                      stroke="currentColor"
-                                      stroke-width="2"
-                                      stroke-linecap="round"
-                                      stroke-linejoin="round"
-                                    >
-                                      <path d="M9.663 17h4.673M12 3v1M5.64 5.64l.71.71M3 12h1M20 12h1M18.36 5.64l-.71.71M12 18a6 6 0 0 0 3.5-10.9A6 6 0 0 0 8.5 7.1 6 6 0 0 0 12 18Z" />
-                                    </svg>
-                                  </span>
-                                  <span class="assistant-chip-label">Reasoning</span>
-                                  <span class="assistant-chip-meta">
-                                    {formatTokenCount(data().tokens)} tokens
-                                  </span>
-                                </div>
-                              )}
-                            </Match>
-                            <Match when={item().kind === "failure"}>
-                              <div class="assistant-error-card" role="alert">
-                                <div class="assistant-error-title">
-                                  {assistantError(message()).title}
-                                </div>
-                                <div class="assistant-error-summary">
-                                  {assistantError(message()).summary}
-                                </div>
-                                <p class="assistant-error-explanation">
-                                  {assistantError(message()).explanation}
-                                </p>
-                                <details class="assistant-error-details">
-                                  <summary>Technical details</summary>
-                                  <pre>{assistantError(message()).details}</pre>
-                                </details>
-                              </div>
-                            </Match>
-                          </Switch>
-                        )}
-                      </Show>
-                    )}
-                  </Index>
-                  <Show when={hasAssistantStats(message())}>
-                    <div class="msg-stats">
-                      <Show when={thinkingTokens(message().id)}>
-                        <span>
-                          {formatTokenCount(thinkingTokens(message().id)!)} thinking tokens
-                        </span>
-                      </Show>
-                      <Show when={getTotalTokens(message()) != null}>
-                        <span>{formatTokenCount(getTotalTokens(message())!)} total tokens</span>
-                      </Show>
-                      <Show when={message().promptTokens != null}>
-                        <span>{formatTokenCount(message().promptTokens!)} prompt</span>
-                      </Show>
-                      <Show when={message().completionTokens != null}>
-                        <span>{formatTokenCount(message().completionTokens!)} output</span>
-                      </Show>
-                      <Show when={message().ttftMs != null}>
-                        <span>TTFT {message().ttftMs}ms</span>
-                      </Show>
-                      <Show when={message().durationMs != null}>
-                        <span>{formatDuration(message().durationMs!)}</span>
-                      </Show>
-                      <Show
-                        when={
-                          message().completionTokens != null &&
-                          message().durationMs != null &&
-                          message().durationMs! > 0
-                        }
-                      >
-                        <span>
-                          {((message().completionTokens! / message().durationMs!) * 1000).toFixed(
-                            1,
-                          )}{" "}
-                          tok/s
-                        </span>
-                      </Show>
-                      <Show when={message().modelId}>
-                        <span class="msg-stats-model">{message().modelId}</span>
-                      </Show>
-                    </div>
-                  </Show>
-                  <Show when={traceRunsForMessage(message().id).length > 0}>
-                    <div class="trace-shell">
-                      <button
-                        type="button"
-                        class="trace-toggle"
-                        aria-expanded={!isTraceCollapsed(message().id)}
-                        aria-controls={`trace-drawer-${message().id}`}
-                        onClick={() => toggleTraceDrawer(message().id)}
-                      >
-                        <span class="trace-toggle-copy">
-                          <span class="trace-toggle-label">Trace</span>
-                          <span class="trace-toggle-meta">
-                            {traceTreesForMessage(message().id)[0]?.run
-                              ? `${formatTraceStatus(traceTreesForMessage(message().id)[0]!.run.status)} • ${shortTraceId(traceTreesForMessage(message().id)[0]!.run.traceId)}`
-                              : "Developer trace"}
-                          </span>
-                        </span>
-                        <span
-                          classList={{
-                            "assistant-progress-toggle-chevron": true,
-                            "is-collapsed": isTraceCollapsed(message().id),
-                          }}
-                          aria-hidden="true"
-                        >
-                          ▾
-                        </span>
-                      </button>
-                      <Show when={!isTraceCollapsed(message().id)}>
-                        <div class="trace-drawer" id={`trace-drawer-${message().id}`}>
-                          <For each={traceTreesForMessage(message().id)}>
-                            {(trace) => (
-                              <div class="trace-run-card">
-                                <div class="trace-run-header">
-                                  <span class="trace-run-id">
-                                    trace {shortTraceId(trace.run.traceId)}
-                                  </span>
-                                  <div class="trace-run-actions">
-                                    <span class="trace-run-badges">
-                                      <span>{formatTraceStatus(trace.run.status)}</span>
-                                      <Show when={trace.run.modelId}>
-                                        <span>{trace.run.modelId}</span>
-                                      </Show>
-                                      <Show when={trace.attrs.searchEnabled === true}>
-                                        <span>search</span>
-                                      </Show>
-                                      <Show when={trace.run.durationMs != null}>
-                                        <span>{formatDuration(trace.run.durationMs!)}</span>
-                                      </Show>
-                                    </span>
-                                    <TraceCopyButton text={() => buildTraceCopyText(trace)} />
-                                  </div>
-                                </div>
-                                <Show when={trace.run.errorMessage}>
-                                  <div class="trace-run-error">{trace.run.errorMessage}</div>
-                                </Show>
-                                <Show when={trace.spans.length > 0}>
-                                  <div class="trace-tree">
-                                    <For each={trace.spans}>
-                                      {(span) => <TraceSpanTree span={span} />}
-                                    </For>
-                                  </div>
-                                </Show>
-                              </div>
+                                </Match>
+                              </Switch>
                             )}
-                          </For>
-                        </div>
-                      </Show>
-                    </div>
-                  </Show>
-                </div>
-              </Show>
-              <Show when={hasAssistantPrelude(message())}>
-                <div class="assistant-progress-shell">
-                  <button
-                    type="button"
-                    class="assistant-progress-toggle"
-                    aria-expanded={!isAssistantPreludeCollapsed(message().id)}
-                    aria-controls={`assistant-progress-${message().id}`}
-                    onClick={() => toggleAssistantPrelude(message().id)}
-                  >
-                    <span class="assistant-progress-toggle-copy">
-                      <span class="assistant-progress-toggle-label">Model activity</span>
-                      <span class="assistant-progress-toggle-meta">
-                        {assistantPreludeSummary(message())}
-                      </span>
-                    </span>
-                    <span
-                      classList={{
-                        "assistant-progress-toggle-chevron": true,
-                        "is-collapsed": isAssistantPreludeCollapsed(message().id),
-                      }}
-                      aria-hidden="true"
-                    >
-                      ▾
-                    </span>
-                  </button>
-                  <Show when={!isAssistantPreludeCollapsed(message().id)}>
-                    <div class="assistant-progress-stack" id={`assistant-progress-${message().id}`}>
-                      <Show when={activitiesForMessage(message().id).length > 0}>
-                        <div class="assistant-progress">
-                          <Index each={activitiesForMessage(message().id)}>
-                            {(activity) => {
-                              const searchRunResults = () => {
-                                if (activity().state !== "completed" || activity().step == null)
-                                  return null;
-                                const runs = searchRunsMemo().get(message().id) ?? [];
-                                const run = runs.find((r) => r.step === activity().step);
-                                if (!run || run.results.length === 0) return null;
-                                let offset = 0;
-                                for (const r of runs) {
-                                  if (r.step < run.step) offset += r.results.length;
-                                }
-                                return { results: run.results, startIndex: offset + 1 };
-                              };
-
-                              return (
-                                <div
-                                  classList={{
-                                    "assistant-progress-item": true,
-                                    "is-active": activity().state === "active",
-                                    "is-failed": activity().state === "failed",
-                                  }}
-                                >
-                                  <span class="assistant-progress-marker" aria-hidden="true" />
-                                  <div class="assistant-progress-copy">
-                                    <span>{activity().label}</span>
-                                    <Show
-                                      when={assistantProgressFailureSummary(message(), activity())}
-                                    >
-                                      {(summary) => (
-                                        <span class="assistant-progress-detail">{summary()}</span>
-                                      )}
-                                    </Show>
-                                    <Show when={searchRunResults()}>
-                                      {(data) => (
-                                        <div class="search-results-inline">
-                                          <Index each={data().results}>
-                                            {(result, idx) => (
-                                              <a
-                                                class="search-result-link"
-                                                href={result().url}
-                                                target="_blank"
-                                                rel="noreferrer"
-                                              >
-                                                <span class="search-result-num">
-                                                  {data().startIndex + idx}
-                                                </span>
-                                                <span class="search-result-title">
-                                                  {result().title}
-                                                </span>
-                                                <span class="search-result-domain">
-                                                  {result().domain}
-                                                </span>
-                                              </a>
-                                            )}
-                                          </Index>
-                                        </div>
-                                      )}
-                                    </Show>
-                                  </div>
-                                </div>
-                              );
-                            }}
-                          </Index>
-                        </div>
-                      </Show>
-                      <Show
-                        when={
-                          isWaitingForVisibleAnswer(message()) ||
-                          thinkingTokens(message().id) != null
-                        }
-                      >
-                        <div
-                          classList={{
-                            "thinking-indicator": true,
-                            "is-complete":
-                              !isWaitingForVisibleAnswer(message()) &&
-                              thinkingTokens(message().id) != null,
-                          }}
-                        >
+                          </Show>
+                        )}
+                      </Index>
+                      <Show when={hasAssistantStats(message())}>
+                        <div class="msg-stats">
+                          <Show when={thinkingTokens(message().id)}>
+                            <span>
+                              {formatTokenCount(thinkingTokens(message().id)!)} thinking tokens
+                            </span>
+                          </Show>
+                          <Show when={getTotalTokens(message()) != null}>
+                            <span>{formatTokenCount(getTotalTokens(message())!)} total tokens</span>
+                          </Show>
+                          <Show when={message().promptTokens != null}>
+                            <span>{formatTokenCount(message().promptTokens!)} prompt</span>
+                          </Show>
+                          <Show when={message().completionTokens != null}>
+                            <span>{formatTokenCount(message().completionTokens!)} output</span>
+                          </Show>
+                          <Show when={message().ttftMs != null}>
+                            <span>TTFT {message().ttftMs}ms</span>
+                          </Show>
+                          <Show when={message().durationMs != null}>
+                            <span>{formatDuration(message().durationMs!)}</span>
+                          </Show>
                           <Show
-                            when={isWaitingForVisibleAnswer(message())}
-                            fallback={
-                              <span
-                                class="assistant-progress-marker thinking-indicator-marker"
-                                aria-hidden="true"
-                              />
+                            when={
+                              message().completionTokens != null &&
+                              message().durationMs != null &&
+                              message().durationMs! > 0
                             }
                           >
-                            <span class="thinking-spinner" />
+                            <span>
+                              {(
+                                (message().completionTokens! / message().durationMs!) *
+                                1000
+                              ).toFixed(1)}{" "}
+                              tok/s
+                            </span>
                           </Show>
-                          <span>{thinkingLabel(message().id)}</span>
+                          <Show when={message().modelId}>
+                            <span class="msg-stats-model">{message().modelId}</span>
+                          </Show>
                         </div>
                       </Show>
                       <Show when={traceRunsForMessage(message().id).length > 0}>
@@ -2413,82 +2278,293 @@ export default function Home() {
                       </Show>
                     </div>
                   </Show>
-                </div>
-              </Show>
-              <Show when={hasAssistantAnswerCard(message())}>
-                <div class="assistant-answer-card">
-                  <Show when={message().text?.trim()}>
-                    {(() => {
-                      const cites = () => citationsForMessage(message().id);
-                      return (
-                        <Show
-                          when={message().status === "streaming"}
-                          fallback={<Markdown text={message().text} citations={cites()} />}
-                        >
-                          <Markdown text={message().text} streaming citations={cites()} />
-                        </Show>
-                      );
-                    })()}
-                  </Show>
-                  <Show when={message().status === "failed"}>
-                    <div class="assistant-error-card" role="alert">
-                      <div class="assistant-error-title">{assistantError(message()).title}</div>
-                      <div class="assistant-error-summary">{assistantError(message()).summary}</div>
-                      <p class="assistant-error-explanation">
-                        {assistantError(message()).explanation}
-                      </p>
-                      <details class="assistant-error-details">
-                        <summary>Technical details</summary>
-                        <pre>{assistantError(message()).details}</pre>
-                      </details>
-                    </div>
-                  </Show>
-                  <Show when={hasAssistantStats(message())}>
-                    <div class="msg-stats">
-                      <Show when={thinkingTokens(message().id)}>
-                        <span>
-                          {formatTokenCount(thinkingTokens(message().id)!)} thinking tokens
-                        </span>
-                      </Show>
-                      <Show when={getTotalTokens(message()) != null}>
-                        <span>{formatTokenCount(getTotalTokens(message())!)} total tokens</span>
-                      </Show>
-                      <Show when={message().promptTokens != null}>
-                        <span>{formatTokenCount(message().promptTokens!)} prompt</span>
-                      </Show>
-                      <Show when={message().completionTokens != null}>
-                        <span>{formatTokenCount(message().completionTokens!)} output</span>
-                      </Show>
-                      <Show when={message().ttftMs != null}>
-                        <span>TTFT {message().ttftMs}ms</span>
-                      </Show>
-                      <Show when={message().durationMs != null}>
-                        <span>{formatDuration(message().durationMs!)}</span>
-                      </Show>
-                      <Show
-                        when={
-                          message().completionTokens != null &&
-                          message().durationMs != null &&
-                          message().durationMs! > 0
-                        }
+                  <Show when={hasAssistantPrelude(message())}>
+                    <div class="assistant-progress-shell">
+                      <button
+                        type="button"
+                        class="assistant-progress-toggle"
+                        aria-expanded={!isAssistantPreludeCollapsed(message().id)}
+                        aria-controls={`assistant-progress-${message().id}`}
+                        onClick={() => toggleAssistantPrelude(message().id)}
                       >
-                        <span>
-                          {((message().completionTokens! / message().durationMs!) * 1000).toFixed(
-                            1,
-                          )}{" "}
-                          tok/s
+                        <span class="assistant-progress-toggle-copy">
+                          <span class="assistant-progress-toggle-label">Model activity</span>
+                          <span class="assistant-progress-toggle-meta">
+                            {assistantPreludeSummary(message())}
+                          </span>
                         </span>
-                      </Show>
-                      <Show when={message().modelId}>
-                        <span class="msg-stats-model">{message().modelId}</span>
+                        <span
+                          classList={{
+                            "assistant-progress-toggle-chevron": true,
+                            "is-collapsed": isAssistantPreludeCollapsed(message().id),
+                          }}
+                          aria-hidden="true"
+                        >
+                          ▾
+                        </span>
+                      </button>
+                      <Show when={!isAssistantPreludeCollapsed(message().id)}>
+                        <div
+                          class="assistant-progress-stack"
+                          id={`assistant-progress-${message().id}`}
+                        >
+                          <Show when={activitiesForMessage(message().id).length > 0}>
+                            <div class="assistant-progress">
+                              <Index each={activitiesForMessage(message().id)}>
+                                {(activity) => {
+                                  const searchRunResults = () => {
+                                    if (activity().state !== "completed" || activity().step == null)
+                                      return null;
+                                    const runs = searchRunsMemo().get(message().id) ?? [];
+                                    const run = runs.find((r) => r.step === activity().step);
+                                    if (!run || run.results.length === 0) return null;
+                                    let offset = 0;
+                                    for (const r of runs) {
+                                      if (r.step < run.step) offset += r.results.length;
+                                    }
+                                    return { results: run.results, startIndex: offset + 1 };
+                                  };
+
+                                  return (
+                                    <div
+                                      classList={{
+                                        "assistant-progress-item": true,
+                                        "is-active": activity().state === "active",
+                                        "is-failed": activity().state === "failed",
+                                      }}
+                                    >
+                                      <span class="assistant-progress-marker" aria-hidden="true" />
+                                      <div class="assistant-progress-copy">
+                                        <span>{activity().label}</span>
+                                        <Show
+                                          when={assistantProgressFailureSummary(
+                                            message(),
+                                            activity(),
+                                          )}
+                                        >
+                                          {(summary) => (
+                                            <span class="assistant-progress-detail">
+                                              {summary()}
+                                            </span>
+                                          )}
+                                        </Show>
+                                        <Show when={searchRunResults()}>
+                                          {(data) => (
+                                            <div class="search-results-inline">
+                                              <Index each={data().results}>
+                                                {(result, idx) => (
+                                                  <a
+                                                    class="search-result-link"
+                                                    href={result().url}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                  >
+                                                    <span class="search-result-num">
+                                                      {data().startIndex + idx}
+                                                    </span>
+                                                    <span class="search-result-title">
+                                                      {result().title}
+                                                    </span>
+                                                    <span class="search-result-domain">
+                                                      {result().domain}
+                                                    </span>
+                                                  </a>
+                                                )}
+                                              </Index>
+                                            </div>
+                                          )}
+                                        </Show>
+                                      </div>
+                                    </div>
+                                  );
+                                }}
+                              </Index>
+                            </div>
+                          </Show>
+                          <Show
+                            when={
+                              isWaitingForVisibleAnswer(message()) ||
+                              thinkingTokens(message().id) != null
+                            }
+                          >
+                            <div
+                              classList={{
+                                "thinking-indicator": true,
+                                "is-complete":
+                                  !isWaitingForVisibleAnswer(message()) &&
+                                  thinkingTokens(message().id) != null,
+                              }}
+                            >
+                              <Show
+                                when={isWaitingForVisibleAnswer(message())}
+                                fallback={
+                                  <span
+                                    class="assistant-progress-marker thinking-indicator-marker"
+                                    aria-hidden="true"
+                                  />
+                                }
+                              >
+                                <span class="thinking-spinner" />
+                              </Show>
+                              <span>{thinkingLabel(message().id)}</span>
+                            </div>
+                          </Show>
+                          <Show when={traceRunsForMessage(message().id).length > 0}>
+                            <div class="trace-shell">
+                              <button
+                                type="button"
+                                class="trace-toggle"
+                                aria-expanded={!isTraceCollapsed(message().id)}
+                                aria-controls={`trace-drawer-${message().id}`}
+                                onClick={() => toggleTraceDrawer(message().id)}
+                              >
+                                <span class="trace-toggle-copy">
+                                  <span class="trace-toggle-label">Trace</span>
+                                  <span class="trace-toggle-meta">
+                                    {traceTreesForMessage(message().id)[0]?.run
+                                      ? `${formatTraceStatus(traceTreesForMessage(message().id)[0]!.run.status)} • ${shortTraceId(traceTreesForMessage(message().id)[0]!.run.traceId)}`
+                                      : "Developer trace"}
+                                  </span>
+                                </span>
+                                <span
+                                  classList={{
+                                    "assistant-progress-toggle-chevron": true,
+                                    "is-collapsed": isTraceCollapsed(message().id),
+                                  }}
+                                  aria-hidden="true"
+                                >
+                                  ▾
+                                </span>
+                              </button>
+                              <Show when={!isTraceCollapsed(message().id)}>
+                                <div class="trace-drawer" id={`trace-drawer-${message().id}`}>
+                                  <For each={traceTreesForMessage(message().id)}>
+                                    {(trace) => (
+                                      <div class="trace-run-card">
+                                        <div class="trace-run-header">
+                                          <span class="trace-run-id">
+                                            trace {shortTraceId(trace.run.traceId)}
+                                          </span>
+                                          <div class="trace-run-actions">
+                                            <span class="trace-run-badges">
+                                              <span>{formatTraceStatus(trace.run.status)}</span>
+                                              <Show when={trace.run.modelId}>
+                                                <span>{trace.run.modelId}</span>
+                                              </Show>
+                                              <Show when={trace.attrs.searchEnabled === true}>
+                                                <span>search</span>
+                                              </Show>
+                                              <Show when={trace.run.durationMs != null}>
+                                                <span>{formatDuration(trace.run.durationMs!)}</span>
+                                              </Show>
+                                            </span>
+                                            <TraceCopyButton
+                                              text={() => buildTraceCopyText(trace)}
+                                            />
+                                          </div>
+                                        </div>
+                                        <Show when={trace.run.errorMessage}>
+                                          <div class="trace-run-error">
+                                            {trace.run.errorMessage}
+                                          </div>
+                                        </Show>
+                                        <Show when={trace.spans.length > 0}>
+                                          <div class="trace-tree">
+                                            <For each={trace.spans}>
+                                              {(span) => <TraceSpanTree span={span} />}
+                                            </For>
+                                          </div>
+                                        </Show>
+                                      </div>
+                                    )}
+                                  </For>
+                                </div>
+                              </Show>
+                            </div>
+                          </Show>
+                        </div>
                       </Show>
                     </div>
                   </Show>
-                </div>
-              </Show>
-            </Show>
-          </article>
-        )}
+                  <Show when={hasAssistantAnswerCard(message())}>
+                    <div class="assistant-answer-card">
+                      <Show when={message().text?.trim()}>
+                        {(() => {
+                          const cites = () => citationsForMessage(message().id);
+                          return (
+                            <Show
+                              when={effectiveMessageStatus(message()) === "streaming"}
+                              fallback={<Markdown text={message().text} citations={cites()} />}
+                            >
+                              <Markdown text={message().text} streaming citations={cites()} />
+                            </Show>
+                          );
+                        })()}
+                      </Show>
+                      <Show when={effectiveMessageStatus(message()) === "failed"}>
+                        <div class="assistant-error-card" role="alert">
+                          <div class="assistant-error-title">{assistantError(message()).title}</div>
+                          <div class="assistant-error-summary">
+                            {assistantError(message()).summary}
+                          </div>
+                          <p class="assistant-error-explanation">
+                            {assistantError(message()).explanation}
+                          </p>
+                          <details class="assistant-error-details">
+                            <summary>Technical details</summary>
+                            <pre>{assistantError(message()).details}</pre>
+                          </details>
+                        </div>
+                      </Show>
+                      <Show when={hasAssistantStats(message())}>
+                        <div class="msg-stats">
+                          <Show when={thinkingTokens(message().id)}>
+                            <span>
+                              {formatTokenCount(thinkingTokens(message().id)!)} thinking tokens
+                            </span>
+                          </Show>
+                          <Show when={getTotalTokens(message()) != null}>
+                            <span>{formatTokenCount(getTotalTokens(message())!)} total tokens</span>
+                          </Show>
+                          <Show when={message().promptTokens != null}>
+                            <span>{formatTokenCount(message().promptTokens!)} prompt</span>
+                          </Show>
+                          <Show when={message().completionTokens != null}>
+                            <span>{formatTokenCount(message().completionTokens!)} output</span>
+                          </Show>
+                          <Show when={message().ttftMs != null}>
+                            <span>TTFT {message().ttftMs}ms</span>
+                          </Show>
+                          <Show when={message().durationMs != null}>
+                            <span>{formatDuration(message().durationMs!)}</span>
+                          </Show>
+                          <Show
+                            when={
+                              message().completionTokens != null &&
+                              message().durationMs != null &&
+                              message().durationMs! > 0
+                            }
+                          >
+                            <span>
+                              {(
+                                (message().completionTokens! / message().durationMs!) *
+                                1000
+                              ).toFixed(1)}{" "}
+                              tok/s
+                            </span>
+                          </Show>
+                          <Show when={message().modelId}>
+                            <span class="msg-stats-model">{message().modelId}</span>
+                          </Show>
+                        </div>
+                      </Show>
+                    </div>
+                  </Show>
+                </Show>
+              </article>
+            );
+          })()
+        }
       </Show>
     );
   };
@@ -2668,7 +2744,8 @@ export default function Home() {
     for (const id of messageIds()) {
       const msg = messageById(id);
       if (!msg || msg.role !== "assistant") continue;
-      if (msg.status === "streaming" || msg.status === "pending" || msg.status === "queued") {
+      const status = effectiveMessageStatus(msg);
+      if (status === "streaming" || status === "pending" || status === "queued") {
         return msg.id;
       }
     }

@@ -120,6 +120,24 @@ type BatchEntry = { type: "insert" | "update"; value: object } | { type: "delete
 
 let activeBatch: Map<string, BatchEntry[]> | null = null;
 
+function getPendingBatchValue<T extends { id: string }>(
+  collectionId: string,
+  key: string,
+): T | null {
+  const ops = activeBatch?.get(collectionId);
+  if (!ops) return null;
+  for (let i = ops.length - 1; i >= 0; i--) {
+    const op = ops[i]!;
+    if (op.type === "delete") {
+      if (op.key === key) return null;
+      continue;
+    }
+    const value = op.value as T;
+    if (value.id === key) return value;
+  }
+  return null;
+}
+
 function beginBatch() {
   activeBatch = new Map();
 }
@@ -215,7 +233,9 @@ function applyEvent(eventType: string, payload: unknown) {
     }
     case "message_delta": {
       const event = payload as SyncEventPayloadMap["message_delta"];
-      const existing = messages.get(event.messageId) as Message | undefined;
+      const existing =
+        getPendingBatchValue<Message>("messages", event.messageId) ??
+        (messages.get(event.messageId) as Message | undefined);
       if (existing) {
         // Guard: don't regress completed → streaming
         if (existing.status === "completed") break;
@@ -230,7 +250,9 @@ function applyEvent(eventType: string, payload: unknown) {
     }
     case "message_completed": {
       const event = payload as SyncEventPayloadMap["message_completed"];
-      const existing = messages.get(event.messageId) as Message | undefined;
+      const existing =
+        getPendingBatchValue<Message>("messages", event.messageId) ??
+        (messages.get(event.messageId) as Message | undefined);
       if (existing) {
         syncUpdate("messages", event.messageId, {
           ...existing,
@@ -247,7 +269,9 @@ function applyEvent(eventType: string, payload: unknown) {
     }
     case "message_failed": {
       const event = payload as SyncEventPayloadMap["message_failed"];
-      const existing = messages.get(event.messageId) as Message | undefined;
+      const existing =
+        getPendingBatchValue<Message>("messages", event.messageId) ??
+        (messages.get(event.messageId) as Message | undefined);
       if (existing) {
         syncUpdate("messages", event.messageId, {
           ...existing,

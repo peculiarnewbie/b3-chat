@@ -475,6 +475,45 @@ describe("domain helpers", () => {
     expect(workspaces.get(workspace.id)?.id).toBe(workspace.id);
   });
 
+  it("applies message completion after same-batch message creation", () => {
+    const message = createMessage({
+      threadId: "thread_1",
+      role: "assistant",
+      modelId: "openai/gpt-4.1",
+      status: "pending",
+    });
+
+    processEnvelopes([
+      {
+        type: "event",
+        serverSeq: 1,
+        eventId: "evt_message_pending",
+        eventType: "message_upserted",
+        payload: { row: message },
+        causedByOpId: "op_message",
+      },
+      {
+        type: "event",
+        serverSeq: 2,
+        eventId: "evt_message_completed",
+        eventType: "message_completed",
+        payload: {
+          messageId: message.id,
+          text: "Final answer",
+          updatedAt: "2026-04-24T00:00:00.000Z",
+          durationMs: 1000,
+          ttftMs: 100,
+          promptTokens: 10,
+          completionTokens: 5,
+        },
+        causedByOpId: null,
+      },
+    ]);
+
+    expect(messages.get(message.id)?.status).toBe("completed");
+    expect(messages.get(message.id)?.text).toBe("Final answer");
+  });
+
   it("reuses the same draft for a workspace", () => {
     const workspace = createWorkspace({
       name: "Writing",
