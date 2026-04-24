@@ -17,29 +17,22 @@
     "html_handling": "none",
     "not_found_handling": "none",
   },
+  "vars": {
+    "APP_PUBLIC_URL": "https://chat.peculiarnewbie.com",
+  },
   "secrets": {
     "required": [
-      "ALLOWED_EMAIL",
-      "BETTER_AUTH_SECRET",
-      "BETTER_AUTH_URL",
-      "BETTER_AUTH_API_KEY",
-      "GOOGLE_CLIENT_ID",
-      "GOOGLE_CLIENT_SECRET",
       "OPENCODE_GO_BASE_URL",
       "OPENCODE_GO_API_KEY",
       "DEFAULT_MODEL_ID",
+      "UPLOAD_TOKEN_SECRET",
+      "CLOUDFLARE_ACCESS_TEAM_DOMAIN",
+      "CLOUDFLARE_ACCESS_AUD",
     ],
   },
   "observability": {
     "enabled": true,
   },
-  "d1_databases": [
-    {
-      "binding": "AUTH_DB",
-      "database_name": "b3-chat-auth",
-      "database_id": "edae39b9-b1a9-4069-8692-7a423b0aae16",
-    },
-  ],
   "r2_buckets": [
     {
       "binding": "UPLOADS",

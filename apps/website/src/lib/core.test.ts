@@ -10,7 +10,6 @@ import {
   slugify,
 } from "@b3-chat/domain";
 import {
-  allowedEmail,
   BrowserRenderError,
   chat,
   clampExaResults,
@@ -629,18 +628,16 @@ describe("domain helpers", () => {
 
 describe("server helpers", () => {
   const env = {
-    ALLOWED_EMAIL: "owner@example.com",
-    BETTER_AUTH_SECRET: "test-secret",
-    BETTER_AUTH_URL: "https://chat.example.com",
-    BETTER_AUTH_API_KEY: "better-auth-key",
-    GOOGLE_CLIENT_ID: "google-client",
-    GOOGLE_CLIENT_SECRET: "google-secret",
     OPENCODE_GO_BASE_URL: "https://api.example.com",
     OPENCODE_GO_API_KEY: "opencode-key",
     OPENCODE_GO_MODEL_ALLOWLIST: "openai/gpt-4.1,anthropic/claude-sonnet-4",
     DEFAULT_MODEL_ID: "openai/gpt-4.1",
+    APP_PUBLIC_URL: "https://chat.example.com",
+    UPLOAD_TOKEN_SECRET: "test-secret",
+    CLOUDFLARE_ACCESS_TEAM_DOMAIN: "https://team.cloudflareaccess.com",
+    CLOUDFLARE_ACCESS_AUD: "access-aud",
+    DEV_AUTH_EMAIL: "owner@example.com",
     EXA_API_KEY: "exa-key",
-    AUTH_DB: {} as D1Database,
     UPLOADS: {} as R2Bucket,
     SYNC_ENGINE: {} as DurableObjectNamespace,
     // A truthy sentinel stands in for the Cloudflare Browser Rendering
@@ -650,9 +647,8 @@ describe("server helpers", () => {
     BROWSER: { __mock: true } as unknown as Fetcher,
   };
 
-  it("normalizes and checks the allowed email", () => {
+  it("normalizes email addresses", () => {
     expect(normalizeEmail(" Owner@Example.com ")).toBe("owner@example.com");
-    expect(allowedEmail(env)).toBe("owner@example.com");
   });
 
   it("filters models.dev data to the allowlist", () => {

@@ -29,7 +29,6 @@ import type {
 } from "@b3-chat/domain";
 import Markdown, { type Citation } from "../components/Markdown";
 import { explainAssistantError } from "../lib/assistant-errors";
-import { authClient } from "../lib/auth-client";
 import { BUILD_INFO } from "../lib/build-info";
 import { isAllowedFile, isImageMime, uploadFile } from "../lib/upload";
 import {
@@ -2569,13 +2568,6 @@ export default function Home() {
     );
   };
 
-  const signIn = async () => {
-    await authClient.signIn.social({
-      provider: "google",
-      callbackURL: "/",
-    });
-  };
-
   const createNewWorkspace = async () => {
     createWorkspaceAction(`Workspace ${workspaces().length + 1}`, {
       defaultModelId: composerModelId() || models()?.models?.[0]?.id || "auto",
@@ -2882,13 +2874,11 @@ export default function Home() {
           <section class="auth-card">
             <p class="eyebrow">Personal deployment</p>
             <h1>b3 chat</h1>
-            <p>Sign in with Google to continue.</p>
+            <p>Cloudflare Access session required.</p>
             <p class="app-version" title={BUILD_INFO.tooltip}>
               {BUILD_INFO.label}
             </p>
-            <button class="btn btn-primary" onClick={signIn}>
-              Continue with Google
-            </button>
+            <p>Refresh after signing in through your protected app domain.</p>
           </section>
         </main>
       }

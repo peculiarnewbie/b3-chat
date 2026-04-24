@@ -45,6 +45,7 @@ export async function handleUploadPresign(request: Request): Promise<Response> {
         sizeBytes,
       });
       const token = await signUploadToken(env, {
+        action: "upload_attachment",
         attachmentId: attachment.id,
         objectKey,
         threadId,

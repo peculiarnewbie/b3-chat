@@ -11,12 +11,7 @@ export {
 } from "./chat-completions-adapter.js";
 export { chat } from "@tanstack/ai";
 import { decodeAppEnv, type AppEnv } from "@b3-chat/effect";
-import { betterAuth } from "better-auth";
-import { dash } from "@better-auth/infra";
-import { drizzleAdapter } from "better-auth/adapters/drizzle";
-import { drizzle } from "drizzle-orm/d1";
-import { sql } from "drizzle-orm";
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import {
   createId,
   type SyncCommandPayloadMap,
@@ -32,57 +27,6 @@ declare global {
   var __env__: AppEnv | undefined;
 }
 
-const user = sqliteTable("user", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  email: text("email").notNull().unique(),
-  emailVerified: integer("emailVerified").notNull().default(0),
-  image: text("image"),
-  createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
-  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull(),
-});
-
-const session = sqliteTable("session", {
-  id: text("id").primaryKey(),
-  expiresAt: integer("expiresAt", { mode: "timestamp" }).notNull(),
-  token: text("token").notNull().unique(),
-  createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
-  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull(),
-  ipAddress: text("ipAddress"),
-  userAgent: text("userAgent"),
-  userId: text("userId")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-});
-
-const account = sqliteTable("account", {
-  id: text("id").primaryKey(),
-  accountId: text("accountId").notNull(),
-  providerId: text("providerId").notNull(),
-  userId: text("userId")
-    .notNull()
-    .references(() => user.id, { onDelete: "cascade" }),
-  accessToken: text("accessToken"),
-  refreshToken: text("refreshToken"),
-  idToken: text("idToken"),
-  accessTokenExpiresAt: integer("accessTokenExpiresAt", { mode: "timestamp" }),
-  refreshTokenExpiresAt: integer("refreshTokenExpiresAt", { mode: "timestamp" }),
-  scope: text("scope"),
-  password: text("password"),
-  createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
-  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull(),
-});
-
-const verification = sqliteTable("verification", {
-  id: text("id").primaryKey(),
-  identifier: text("identifier").notNull(),
-  value: text("value").notNull(),
-  expiresAt: integer("expiresAt", { mode: "timestamp" }).notNull(),
-  createdAt: integer("createdAt", { mode: "timestamp" }),
-  updatedAt: integer("updatedAt", { mode: "timestamp" }),
-});
-
-const authSchema = { user, session, account, verification };
 const HOUR_MS = 60 * 60 * 1000;
 const DEFAULT_EXA_RESULTS = 5;
 const MIN_EXA_RESULTS = 3;
@@ -109,6 +53,7 @@ const BROWSER_RENDER_MAX_CHARS = 12_000;
 /** One retry on transient errors (session churn, goto aborts). */
 const BROWSER_RENDER_MAX_ATTEMPTS = 2;
 const BROWSER_RENDER_RETRY_BACKOFF_MS = 600;
+const SINGLE_USER_SYNC_ID = "default";
 const encoder = new TextEncoder();
 
 type ExaSearchResult = {
@@ -134,12 +79,17 @@ type InternalCommandResponse = {
   code?: string;
 };
 
+export type AccessSession = {
+  user: {
+    email: string;
+    name?: string;
+  };
+};
+
+const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+
 export function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
-}
-
-export function allowedEmail(env: AppEnv) {
-  return normalizeEmail(env.ALLOWED_EMAIL);
 }
 
 export function getDefaultModelId(env: Pick<AppEnv, "DEFAULT_MODEL_ID">) {
@@ -158,79 +108,53 @@ export function setRuntimeEnv(input: unknown) {
   return env;
 }
 
-export async function ensureAuthSchema(env: AppEnv) {
-  const db = drizzle(env.AUTH_DB);
-  const statements = [
-    sql`create table if not exists user (id text primary key, name text not null, email text not null unique, emailVerified integer not null default 0, image text, createdAt integer not null, updatedAt integer not null)`,
-    sql`create table if not exists session (id text primary key, expiresAt integer not null, token text not null unique, createdAt integer not null, updatedAt integer not null, ipAddress text, userAgent text, userId text not null references user(id) on delete cascade)`,
-    sql`create table if not exists account (id text primary key, accountId text not null, providerId text not null, userId text not null references user(id) on delete cascade, accessToken text, refreshToken text, idToken text, accessTokenExpiresAt integer, refreshTokenExpiresAt integer, scope text, password text, createdAt integer not null, updatedAt integer not null)`,
-    sql`create unique index if not exists account_provider_account_idx on account(providerId, accountId)`,
-    sql`create table if not exists verification (id text primary key, identifier text not null, value text not null, expiresAt integer not null, createdAt integer, updatedAt integer)`,
-    sql`create index if not exists verification_identifier_idx on verification(identifier)`,
-  ];
-  for (const statement of statements) await db.run(statement);
+function isLocalDevRequest(request: Request) {
+  const hostname = new URL(request.url).hostname;
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0";
 }
 
-export function createAuth(env: AppEnv) {
-  const db = drizzle(env.AUTH_DB);
-  return betterAuth({
-    secret: env.BETTER_AUTH_SECRET,
-    baseURL: env.BETTER_AUTH_URL,
-    database: drizzleAdapter(db, {
-      provider: "sqlite",
-      schema: authSchema,
-    }),
-    emailAndPassword: {
-      enabled: false,
-    },
-    socialProviders: {
-      google: {
-        clientId: env.GOOGLE_CLIENT_ID,
-        clientSecret: env.GOOGLE_CLIENT_SECRET,
-        prompt: "select_account",
-      },
-    },
-    databaseHooks: {
-      user: {
-        create: {
-          before: async (user: Record<string, unknown>) => {
-            const email = normalizeEmail(typeof user.email === "string" ? user.email : "");
-            if (email !== allowedEmail(env)) {
-              throw new Error("UNAUTHORIZED_EMAIL");
-            }
-            return {
-              data: {
-                ...user,
-                email,
-              },
-            };
-          },
-        },
-      },
-    } as any,
-    plugins: [
-      dash({
-        apiKey: env.BETTER_AUTH_API_KEY,
-      }),
-    ],
-    advanced: {
-      database: {
-        generateId: () => createId("usr"),
-      },
-      cookiePrefix: "b3",
-    },
-  });
+function getAccessToken(request: Request) {
+  const headerToken = request.headers.get("cf-access-jwt-assertion");
+  if (headerToken) return headerToken;
+  const cookie = request.headers.get("cookie") ?? "";
+  const match = cookie.match(/(?:^|;\s*)CF_Authorization=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
 }
 
-export async function getSession(request: Request, env: AppEnv) {
-  await ensureAuthSchema(env);
-  const auth = createAuth(env);
-  const session = await auth.api.getSession({
-    headers: request.headers,
-  });
-  if (!session?.user?.email) return null;
-  if (normalizeEmail(session.user.email) !== allowedEmail(env)) return null;
-  return session;
+function normalizeAccessTeamDomain(teamDomain: string) {
+  return teamDomain.replace(/\/+$/, "");
+}
+
+function getAccessJwks(teamDomain: string) {
+  const normalized = normalizeAccessTeamDomain(teamDomain);
+  let jwks = jwksCache.get(normalized);
+  if (!jwks) {
+    jwks = createRemoteJWKSet(new URL(`${normalized}/cdn-cgi/access/certs`));
+    jwksCache.set(normalized, jwks);
+  }
+  return jwks;
+}
+
+export async function getSession(request: Request, env: AppEnv): Promise<AccessSession | null> {
+  const token = getAccessToken(request);
+  if (!token) {
+    if (env.DEV_AUTH_EMAIL && isLocalDevRequest(request)) {
+      return { user: { email: normalizeEmail(env.DEV_AUTH_EMAIL), name: "Local Dev" } };
+    }
+    return null;
+  }
+
+  const teamDomain = normalizeAccessTeamDomain(env.CLOUDFLARE_ACCESS_TEAM_DOMAIN);
+  const { payload } = await jwtVerify(token, getAccessJwks(teamDomain), {
+    issuer: teamDomain,
+    audience: env.CLOUDFLARE_ACCESS_AUD,
+  }).catch(() => ({ payload: null }));
+  if (!payload) return null;
+  const email = typeof payload.email === "string" ? normalizeEmail(payload.email) : "";
+  if (!email) return null;
+  const name =
+    typeof payload.name === "string" && payload.name.trim() ? payload.name.trim() : undefined;
+  return { user: { email, ...(name ? { name } : {}) } };
 }
 
 export async function requireSession(request: Request, env: AppEnv) {
@@ -240,7 +164,7 @@ export async function requireSession(request: Request, env: AppEnv) {
 }
 
 export async function getSyncStub(env: AppEnv) {
-  return env.SYNC_ENGINE.get(env.SYNC_ENGINE.idFromName(allowedEmail(env)));
+  return env.SYNC_ENGINE.get(env.SYNC_ENGINE.idFromName(SINGLE_USER_SYNC_ID));
 }
 
 export async function sendInternalSyncCommand<T extends SyncCommandType>(
@@ -1106,7 +1030,7 @@ export async function getSignedAttachmentUrl(env: AppEnv, objectKey: string) {
     return cached.url;
   }
 
-  const url = new URL(`/api/uploads/blob/${encodeURIComponent(objectKey)}`, env.BETTER_AUTH_URL);
+  const url = new URL(`/api/uploads/blob/${encodeURIComponent(objectKey)}`, env.APP_PUBLIC_URL);
   const expiresAt = now + 10 * 60 * 1000;
   const token = await signUploadToken(env, {
     action: "read_attachment",
@@ -1138,7 +1062,7 @@ export async function signUploadToken(env: AppEnv, payload: Record<string, unkno
   const data = encoder.encode(JSON.stringify(payload));
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(env.BETTER_AUTH_SECRET),
+    encoder.encode(env.UPLOAD_TOKEN_SECRET),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
@@ -1154,7 +1078,7 @@ export async function verifyUploadToken(env: AppEnv, token: string) {
   const signatureBytes = Uint8Array.from(atob(signaturePart), (char) => char.charCodeAt(0));
   const keyMaterial = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(env.BETTER_AUTH_SECRET),
+    encoder.encode(env.UPLOAD_TOKEN_SECRET),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["verify"],

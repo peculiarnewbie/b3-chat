@@ -1,5 +1,4 @@
 import { setRuntimeEnv, type AppEnv } from "@b3-chat/server";
-import { handleAuth } from "./api/auth";
 import { handleSession } from "./api/session";
 import { handleModels } from "./api/models";
 import { handleSync } from "./api/sync";
@@ -33,14 +32,17 @@ export default {
     const url = new URL(request.url);
     const { pathname } = url;
     const method = request.method;
+    const appHost = new URL(env.APP_PUBLIC_URL).hostname;
+    const localHost =
+      url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "0.0.0.0";
+
+    if (!localHost && url.hostname !== appHost) {
+      return withVersionHeader(new Response("Not found", { status: 404 }));
+    }
 
     try {
       // API routing
       if (pathname.startsWith("/api/")) {
-        if (pathname.startsWith("/api/auth/")) {
-          return withVersionHeader(await handleAuth(request));
-        }
-
         if (pathname === "/api/session" && method === "GET")
           return withVersionHeader(await handleSession(request));
 

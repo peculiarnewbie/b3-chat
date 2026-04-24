@@ -13,12 +13,10 @@
   "dependencies": {
     "@b3-chat/domain": "workspace:*",
     "@b3-chat/effect": "workspace:*",
-    "@better-auth/infra": "catalog:",
     "@cloudflare/puppeteer": "^1.1.0",
     "@tanstack/ai": "0.10.2",
-    "better-auth": "^1.6.4",
-    "drizzle-orm": "^0.45.2",
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "jose": "catalog:"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260317.1",

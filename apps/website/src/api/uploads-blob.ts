@@ -14,7 +14,7 @@ export async function handleUploadBlobPut(request: Request): Promise<Response> {
   const env = getRuntimeEnv();
   return runApiTrace({
     scope: "upload-api",
-    name: "upload.complete",
+    name: "upload.put",
     kind: "io",
     env,
     attrs: {
@@ -22,12 +22,13 @@ export async function handleUploadBlobPut(request: Request): Promise<Response> {
       path: new URL(request.url).pathname,
     },
     run: async () => {
-      await requireSession(request, env);
       const url = new URL(request.url);
       const token = url.searchParams.get("token");
       if (!token) return new Response("Missing token", { status: 401 });
       const payload = await verifyUploadToken(env, token);
       if (!payload) return new Response("Invalid token", { status: 401 });
+      if (payload.action !== "upload_attachment")
+        return new Response("Invalid token action", { status: 401 });
       if (Number(payload.expiresAt ?? 0) < Date.now())
         return new Response("Expired token", { status: 401 });
 

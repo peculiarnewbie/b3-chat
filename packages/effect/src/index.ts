@@ -9,18 +9,16 @@ import { Cause, Context, Effect, Exit, Layer } from "effect";
 import * as Schema from "effect/Schema";
 
 export const AppEnvConfig = Schema.Struct({
-  ALLOWED_EMAIL: Schema.String,
-  BETTER_AUTH_SECRET: Schema.String,
-  BETTER_AUTH_URL: Schema.String,
-  BETTER_AUTH_API_KEY: Schema.String,
-  GOOGLE_CLIENT_ID: Schema.String,
-  GOOGLE_CLIENT_SECRET: Schema.String,
   OPENCODE_GO_BASE_URL: Schema.String,
   OPENCODE_GO_API_KEY: Schema.String,
   OPENCODE_GO_MODEL_ALLOWLIST: Schema.optional(Schema.String),
   DEFAULT_MODEL_ID: Schema.String,
+  APP_PUBLIC_URL: Schema.String,
+  UPLOAD_TOKEN_SECRET: Schema.String,
+  CLOUDFLARE_ACCESS_TEAM_DOMAIN: Schema.String,
+  CLOUDFLARE_ACCESS_AUD: Schema.String,
+  DEV_AUTH_EMAIL: Schema.optional(Schema.String),
   EXA_API_KEY: Schema.optional(Schema.String),
-  AUTH_DB: Schema.Any,
   UPLOADS: Schema.Any,
   SYNC_ENGINE: Schema.Any,
   /** Cloudflare Browser Rendering binding. Present when `browser` is wired

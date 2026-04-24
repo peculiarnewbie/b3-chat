@@ -11,6 +11,7 @@ catalog:
   dompurify: ^3.4.0
   effect: 4.0.0-beta.49
   highlight.js: ^11.11.1
+  jose: ^6.2.2
   marked: ^17.0.6
   marked-highlight: ^2.2.4
   typescript: ^5
