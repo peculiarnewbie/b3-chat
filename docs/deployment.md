@@ -11,7 +11,7 @@ vp exec wrangler login
 
 ## 2. Configure Cloudflare Resources
 
-The Worker config is `apps/website/wrangler.jsonc`. Make sure these bindings match resources in your Cloudflare account:
+The Worker config is `wrangler.jsonc`. Make sure these bindings match resources in your Cloudflare account:
 
 - `UPLOADS`: private R2 bucket used for attachments.
 - `SYNC_ENGINE`: Durable Object used for single-user sync state.
@@ -57,9 +57,9 @@ Do not make the R2 bucket public.
 Set the app and Access config:
 
 ```bash
-vp exec wrangler secret put UPLOAD_TOKEN_SECRET --config apps/website/wrangler.jsonc
-vp exec wrangler secret put CLOUDFLARE_ACCESS_TEAM_DOMAIN --config apps/website/wrangler.jsonc
-vp exec wrangler secret put CLOUDFLARE_ACCESS_AUD --config apps/website/wrangler.jsonc
+vp exec wrangler secret put UPLOAD_TOKEN_SECRET
+vp exec wrangler secret put CLOUDFLARE_ACCESS_TEAM_DOMAIN
+vp exec wrangler secret put CLOUDFLARE_ACCESS_AUD
 ```
 
 Use values like:
@@ -70,14 +70,14 @@ CLOUDFLARE_ACCESS_TEAM_DOMAIN=https://your-team.cloudflareaccess.com
 CLOUDFLARE_ACCESS_AUD=<Access application AUD tag>
 ```
 
-`APP_PUBLIC_URL` is configured as a plain Wrangler variable in `apps/website/wrangler.jsonc` because it is not a secret. Update it if you deploy to a different hostname.
+`APP_PUBLIC_URL` is configured as a plain Wrangler variable in `wrangler.jsonc` because it is not a secret. Update it if you deploy to a different hostname.
 
 Sync state uses a fixed single-user Durable Object key. New deployments do not need to configure an owner ID. Existing deployments that previously stored data under an email-based key will appear fresh unless that data is migrated to the fixed key.
 
 For local development only, you can set:
 
 ```bash
-vp exec wrangler secret put DEV_AUTH_EMAIL --config apps/website/wrangler.jsonc
+vp exec wrangler secret put DEV_AUTH_EMAIL
 ```
 
 `DEV_AUTH_EMAIL` only applies on localhost when no Cloudflare Access JWT is present.
@@ -87,10 +87,10 @@ vp exec wrangler secret put DEV_AUTH_EMAIL --config apps/website/wrangler.jsonc
 The chat model provider is OpenCode Go. The app uses it for the model catalog and assistant requests.
 
 ```bash
-vp exec wrangler secret put OPENCODE_GO_BASE_URL --config apps/website/wrangler.jsonc
-vp exec wrangler secret put OPENCODE_GO_API_KEY --config apps/website/wrangler.jsonc
-vp exec wrangler secret put DEFAULT_MODEL_ID --config apps/website/wrangler.jsonc
-vp exec wrangler secret put OPENCODE_GO_MODEL_ALLOWLIST --config apps/website/wrangler.jsonc
+vp exec wrangler secret put OPENCODE_GO_BASE_URL
+vp exec wrangler secret put OPENCODE_GO_API_KEY
+vp exec wrangler secret put DEFAULT_MODEL_ID
+vp exec wrangler secret put OPENCODE_GO_MODEL_ALLOWLIST
 ```
 
 Skip `OPENCODE_GO_MODEL_ALLOWLIST` if all models from the provider catalog should be visible.
@@ -100,7 +100,7 @@ Skip `OPENCODE_GO_MODEL_ALLOWLIST` if all models from the provider catalog shoul
 Search works without an Exa API key by using Exa's public MCP endpoint. To use the paid Exa API for structured search results, set `EXA_API_KEY`:
 
 ```bash
-vp exec wrangler secret put EXA_API_KEY --config apps/website/wrangler.jsonc
+vp exec wrangler secret put EXA_API_KEY
 ```
 
 Skip this secret if you want to use the free Exa MCP path.
@@ -113,4 +113,4 @@ Deploy from the repository root:
 vp run deploy
 ```
 
-The deploy script builds `apps/website` and runs `wrangler deploy` from that app directory.
+The deploy script runs `vp build` and `wrangler deploy` from the repository root.

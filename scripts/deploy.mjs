@@ -4,9 +4,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const websiteDir = path.resolve(scriptDir, "..");
-const repoDir = path.resolve(websiteDir, "../..");
-const pkg = JSON.parse(readFileSync(path.join(websiteDir, "package.json"), "utf8"));
+const repoDir = path.resolve(scriptDir, "..");
+const pkg = JSON.parse(readFileSync(path.join(repoDir, "package.json"), "utf8"));
 
 function gitCommit() {
   try {
@@ -43,5 +42,5 @@ const env = {
 };
 
 console.log(`[deploy] version ${meta.version}`);
-execSync("vp build", { cwd: websiteDir, stdio: "inherit", env });
-execSync("vp exec wrangler deploy", { cwd: websiteDir, stdio: "inherit", env });
+execSync("vp build", { cwd: repoDir, stdio: "inherit", env });
+execSync("vp exec wrangler deploy", { cwd: repoDir, stdio: "inherit", env });

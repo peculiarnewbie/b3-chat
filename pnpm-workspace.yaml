@@ -1,7 +1,5 @@
 packages:
-  - apps/*
   - packages/*
-  - tools/*
 
 catalog:
   "@better-auth/infra": ^0.1.14
