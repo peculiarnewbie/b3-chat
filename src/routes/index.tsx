@@ -2871,25 +2871,39 @@ export default function Home() {
       when={session()}
       fallback={
         <main class="auth-shell">
-          <section class="auth-card">
-            <p class="eyebrow">Personal deployment</p>
-            <h1>b3 chat</h1>
-            <p>Sign in to continue.</p>
-            <p class="app-version" title={BUILD_INFO.tooltip}>
-              {BUILD_INFO.label}
-            </p>
-            <a
-              class="btn btn-primary"
-              href="/api/auth/login"
-              onClick={(event) => {
-                event.preventDefault();
-                window.location.assign("/api/auth/login");
-              }}
-              style="text-align:center;text-decoration:none"
-            >
-              Sign in with Google
-            </a>
-          </section>
+          <Show
+            when={!session.loading}
+            fallback={
+              <section class="auth-card">
+                <p class="eyebrow">Personal deployment</p>
+                <h1>b3 chat</h1>
+                <p>Checking session...</p>
+                <p class="app-version" title={BUILD_INFO.tooltip}>
+                  {BUILD_INFO.label}
+                </p>
+              </section>
+            }
+          >
+            <section class="auth-card">
+              <p class="eyebrow">Personal deployment</p>
+              <h1>b3 chat</h1>
+              <p>Sign in to continue.</p>
+              <p class="app-version" title={BUILD_INFO.tooltip}>
+                {BUILD_INFO.label}
+              </p>
+              <a
+                class="btn btn-primary"
+                href="/api/auth/login"
+                onClick={(event) => {
+                  event.preventDefault();
+                  window.location.assign("/api/auth/login");
+                }}
+                style="text-align:center;text-decoration:none"
+              >
+                Sign in with Google
+              </a>
+            </section>
+          </Show>
         </main>
       }
     >

@@ -86,6 +86,11 @@ export type AccessSession = {
     email: string;
     name?: string;
   };
+  tokens?: {
+    access: string;
+    refresh: string;
+    expiresIn: number;
+  };
 };
 
 export function normalizeEmail(email: string) {
@@ -121,6 +126,7 @@ function getCookie(request: Request, name: string) {
 
 export async function getSession(request: Request, env: AppEnv): Promise<AccessSession | null> {
   const token = getCookie(request, "auth_access_token");
+  const refreshToken = getCookie(request, "auth_refresh_token");
   if (!token) {
     if (env.DEV_AUTH_EMAIL && isLocalDevRequest(request)) {
       return { user: { email: normalizeEmail(env.DEV_AUTH_EMAIL), name: "Local Dev" } };
@@ -132,15 +138,32 @@ export async function getSession(request: Request, env: AppEnv): Promise<AccessS
     const client = createClient({
       clientID: "b3-chat",
       issuer: env.APP_PUBLIC_URL,
+      fetch: async (input, init) => {
+        const requestUrl =
+          typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (requestUrl.startsWith(env.APP_PUBLIC_URL)) {
+          const { createAuthIssuer } = await import("./auth/issuer.js");
+          return createAuthIssuer(env).fetch(
+            new Request(input, init),
+            env as any,
+            {} as ExecutionContext,
+          );
+        }
+        return fetch(input, init);
+      },
     });
     const { subjects } = await import("./auth/subjects.js");
-    const verified = await client.verify(subjects, token);
+    const verified = await client.verify(
+      subjects,
+      token,
+      refreshToken ? { refresh: refreshToken } : undefined,
+    );
     if (verified.err) {
       console.warn("[auth] token verification failed", verified.err);
       return null;
     }
     const email = verified.subject.properties.email;
-    return { user: { email } };
+    return { user: { email }, tokens: verified.tokens };
   } catch (error) {
     console.error("[auth] verify error", error);
     return null;
