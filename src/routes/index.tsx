@@ -16,6 +16,7 @@ import { createStore } from "solid-js/store";
 import { useLiveQuery } from "@tanstack/solid-db";
 import { createId, nowIso, resolveThreadMessagePath } from "@b3-chat/domain";
 import type {
+  AccountSettings,
   Attachment,
   ExtractRun,
   Message,
@@ -36,6 +37,7 @@ import { ensureThemeFont } from "../lib/theme-fonts";
 import { isAllowedFile, isImageMime, uploadFile } from "../lib/upload";
 import {
   workspaces as workspacesCollection,
+  accountSettings as accountSettingsCollection,
   threads as threadsCollection,
   messages as messagesCollection,
   messageParts as messagePartsCollection,
@@ -52,6 +54,7 @@ import {
   archiveWorkspaceAction,
   updateThreadAction,
   updateWorkspaceAction,
+  updateAccountSettingsAction,
   cancelAssistantTurnAction,
   deleteAttachmentAction,
   editUserMessageAction,
@@ -392,13 +395,6 @@ function getInitialExpandReasoning(): boolean {
   return false;
 }
 
-function getInitialPreferFreeSearch(): boolean {
-  if (typeof localStorage !== "undefined") {
-    return localStorage.getItem("b3-prefer-free-search") === "1";
-  }
-  return false;
-}
-
 const fetchBootstrap = async () => {
   const response = await fetch("/api/bootstrap");
   if (!response.ok) {
@@ -448,6 +444,7 @@ export default function Home() {
 
   // Reactive collection data via TanStack DB live queries
   const allWorkspaces = useLiveQuery(() => workspacesCollection);
+  const allAccountSettings = useLiveQuery(() => accountSettingsCollection);
   const allThreads = useLiveQuery(() => threadsCollection);
   const allMessages = useLiveQuery(() => messagesCollection);
   const allMessageParts = useLiveQuery(() => messagePartsCollection);
@@ -460,9 +457,6 @@ export default function Home() {
   const [theme, setTheme] = createSignal<Theme>(getInitialTheme());
   const [expandReasoningByDefault, setExpandReasoningByDefault] = createSignal<boolean>(
     getInitialExpandReasoning(),
-  );
-  const [preferFreeSearch, setPreferFreeSearch] = createSignal<boolean>(
-    getInitialPreferFreeSearch(),
   );
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
   const [showTraces, setShowTraces] = createSignal(false);
@@ -538,6 +532,14 @@ export default function Home() {
   const activeWorkspace = createMemo(
     () => workspaces().find((workspace) => workspace.id === activeWorkspaceId()) ?? workspaces()[0],
   );
+  const accountSettings = createMemo(
+    () => (allAccountSettings() as AccountSettings[]).find((row) => row.id === "default") ?? null,
+  );
+  const effectiveExpandReasoningByDefault = createMemo(
+    () => accountSettings()?.expandReasoningByDefault ?? expandReasoningByDefault(),
+  );
+  const effectiveShowTraces = createMemo(() => accountSettings()?.showTraces ?? showTraces());
+  const effectivePreferFreeSearch = createMemo(() => activeWorkspace()?.preferFreeSearch ?? false);
   const threads = createMemo(() =>
     (allThreads() as Thread[])
       .filter((thread) => thread.workspaceId === activeWorkspace()?.id && !thread.archivedAt)
@@ -756,14 +758,6 @@ export default function Home() {
     document.documentElement.setAttribute("data-theme", theme());
     localStorage.setItem("b3-theme", theme());
     ensureThemeFont(theme());
-  });
-
-  createEffect(() => {
-    localStorage.setItem("b3-expand-reasoning", expandReasoningByDefault() ? "1" : "0");
-  });
-
-  createEffect(() => {
-    localStorage.setItem("b3-prefer-free-search", preferFreeSearch() ? "1" : "0");
   });
 
   // Auto-resize composer input
@@ -1328,7 +1322,7 @@ export default function Home() {
   const isReasoningCollapsed = (messageId: string, key: string, streaming: boolean) => {
     const explicit = collapsedChipByKey[chipCollapseKey(messageId, key)];
     if (explicit !== undefined) return explicit;
-    if (expandReasoningByDefault()) return false;
+    if (effectiveExpandReasoningByDefault()) return false;
     return !streaming;
   };
 
@@ -1404,7 +1398,7 @@ export default function Home() {
     (activitiesForMessage(message.id).length > 0 ||
       isWaitingForVisibleAnswer(message) ||
       thinkingTokens(message.id) != null ||
-      (showTraces() && traceRunsForMessage(message.id).length > 0));
+      (effectiveShowTraces() && traceRunsForMessage(message.id).length > 0));
   const hasAssistantStats = (message: Message) =>
     message.role === "assistant" &&
     (thinkingTokens(message.id) != null ||
@@ -1446,7 +1440,7 @@ export default function Home() {
     if (tokens != null) {
       parts.push(`${formatTokenCount(tokens)} thinking tokens`);
     }
-    if (showTraces() && traceRunsForMessage(message.id).length > 0) {
+    if (effectiveShowTraces() && traceRunsForMessage(message.id).length > 0) {
       parts.push(`trace ${traceRunsForMessage(message.id).length}`);
     }
     if (isWaitingForVisibleAnswer(message)) {
@@ -1475,7 +1469,7 @@ export default function Home() {
     setCollapsedTraceByMessage(messageId, !isTraceCollapsed(messageId));
   const traceRunsForMessage = (messageId: string) => traceRunsByMessage().get(messageId) ?? [];
   const openTraceMessageIdSet = createMemo(() => {
-    if (!showTraces()) return new Set<string>();
+    if (!effectiveShowTraces()) return new Set<string>();
 
     const openIds = new Set<string>();
     for (const messageId of messageIds()) {
@@ -2242,7 +2236,9 @@ export default function Home() {
                           </Show>
                         </div>
                       </Show>
-                      <Show when={showTraces() && traceRunsForMessage(message().id).length > 0}>
+                      <Show
+                        when={effectiveShowTraces() && traceRunsForMessage(message().id).length > 0}
+                      >
                         <div class="trace-shell">
                           <button
                             type="button"
@@ -2414,7 +2410,11 @@ export default function Home() {
                               <span>{thinkingLabel(message().id)}</span>
                             </div>
                           </Show>
-                          <Show when={showTraces() && traceRunsForMessage(message().id).length > 0}>
+                          <Show
+                            when={
+                              effectiveShowTraces() && traceRunsForMessage(message().id).length > 0
+                            }
+                          >
                             <div class="trace-shell">
                               <button
                                 type="button"
@@ -2635,7 +2635,10 @@ export default function Home() {
 
   const updateWorkspacePreferences = (
     changes: Partial<
-      Pick<Workspace, "defaultModelId" | "defaultReasoningLevel" | "defaultSearchMode">
+      Pick<
+        Workspace,
+        "defaultModelId" | "defaultReasoningLevel" | "defaultSearchMode" | "preferFreeSearch"
+      >
     >,
   ) => {
     const workspace = activeWorkspace();
@@ -2645,6 +2648,34 @@ export default function Home() {
       ...changes,
       updatedAt: nowIso(),
     });
+  };
+
+  const updateAccountSettings = (changes: Partial<AccountSettings>) => {
+    const settings = accountSettings();
+    if (!settings) return;
+    updateAccountSettingsAction({
+      ...settings,
+      ...changes,
+      updatedAt: nowIso(),
+    });
+  };
+
+  const handleExpandReasoningSettingChange = (checked: boolean) => {
+    setExpandReasoningByDefault(checked);
+    updateAccountSettings({ expandReasoningByDefault: checked });
+  };
+
+  const handleShowTracesSettingChange = (checked: boolean) => {
+    setShowTraces(checked);
+    updateAccountSettings({ showTraces: checked });
+  };
+
+  const handlePreferFreeSearchSettingChange = (checked: boolean) => {
+    updateWorkspacePreferences({ preferFreeSearch: checked });
+  };
+
+  const handleTitleGenerationModelChange = (modelId: string | null) => {
+    updateAccountSettings({ titleGenerationModelId: modelId });
   };
 
   const handleModelChange = (modelId: string) => {
@@ -2761,7 +2792,7 @@ export default function Home() {
       modelInterleavedField: modelInterleavedFieldFor(modelId),
       reasoningLevel: (msg.reasoningLevel ?? "off") as ReasoningLevel,
       search: Boolean(msg.searchEnabled),
-      preferFreeSearch: preferFreeSearch(),
+      preferFreeSearch: effectivePreferFreeSearch(),
       attachmentIds,
     });
   };
@@ -2778,7 +2809,7 @@ export default function Home() {
       modelInterleavedField: modelInterleavedFieldFor(modelId),
       reasoningLevel: effectiveComposerReasoningLevel(),
       search: composerSearch(),
-      preferFreeSearch: preferFreeSearch(),
+      preferFreeSearch: effectivePreferFreeSearch(),
     });
   };
 
@@ -2822,7 +2853,7 @@ export default function Home() {
         modelInterleavedField: modelInterleavedFieldFor(modelId),
         reasoningLevel: effectiveComposerReasoningLevel(),
         search: composerSearch(),
-        preferFreeSearch: preferFreeSearch(),
+        preferFreeSearch: effectivePreferFreeSearch(),
         attachmentIds,
       });
       for (const att of composerAttachments()) {
@@ -3146,12 +3177,15 @@ export default function Home() {
                   onBack={() => setSettingsOpen(false)}
                   onCancel={() => setSettingsOpen(false)}
                   onSave={saveSystemPrompt}
-                  expandReasoningByDefault={expandReasoningByDefault()}
-                  onExpandReasoningChange={setExpandReasoningByDefault}
-                  preferFreeSearch={preferFreeSearch()}
-                  onPreferFreeSearchChange={setPreferFreeSearch}
-                  showTraces={showTraces()}
-                  onShowTracesChange={setShowTraces}
+                  expandReasoningByDefault={effectiveExpandReasoningByDefault()}
+                  onExpandReasoningChange={handleExpandReasoningSettingChange}
+                  preferFreeSearch={effectivePreferFreeSearch()}
+                  onPreferFreeSearchChange={handlePreferFreeSearchSettingChange}
+                  showTraces={effectiveShowTraces()}
+                  onShowTracesChange={handleShowTracesSettingChange}
+                  models={models()?.models ?? []}
+                  titleGenerationModelId={accountSettings()?.titleGenerationModelId ?? null}
+                  onTitleGenerationModelChange={handleTitleGenerationModelChange}
                   onResetAllData={() => {
                     if (confirm("Delete ALL data? This cannot be undone.")) {
                       resetAllData();

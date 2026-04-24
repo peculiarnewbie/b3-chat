@@ -11,6 +11,7 @@ import * as pendingOps from "./pending-ops";
 import { ensureActiveSelection } from "./ui-state";
 import {
   workspaces,
+  accountSettings,
   threads,
   messages,
   messageParts,
@@ -41,6 +42,7 @@ function rowsById<T extends { id: string }>(rows: Iterable<T>) {
 function buildCachedSnapshotTables() {
   return {
     [TABLES.workspaces]: rowsById(workspaces.state.values() as Iterable<Workspace>),
+    [TABLES.accountSettings]: rowsById(accountSettings.state.values() as Iterable<any>),
     [TABLES.threads]: rowsById(threads.state.values() as Iterable<Thread>),
     [TABLES.messages]: rowsById(messages.state.values() as Iterable<Message>),
     [TABLES.messageParts]: rowsById(messageParts.state.values() as Iterable<any>),
@@ -88,6 +90,8 @@ function hasRow(collectionId: string, key: string) {
   switch (collectionId) {
     case "workspaces":
       return Boolean(workspaces.get(key));
+    case "accountSettings":
+      return Boolean(accountSettings.get(key));
     case "threads":
       return Boolean(threads.get(key));
     case "messages":
@@ -195,6 +199,11 @@ function applyEvent(eventType: string, payload: unknown) {
     case "workspace_upserted": {
       const event = payload as SyncEventPayloadMap["workspace_upserted"];
       syncUpsert("workspaces", event.row.id, event.row);
+      break;
+    }
+    case "account_settings_upserted": {
+      const event = payload as SyncEventPayloadMap["account_settings_upserted"];
+      syncUpsert("accountSettings", event.row.id, event.row);
       break;
     }
     case "workspace_archived": {

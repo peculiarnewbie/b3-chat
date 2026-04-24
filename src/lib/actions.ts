@@ -5,8 +5,8 @@ import {
   createThread,
   createWorkspace,
   nowIso,
-  summarizeThreadTitle,
   toWire,
+  type AccountSettings,
   type Attachment,
   type CancelAssistantTurnPayload,
   type CreateUserMessagePayload,
@@ -20,6 +20,7 @@ import {
 import { dispatch } from "./pending-ops";
 import {
   workspaces,
+  accountSettings,
   threads,
   attachments,
   applyLocalDelete,
@@ -211,6 +212,16 @@ export function updateWorkspaceAction(workspace: Workspace) {
   dispatch("update_workspace", { workspace: toWire(workspace, opId) }, { opId });
 }
 
+export function updateAccountSettingsAction(settings: AccountSettings) {
+  const opId = createId("op");
+  const existing = accountSettings.get(settings.id);
+  applyLocalUpdate("accountSettings", toLocalSyncRow(settings, opId));
+  if (existing) {
+    trackOptimistic(opId, [restoreRow("accountSettings", accountSettings, existing)]);
+  }
+  dispatch("update_account_settings", { settings: toWire(settings, opId) }, { opId });
+}
+
 export function sendMessageAction(input: {
   thread: Thread;
   text: string;
@@ -245,8 +256,7 @@ export function sendMessageAction(input: {
   });
   const threadUpdate: Thread = {
     ...input.thread,
-    title:
-      input.thread.title === "New Chat" ? summarizeThreadTitle(input.text) : input.thread.title,
+    title: input.thread.title,
     headMessageId: assistantMessage.id,
     modelId: input.modelId,
     reasoningLevel: input.reasoningLevel,

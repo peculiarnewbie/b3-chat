@@ -1,6 +1,7 @@
 import { createCollection, type ChangeMessageOrDeleteKeyMessage } from "@tanstack/db";
 import type {
   Workspace,
+  AccountSettings,
   Thread,
   Message,
   MessagePart,
@@ -27,6 +28,7 @@ export type SyncWriter<T extends object, TKey extends string | number = string> 
 
 export const COLLECTION_IDS = [
   "workspaces",
+  "accountSettings",
   "threads",
   "messages",
   "messageParts",
@@ -90,6 +92,10 @@ function createSyncedCollection<T extends object>(id: string, getKey: (item: T) 
 // ---------------------------------------------------------------------------
 
 export const workspaces = createSyncedCollection<Workspace>("workspaces", (w) => w.id);
+export const accountSettings = createSyncedCollection<AccountSettings>(
+  "accountSettings",
+  (settings) => settings.id,
+);
 export const threads = createSyncedCollection<Thread>("threads", (t) => t.id);
 export const messages = createSyncedCollection<Message>("messages", (m) => m.id);
 export const messageParts = createSyncedCollection<MessagePart>("messageParts", (mp) => mp.id);
@@ -126,6 +132,7 @@ export function resetCollections(collectionIds: readonly CollectionId[] = COLLEC
 // Map from server table names (used in SyncSnapshot) to collection ids
 export const TABLE_TO_COLLECTION: Record<string, string> = {
   workspaces: "workspaces",
+  account_settings: "accountSettings",
   threads: "threads",
   messages: "messages",
   message_parts: "messageParts",

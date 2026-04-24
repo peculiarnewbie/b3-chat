@@ -2093,21 +2093,31 @@ a {
   line-height: 1.4;
 }
 
-.settings-textarea {
+.settings-textarea,
+.settings-select {
   width: 100%;
-  min-height: 160px;
-  resize: vertical;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 10px 12px;
   background: var(--bg);
+  color: var(--text);
   font-size: 0.85rem;
-  line-height: 1.5;
   outline: none;
   transition: border-color 0.15s;
 }
 
-.settings-textarea:focus {
+.settings-textarea {
+  min-height: 160px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.settings-select {
+  appearance: none;
+}
+
+.settings-textarea:focus,
+.settings-select:focus {
   border-color: var(--accent);
 }
 

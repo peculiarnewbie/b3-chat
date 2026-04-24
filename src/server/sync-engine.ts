@@ -1,6 +1,7 @@
 import {
   SYNC_PROTOCOL_VERSION,
   TABLES,
+  createAccountSettings,
   createId,
   createMessagePart,
   createTraceRun,
@@ -8,6 +9,7 @@ import {
   createThread,
   createWorkspace,
   decodeAttachmentRow,
+  decodeAccountSettingsRow,
   decodeMessageRow,
   decodeThreadRow,
   decodeTraceRunRow,
@@ -15,7 +17,9 @@ import {
   decodeWorkspaceRow,
   mergeAttachmentLink,
   nowIso,
+  summarizeThreadTitle,
   type Attachment,
+  type AccountSettings,
   type CreateUserMessagePayload,
   type EditUserMessagePayload,
   type Message,
@@ -93,6 +97,14 @@ const syncLogger = createStructuredLogger("sync-do");
 
 function previewText(value: string, limit = 160) {
   return value.replace(/\s+/g, " ").trim().slice(0, limit);
+}
+
+function sanitizeGeneratedTitle(value: string) {
+  const cleaned = value
+    .replace(/^\s*["'`]+|["'`.!?:;\s]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.slice(0, 64).trim() || null;
 }
 
 function looksLikeMissingRealtimeAccess(text: string) {
@@ -319,6 +331,11 @@ export class SyncEngineDurableObject {
         updated_at TEXT NOT NULL,
         row_json TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS account_settings (
+        id TEXT PRIMARY KEY,
+        updated_at TEXT NOT NULL,
+        row_json TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS threads (
         id TEXT PRIMARY KEY,
         workspace_id TEXT NOT NULL,
@@ -500,13 +517,23 @@ export class SyncEngineDurableObject {
 
   private async ensureBootstrapped() {
     const existing = this.queryOne<{ count: number }>("SELECT count(*) as count FROM workspaces");
-    if (Number(existing?.count ?? 0) > 0) return;
-    await this.processCommand(
-      createId("bootstrap"),
-      "bootstrap_session",
-      { defaultModelId: getDefaultModelId(this.env) },
-      false,
-    );
+    if (Number(existing?.count ?? 0) === 0) {
+      await this.processCommand(
+        createId("bootstrap"),
+        "bootstrap_session",
+        { defaultModelId: getDefaultModelId(this.env) },
+        false,
+      );
+      return;
+    }
+
+    if (!this.getAccountSettings()) {
+      const settings = createAccountSettings({ id: "default" });
+      const event = await this.appendServerEvent(null, "account_settings_upserted", {
+        row: this.normalizeAccountSettings(settings, createId("srvop")),
+      });
+      this.broadcast(event);
+    }
   }
 
   private async processCommand<T extends SyncCommandType>(
@@ -536,6 +563,11 @@ export class SyncEngineDurableObject {
             "SELECT count(*) as count FROM workspaces",
           );
           if (Number(workspaces?.count ?? 0) === 0) {
+            const settings = {
+              ...createAccountSettings({ id: "default" }),
+              optimistic: false,
+              opId,
+            };
             const workspace = {
               ...createWorkspace({
                 name: "Default Workspace",
@@ -553,10 +585,20 @@ export class SyncEngineDurableObject {
               opId,
             };
             pendingEvents.push(
+              this.insertEvent(opId, "account_settings_upserted", { row: settings }),
               this.insertEvent(opId, "workspace_upserted", { row: workspace }),
               this.insertEvent(opId, "thread_upserted", { row: thread }),
             );
           }
+          break;
+        }
+        case "update_account_settings": {
+          const command = payload as SyncCommandPayloadMap["update_account_settings"];
+          pendingEvents.push(
+            this.insertEvent(opId, "account_settings_upserted", {
+              row: this.normalizeAccountSettings(command.settings, opId),
+            }),
+          );
           break;
         }
         case "create_workspace": {
@@ -653,12 +695,19 @@ export class SyncEngineDurableObject {
             }
           }
           followUp = () =>
-            this.runAssistantTurn({
-              ...command,
-              thread: normalizedThread,
-              userMessage,
-              assistantMessage,
-            });
+            Promise.allSettled([
+              this.generateThreadTitle({
+                threadId: normalizedThread.id,
+                promptText: command.promptText,
+                chatModelId: command.modelId,
+              }),
+              this.runAssistantTurn({
+                ...command,
+                thread: normalizedThread,
+                userMessage,
+                assistantMessage,
+              }),
+            ]).then(() => undefined);
           break;
         }
         case "retry_message": {
@@ -804,6 +853,7 @@ export class SyncEngineDurableObject {
           // Drop all data and reset to a fresh state
           syncLog("reset_storage", { opId });
           this.exec(`DELETE FROM workspaces`);
+          this.exec(`DELETE FROM account_settings`);
           this.exec(`DELETE FROM threads`);
           this.exec(`DELETE FROM messages`);
           this.exec(`DELETE FROM message_parts`);
@@ -839,7 +889,13 @@ export class SyncEngineDurableObject {
             optimistic: false,
             opId,
           };
+          const settings = {
+            ...createAccountSettings({ id: "default" }),
+            optimistic: false,
+            opId,
+          };
           pendingEvents.push(
+            this.insertEvent(opId, "account_settings_upserted", { row: settings }),
             this.insertEvent(opId, "workspace_upserted", { row: workspace }),
             this.insertEvent(opId, "thread_upserted", { row: thread }),
           );
@@ -1494,6 +1550,69 @@ export class SyncEngineDurableObject {
     return resolveThreadMessagePath([...byId.values()], thread.headMessageId ?? null);
   }
 
+  private async generateThreadTitle(input: {
+    threadId: string;
+    promptText: string;
+    chatModelId: string;
+  }) {
+    const thread = this.getThread(input.threadId);
+    if (!thread || thread.title !== "New Chat") return;
+    const settings = this.getAccountSettings();
+    const modelId =
+      settings?.titleGenerationModelId?.trim() || input.chatModelId || getDefaultModelId(this.env);
+    let title = summarizeThreadTitle(input.promptText);
+
+    try {
+      const response = await fetch(
+        `${this.env.OPENCODE_GO_BASE_URL.replace(/\/$/, "")}/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${this.env.OPENCODE_GO_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: modelId,
+            stream: false,
+            max_tokens: 24,
+            temperature: 0.2,
+            messages: [
+              {
+                role: "system",
+                content: [
+                  "Generate a concise chat thread title for the user's prompt.",
+                  "Rules: 3 to 7 words. No quotes. No trailing punctuation. Return only the title.",
+                ].join("\n"),
+              },
+              { role: "user", content: input.promptText.slice(0, 4000) },
+            ],
+          }),
+        },
+      );
+      if (response.ok) {
+        const data = (await response.json()) as any;
+        const generated = data?.choices?.[0]?.message?.content;
+        if (typeof generated === "string") {
+          title = sanitizeGeneratedTitle(generated) ?? title;
+        }
+      }
+    } catch (error) {
+      syncLog("title_generation_failed", {
+        threadId: input.threadId,
+        modelId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    const current = this.getThread(input.threadId);
+    if (!current || current.title !== "New Chat") return;
+    const updatedAt = nowIso();
+    const event = await this.appendServerEvent(null, "thread_upserted", {
+      row: this.normalizeThread({ ...current, title, updatedAt }, createId("srvop")),
+    });
+    this.broadcast(event);
+  }
+
   /**
    * Builds TanStack AI ModelMessage array from thread messages.
    * Resolves attachments (images → signed URLs, text → inline content).
@@ -1589,6 +1708,20 @@ export class SyncEngineDurableObject {
     return decodeWorkspaceRow({
       ...row,
       defaultReasoningLevel: row.defaultReasoningLevel ?? "off",
+      preferFreeSearch: row.preferFreeSearch ?? false,
+      optimistic: false,
+      opId,
+      updatedAt: row.updatedAt || nowIso(),
+    });
+  }
+
+  private normalizeAccountSettings(row: AccountSettings, opId: string) {
+    return decodeAccountSettingsRow({
+      ...row,
+      id: row.id || "default",
+      expandReasoningByDefault: row.expandReasoningByDefault ?? false,
+      showTraces: row.showTraces ?? false,
+      titleGenerationModelId: row.titleGenerationModelId ?? null,
       optimistic: false,
       opId,
       updatedAt: row.updatedAt || nowIso(),
@@ -1669,6 +1802,18 @@ export class SyncEngineDurableObject {
     payload: SyncEventPayloadMap[T],
   ) {
     switch (eventType) {
+      case "account_settings_upserted": {
+        const event = payload as SyncEventPayloadMap["account_settings_upserted"];
+        const row = event.row;
+        this.exec(
+          `INSERT OR REPLACE INTO account_settings (id, updated_at, row_json)
+           VALUES (?, ?, ?)`,
+          row.id,
+          row.updatedAt,
+          json(row),
+        );
+        break;
+      }
       case "workspace_upserted": {
         const event = payload as SyncEventPayloadMap["workspace_upserted"];
         const row = event.row;
@@ -1900,6 +2045,7 @@ export class SyncEngineDurableObject {
       const tables = snapshot.tables ?? {};
       for (const tableName of [
         "workspaces",
+        "account_settings",
         "threads",
         "messages",
         "message_parts",
@@ -1911,6 +2057,9 @@ export class SyncEngineDurableObject {
         "trace_spans",
       ]) {
         this.exec(`DELETE FROM ${tableName}`);
+      }
+      for (const row of Object.values<AccountSettings>(tables[TABLES.accountSettings] ?? {})) {
+        this.applyEventToMaterializedState("account_settings_upserted", { row });
       }
       for (const row of Object.values<Workspace>(tables[TABLES.workspaces] ?? {})) {
         this.applyEventToMaterializedState("workspace_upserted", { row });
@@ -2008,6 +2157,14 @@ export class SyncEngineDurableObject {
     return row ? parseJson<Workspace>(row.row_json) : null;
   }
 
+  private getAccountSettings() {
+    const row = this.queryOne<{ row_json: string }>(
+      `SELECT row_json FROM account_settings WHERE id = ?`,
+      "default",
+    );
+    return row ? parseJson<AccountSettings>(row.row_json) : null;
+  }
+
   private getThread(id: string) {
     const row = this.queryOne<{ row_json: string }>(
       `SELECT row_json FROM threads WHERE id = ?`,
@@ -2042,6 +2199,7 @@ export class SyncEngineDurableObject {
       serverSeq: this.getLastServerSeq(),
       tables: {
         [TABLES.workspaces]: this.readTable("workspaces"),
+        [TABLES.accountSettings]: this.readTable("account_settings"),
         [TABLES.threads]: this.readTable("threads"),
         [TABLES.messages]: this.readTable("messages"),
         [TABLES.messageParts]: this.readTable("message_parts"),
@@ -2095,6 +2253,7 @@ export class SyncEngineDurableObject {
     for (const tableName of [
       "events",
       "commands",
+      "account_settings",
       "workspaces",
       "threads",
       "messages",

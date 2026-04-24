@@ -245,7 +245,7 @@ describe("domain helpers", () => {
     );
 
     expect(workspaces.get(workspace.id)).toBeTruthy();
-    expect(persistedThread?.title).toBe("hello");
+    expect(persistedThread?.title).toBe("New Chat");
     expect(persistedThread?.headMessageId).toBeTruthy();
     expect(persistedThread?.modelId).toBe(workspace.defaultModelId);
     expect(persistedThread?.reasoningLevel).toBe("medium");
@@ -281,7 +281,7 @@ describe("domain helpers", () => {
       search: false,
     });
 
-    expect(threads.get(draftThread.id)?.title).toBe("draft hello");
+    expect(threads.get(draftThread.id)?.title).toBe("New Chat");
     expect(threads.get(draftThread.id)?.modelId).toBe(workspace.defaultModelId);
     expect(
       [...messages.state.values()].filter((message) => message.threadId === draftThread.id),

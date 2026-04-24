@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 export const TABLES = {
+  accountSettings: "account_settings",
   workspaces: "workspaces",
   threads: "threads",
   messages: "messages",
@@ -36,10 +37,21 @@ export const WorkspaceRow = Schema.Struct({
   defaultModelId: Schema.String,
   defaultReasoningLevel: ReasoningLevel,
   defaultSearchMode: Schema.Boolean,
+  preferFreeSearch: Schema.Boolean,
   createdAt: Schema.String,
   updatedAt: Schema.String,
   archivedAt: NullableString,
   sortKey: Schema.Number,
+  ...OptionalOptimisticRowFields,
+});
+
+export const AccountSettingsRow = Schema.Struct({
+  id: Schema.String,
+  expandReasoningByDefault: Schema.Boolean,
+  showTraces: Schema.Boolean,
+  titleGenerationModelId: NullableString,
+  createdAt: Schema.String,
+  updatedAt: Schema.String,
   ...OptionalOptimisticRowFields,
 });
 
@@ -227,6 +239,7 @@ export function toWire<T extends object>(
 }
 
 export const decodeWorkspaceRow = Schema.decodeUnknownSync(WorkspaceRow);
+export const decodeAccountSettingsRow = Schema.decodeUnknownSync(AccountSettingsRow);
 export const decodeThreadRow = Schema.decodeUnknownSync(ThreadRow);
 export const decodeMessageRow = Schema.decodeUnknownSync(MessageRow);
 export const decodeMessagePartRow = Schema.decodeUnknownSync(MessagePartRow);
@@ -238,6 +251,7 @@ export const decodeTraceRunRow = Schema.decodeUnknownSync(TraceRunRow);
 export const decodeTraceSpanRow = Schema.decodeUnknownSync(TraceSpanRow);
 
 export type Workspace = Schema.Schema.Type<typeof WorkspaceRow>;
+export type AccountSettings = Schema.Schema.Type<typeof AccountSettingsRow>;
 export type Thread = Schema.Schema.Type<typeof ThreadRow>;
 export type Message = Schema.Schema.Type<typeof MessageRow>;
 export type MessagePart = Schema.Schema.Type<typeof MessagePartRow>;
@@ -272,6 +286,10 @@ export type SyncSnapshot = {
 
 export type BootstrapSessionPayload = {
   defaultModelId: string;
+};
+
+export type UpdateAccountSettingsPayload = {
+  settings: AccountSettings;
 };
 
 export type CreateWorkspacePayload = {
@@ -380,6 +398,7 @@ export type ResetStoragePayload = Record<string, never>;
 
 export type SyncCommandPayloadMap = {
   bootstrap_session: BootstrapSessionPayload;
+  update_account_settings: UpdateAccountSettingsPayload;
   create_workspace: CreateWorkspacePayload;
   update_workspace: UpdateWorkspacePayload;
   archive_workspace: ArchiveWorkspacePayload;
@@ -433,6 +452,7 @@ export type SyncClientEnvelope =
   | SyncClientPing;
 
 export type SyncEventPayloadMap = {
+  account_settings_upserted: { row: AccountSettings };
   workspace_upserted: { row: Workspace };
   workspace_archived: { id: string; archivedAt: string; updatedAt: string };
   thread_upserted: { row: Thread };
@@ -568,6 +588,7 @@ export function createWorkspace(input: {
   systemPrompt?: string;
   defaultReasoningLevel?: ReasoningLevel;
   defaultSearchMode?: boolean;
+  preferFreeSearch?: boolean;
 }) {
   const now = nowIso();
   return decodeWorkspaceRow({
@@ -578,10 +599,28 @@ export function createWorkspace(input: {
     defaultModelId: input.defaultModelId,
     defaultReasoningLevel: input.defaultReasoningLevel ?? "off",
     defaultSearchMode: input.defaultSearchMode ?? false,
+    preferFreeSearch: input.preferFreeSearch ?? false,
     createdAt: now,
     updatedAt: now,
     archivedAt: null,
     sortKey: Date.now(),
+  });
+}
+
+export function createAccountSettings(input: {
+  id?: string;
+  expandReasoningByDefault?: boolean;
+  showTraces?: boolean;
+  titleGenerationModelId?: string | null;
+}) {
+  const now = nowIso();
+  return decodeAccountSettingsRow({
+    id: input.id ?? "default",
+    expandReasoningByDefault: input.expandReasoningByDefault ?? false,
+    showTraces: input.showTraces ?? false,
+    titleGenerationModelId: input.titleGenerationModelId ?? null,
+    createdAt: now,
+    updatedAt: now,
   });
 }
 

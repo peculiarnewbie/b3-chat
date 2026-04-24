@@ -12,6 +12,9 @@ type SettingsPageProps = {
   showTraces: boolean;
   onShowTracesChange: (checked: boolean) => void;
   onResetAllData: () => void;
+  models: Array<{ id: string; name: string }>;
+  titleGenerationModelId: string | null;
+  onTitleGenerationModelChange: (modelId: string | null) => void;
 };
 
 export default function SettingsPage(props: SettingsPageProps) {
@@ -26,6 +29,53 @@ export default function SettingsPage(props: SettingsPageProps) {
       </header>
       <div class="settings-body">
         <div class="settings-section">
+          <label class="settings-label">Account</label>
+          <p class="settings-hint">Preferences that apply across all workspaces.</p>
+          <label class="settings-label" for="title-generation-model">
+            Title generation model
+          </label>
+          <select
+            id="title-generation-model"
+            class="settings-select"
+            value={props.titleGenerationModelId ?? ""}
+            onChange={(e) => props.onTitleGenerationModelChange(e.currentTarget.value || null)}
+          >
+            <option value="">Use chat model</option>
+            {props.models.map((model) => (
+              <option value={model.id}>{model.name}</option>
+            ))}
+          </select>
+        </div>
+
+        <div class="settings-section">
+          <label class="settings-toggle">
+            <input
+              type="checkbox"
+              checked={props.expandReasoningByDefault}
+              onChange={(e) => props.onExpandReasoningChange(e.currentTarget.checked)}
+            />
+            <span class="settings-label">Expand reasoning by default</span>
+          </label>
+          <p class="settings-hint">
+            Keep the reasoning chip open after a response finishes, instead of auto-collapsing it.
+          </p>
+        </div>
+
+        <div class="settings-section">
+          <label class="settings-toggle">
+            <input
+              type="checkbox"
+              checked={props.showTraces}
+              onChange={(e) => props.onShowTracesChange(e.currentTarget.checked)}
+            />
+            <span class="settings-label">Show traces</span>
+          </label>
+          <p class="settings-hint">Show detailed trace drawers under assistant responses.</p>
+        </div>
+
+        <div class="settings-section">
+          <label class="settings-label">Workspace</label>
+          <p class="settings-hint">Preferences for this workspace only.</p>
           <label class="settings-label">System Prompt</label>
           <p class="settings-hint">
             Instructions prepended to every conversation in this workspace.
@@ -51,20 +101,6 @@ export default function SettingsPage(props: SettingsPageProps) {
           <label class="settings-toggle">
             <input
               type="checkbox"
-              checked={props.expandReasoningByDefault}
-              onChange={(e) => props.onExpandReasoningChange(e.currentTarget.checked)}
-            />
-            <span class="settings-label">Expand reasoning by default</span>
-          </label>
-          <p class="settings-hint">
-            Keep the reasoning chip open after a response finishes, instead of auto-collapsing it.
-          </p>
-        </div>
-
-        <div class="settings-section">
-          <label class="settings-toggle">
-            <input
-              type="checkbox"
               checked={props.preferFreeSearch}
               onChange={(e) => props.onPreferFreeSearchChange(e.currentTarget.checked)}
             />
@@ -75,18 +111,6 @@ export default function SettingsPage(props: SettingsPageProps) {
             Slower and returns raw text instead of ranked results, but avoids usage on your Exa API
             key.
           </p>
-        </div>
-
-        <div class="settings-section">
-          <label class="settings-toggle">
-            <input
-              type="checkbox"
-              checked={props.showTraces}
-              onChange={(e) => props.onShowTracesChange(e.currentTarget.checked)}
-            />
-            <span class="settings-label">Show traces</span>
-          </label>
-          <p class="settings-hint">Show detailed trace drawers under assistant responses.</p>
         </div>
 
         <div class="settings-section settings-danger">
