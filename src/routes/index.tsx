@@ -378,12 +378,10 @@ function buildTraceCopyText(trace: {
   );
 }
 
-const THEMES: { id: Theme; label: string }[] = [{ id: "night", label: "Night" }];
-
 function getInitialTheme(): Theme {
   if (typeof localStorage !== "undefined") {
     const saved = localStorage.getItem("b3-theme") as Theme | null;
-    if (saved && THEMES.some((t) => t.id === saved)) return saved;
+    if (saved === "night") return saved;
   }
   return "night";
 }
@@ -454,11 +452,12 @@ export default function Home() {
   const allExtractRuns = useLiveQuery(() => extractRunsCollection);
   const allTraceRuns = useLiveQuery(() => traceRunsCollection);
   const allTraceSpans = useLiveQuery(() => traceSpansCollection);
-  const [theme, setTheme] = createSignal<Theme>(getInitialTheme());
+  const [theme] = createSignal<Theme>(getInitialTheme());
   const [expandReasoningByDefault, setExpandReasoningByDefault] = createSignal<boolean>(
     getInitialExpandReasoning(),
   );
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
+  const [threadFilter, setThreadFilter] = createSignal("");
   const [showTraces, setShowTraces] = createSignal(false);
   const [headerVisible, setHeaderVisible] = createSignal(true);
   const [collapsedProgressByMessage, setCollapsedProgressByMessage] = createStore<
@@ -545,6 +544,11 @@ export default function Home() {
       .filter((thread) => thread.workspaceId === activeWorkspace()?.id && !thread.archivedAt)
       .sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt)),
   );
+  const filteredThreads = createMemo(() => {
+    const query = threadFilter().trim().toLowerCase();
+    if (!query) return threads();
+    return threads().filter((thread) => thread.title.toLowerCase().includes(query));
+  });
   const activeThread = createMemo(
     () => threads().find((thread) => thread.id === activeThreadId()) ?? threads()[0],
   );
@@ -3065,89 +3069,101 @@ export default function Home() {
               )}
             </For>
 
-            <For each={groupThreadsByDate(threads())}>
-              {(group) => (
-                <>
-                  <p class="section-label">{group.label}</p>
-                  <For each={group.threads}>
-                    {(thread) => (
-                      <div
-                        classList={{
-                          "nav-item": true,
-                          active: !isDraftViewActive() && thread.id === activeThread()?.id,
-                        }}
-                        onClick={() => {
-                          if (editingThreadId() === thread.id) return;
-                          activateWorkspaceThreadView(thread.workspaceId);
-                          setActiveThreadId(thread.id);
-                          setSidebarOpen(false);
-                        }}
-                      >
-                        <Show
-                          when={editingThreadId() === thread.id}
-                          fallback={
-                            <div class="nav-item-row">
-                              <Show when={busyThreadIds().has(thread.id)}>
-                                <span class="thread-spinner" />
-                              </Show>
-                              <strong>{thread.title}</strong>
-                              <div class="nav-item-actions">
-                                <span
-                                  class="action-btn"
-                                  title="Rename thread"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    startEditingThread(thread.id, thread.title);
-                                  }}
-                                >
-                                  ✎
-                                </span>
-                                <span
-                                  class="action-btn action-btn-danger"
-                                  title="Delete thread"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    void deleteThread(thread.id);
-                                  }}
-                                >
-                                  ×
-                                </span>
-                              </div>
-                            </div>
-                          }
+            <div class="sidebar-section-divider" />
+
+            <div class="thread-filter-wrap">
+              <input
+                class="thread-filter"
+                type="search"
+                placeholder="Search threads"
+                value={threadFilter()}
+                onInput={(e) => setThreadFilter(e.currentTarget.value)}
+              />
+            </div>
+
+            <Show
+              when={filteredThreads().length > 0}
+              fallback={
+                <Show when={threadFilter().trim()}>
+                  <div class="sidebar-empty">No matching threads</div>
+                </Show>
+              }
+            >
+              <For each={groupThreadsByDate(filteredThreads())}>
+                {(group) => (
+                  <>
+                    <p class="section-label">{group.label}</p>
+                    <For each={group.threads}>
+                      {(thread) => (
+                        <div
+                          classList={{
+                            "nav-item": true,
+                            active: !isDraftViewActive() && thread.id === activeThread()?.id,
+                          }}
+                          onClick={() => {
+                            if (editingThreadId() === thread.id) return;
+                            activateWorkspaceThreadView(thread.workspaceId);
+                            setActiveThreadId(thread.id);
+                            setSettingsOpen(false);
+                            setSidebarOpen(false);
+                          }}
                         >
-                          <input
-                            class="inline-edit"
-                            value={editValue()}
-                            onInput={(e) => setEditValue(e.currentTarget.value)}
-                            onBlur={() => commitThreadRename(thread.id)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") commitThreadRename(thread.id);
-                              if (e.key === "Escape") setEditingThreadId(null);
-                            }}
-                            ref={(el) => requestAnimationFrame(() => el.focus())}
-                          />
-                        </Show>
-                      </div>
-                    )}
-                  </For>
-                </>
-              )}
-            </For>
+                          <Show
+                            when={editingThreadId() === thread.id}
+                            fallback={
+                              <div class="nav-item-row">
+                                <Show when={busyThreadIds().has(thread.id)}>
+                                  <span class="thread-spinner" />
+                                </Show>
+                                <strong>{thread.title}</strong>
+                                <div class="nav-item-actions">
+                                  <span
+                                    class="action-btn"
+                                    title="Rename thread"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      startEditingThread(thread.id, thread.title);
+                                    }}
+                                  >
+                                    ✎
+                                  </span>
+                                  <span
+                                    class="action-btn action-btn-danger"
+                                    title="Delete thread"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void deleteThread(thread.id);
+                                    }}
+                                  >
+                                    ×
+                                  </span>
+                                </div>
+                              </div>
+                            }
+                          >
+                            <input
+                              class="inline-edit"
+                              value={editValue()}
+                              onInput={(e) => setEditValue(e.currentTarget.value)}
+                              onBlur={() => commitThreadRename(thread.id)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") commitThreadRename(thread.id);
+                                if (e.key === "Escape") setEditingThreadId(null);
+                              }}
+                              ref={(el) => requestAnimationFrame(() => el.focus())}
+                            />
+                          </Show>
+                        </div>
+                      )}
+                    </For>
+                  </>
+                )}
+              </For>
+            </Show>
           </div>
 
           <div class="sidebar-footer">
             <div class="sidebar-footer-controls">
-              <For each={THEMES}>
-                {(t) => (
-                  <button
-                    classList={{ "theme-btn": true, active: theme() === t.id }}
-                    onClick={() => setTheme(t.id)}
-                  >
-                    {t.label}
-                  </button>
-                )}
-              </For>
               <button
                 classList={{ "theme-btn": true, active: settingsOpen() }}
                 onClick={() => {
@@ -3156,7 +3172,7 @@ export default function Home() {
                 }}
                 title="Settings"
               >
-                ⚙
+                Settings
               </button>
             </div>
             <div class="sidebar-version" title={BUILD_INFO.tooltip}>

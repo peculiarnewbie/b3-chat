@@ -194,6 +194,43 @@ a {
   padding-top: 4px;
 }
 
+.sidebar-section-divider {
+  height: 1px;
+  margin: 8px -8px 4px;
+  background: var(--line);
+}
+
+.thread-filter-wrap {
+  padding: 4px 0 6px;
+}
+
+.thread-filter {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  outline: none;
+  padding: 7px 8px;
+}
+
+.thread-filter:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.thread-filter::placeholder {
+  color: var(--text-secondary);
+}
+
+.sidebar-empty {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  padding: 8px;
+}
+
 .nav-item {
   display: flex;
   flex-direction: column;
@@ -1746,7 +1783,12 @@ a {
   flex-shrink: 0;
 }
 
-.composer-action-btn:hover,
+.composer-action-btn:hover:not(.is-active) {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  color: color-mix(in srgb, var(--accent) 72%, var(--text-secondary));
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
+}
+
 .composer-send-btn:hover {
   background: var(--accent-soft);
   color: var(--accent);
