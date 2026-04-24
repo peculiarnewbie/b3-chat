@@ -16,6 +16,7 @@ The Worker config is `wrangler.jsonc`. Make sure these bindings match resources 
 - `UPLOADS`: private R2 bucket used for attachments.
 - `SYNC_ENGINE`: Durable Object used for single-user sync state.
 - `BROWSER`: Cloudflare Browser Rendering binding used by extraction tools.
+- `OPENAUTH_STORAGE`: KV namespace used by OpenAuth for tokens and state.
 - `routes`: custom domain route for the deployed app.
 
 Create the private R2 bucket if needed:
@@ -24,55 +25,46 @@ Create the private R2 bucket if needed:
 vp exec wrangler r2 bucket create b3-chat-uploads
 ```
 
-## 3. Configure Cloudflare Access
+Create the KV namespace for OpenAuth:
 
-This app relies on Cloudflare Access for authentication and owner allowlisting. The app no longer manages Google OAuth, app-owned auth sessions, or auth database tables.
-
-1. In Cloudflare One, go to **Access controls** > **Applications**.
-2. Add a **Self-hosted** application.
-3. Set the public hostname to your Worker custom domain, for example `chat.example.com`.
-4. Add an Allow policy for the single owner, such as one email address, one domain, or one IdP group.
-5. Select the identity provider you want to use.
-6. Copy the application **AUD tag** from the Access application settings.
-7. Note your Access team domain, for example `https://your-team.cloudflareaccess.com`.
-
-Access is deny-by-default. Unauthorized users should be blocked by Cloudflare before requests reach the Worker.
-
-## 4. Configure Attachment Blob Access
-
-The R2 bucket stays private, but image attachments are passed to the model as short-lived signed URLs. The model fetcher will not have your browser's Cloudflare Access session, so the blob route must be reachable without interactive Access login.
-
-Configure Cloudflare Access so this path is bypassed or excluded from the main application enforcement:
-
-```text
-/api/uploads/blob/*
+```bash
+vp exec wrangler kv namespace create "OPENAUTH_STORAGE"
 ```
 
-The Worker still verifies every blob upload/read using a short-lived HMAC token. Requests without a valid token return `401`, except browser reads can also use an existing Access session when Cloudflare forwards the Access cookie/header.
+Copy the KV namespace ID into `wrangler.jsonc` under `kv_namespaces`.
 
-Do not make the R2 bucket public.
+## 3. Configure Google OAuth
 
-## 5. Configure Worker Secrets
+The app uses OpenAuth with Google OIDC for authentication. You only need a Google OAuth client ID (no client secret required).
 
-Set the app and Access config:
+1. Go to [Google Cloud Console](https://console.cloud.google.com/) > **APIs & Services** > **Credentials**.
+2. Click **Create Credentials** > **OAuth client ID**.
+3. Choose **Web application**.
+4. Add your deployed origin to **Authorized JavaScript origins**, e.g. `https://chat.example.com`.
+5. Add the callback URL to **Authorized redirect URIs**: `https://chat.example.com/google/callback`.
+6. Copy the **Client ID** and set it as the `GOOGLE_CLIENT_ID` variable in `wrangler.jsonc`.
+
+Optionally set `OWNER_EMAIL` to restrict logins to a single Google account. If someone tries to sign in with a different account, they are redirected to `/forbidden`.
+
+## 4. Configure Worker Secrets
+
+Set the app secrets:
 
 ```bash
 vp exec wrangler secret put UPLOAD_TOKEN_SECRET
-vp exec wrangler secret put CLOUDFLARE_ACCESS_TEAM_DOMAIN
-vp exec wrangler secret put CLOUDFLARE_ACCESS_AUD
+vp exec wrangler secret put OPENCODE_GO_BASE_URL
+vp exec wrangler secret put OPENCODE_GO_API_KEY
 ```
 
 Use values like:
 
 ```text
 UPLOAD_TOKEN_SECRET=<openssl rand -hex 32>
-CLOUDFLARE_ACCESS_TEAM_DOMAIN=https://your-team.cloudflareaccess.com
-CLOUDFLARE_ACCESS_AUD=<Access application AUD tag>
+OPENCODE_GO_BASE_URL=https://api.opencode.example.com
+OPENCODE_GO_API_KEY=...
 ```
 
-`APP_PUBLIC_URL` is configured as a plain Wrangler variable in `wrangler.jsonc` because it is not a secret. Update it if you deploy to a different hostname.
-
-Sync state uses a fixed single-user Durable Object key. New deployments do not need to configure an owner ID. Existing deployments that previously stored data under an email-based key will appear fresh unless that data is migrated to the fixed key.
+`APP_PUBLIC_URL` and `GOOGLE_CLIENT_ID` are configured as plain Wrangler variables in `wrangler.jsonc` because they are not secrets. Update `APP_PUBLIC_URL` if you deploy to a different hostname.
 
 For local development only, you can set:
 
@@ -80,22 +72,20 @@ For local development only, you can set:
 vp exec wrangler secret put DEV_AUTH_EMAIL
 ```
 
-`DEV_AUTH_EMAIL` only applies on localhost when no Cloudflare Access JWT is present.
+`DEV_AUTH_EMAIL` only applies on localhost when no auth cookie is present.
 
-## 6. Configure OpenCode Go
+## 5. Configure OpenCode Go
 
 The chat model provider is OpenCode Go. The app uses it for the model catalog and assistant requests.
 
 ```bash
-vp exec wrangler secret put OPENCODE_GO_BASE_URL
-vp exec wrangler secret put OPENCODE_GO_API_KEY
 vp exec wrangler secret put DEFAULT_MODEL_ID
 vp exec wrangler secret put OPENCODE_GO_MODEL_ALLOWLIST
 ```
 
 Skip `OPENCODE_GO_MODEL_ALLOWLIST` if all models from the provider catalog should be visible.
 
-## 7. Configure Exa Search
+## 6. Configure Exa Search
 
 Search works without an Exa API key by using Exa's public MCP endpoint. To use the paid Exa API for structured search results, set `EXA_API_KEY`:
 
@@ -105,7 +95,7 @@ vp exec wrangler secret put EXA_API_KEY
 
 Skip this secret if you want to use the free Exa MCP path.
 
-## 8. Deploy
+## 7. Deploy
 
 Deploy from the repository root:
 

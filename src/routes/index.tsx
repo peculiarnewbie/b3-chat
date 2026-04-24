@@ -2788,14 +2788,14 @@ export default function Home() {
     const thread = selectedConversationThread();
     if (!thread || !msg.text?.trim() || isSelectedThreadBusy()) return;
     const modelId =
-      msg.modelId || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto";
+      composerModelId() || activeWorkspace()?.defaultModelId || models()?.models?.[0]?.id || "auto";
     retryMessageAction({
       thread,
       userMessage: msg,
       modelId,
       modelInterleavedField: modelInterleavedFieldFor(modelId),
-      reasoningLevel: (msg.reasoningLevel ?? "off") as ReasoningLevel,
-      search: Boolean(msg.searchEnabled),
+      reasoningLevel: effectiveComposerReasoningLevel(),
+      search: composerSearch(),
       preferFreeSearch: preferFreeSearch(),
     });
   };
@@ -2874,11 +2874,17 @@ export default function Home() {
           <section class="auth-card">
             <p class="eyebrow">Personal deployment</p>
             <h1>b3 chat</h1>
-            <p>Cloudflare Access session required.</p>
+            <p>Sign in to continue.</p>
             <p class="app-version" title={BUILD_INFO.tooltip}>
               {BUILD_INFO.label}
             </p>
-            <p>Refresh after signing in through your protected app domain.</p>
+            <a
+              class="btn btn-primary"
+              href="/api/auth/login"
+              style="text-align:center;text-decoration:none"
+            >
+              Sign in with Google
+            </a>
           </section>
         </main>
       }

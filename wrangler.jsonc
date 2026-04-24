@@ -20,12 +20,17 @@
   "vars": {
     "APP_PUBLIC_URL": "https://chat.peculiarnewbie.com",
     "DEFAULT_MODEL_ID": "auto",
-    "CLOUDFLARE_ACCESS_TEAM_DOMAIN": "https://peculiarnewbie.cloudflareaccess.com",
-    "CLOUDFLARE_ACCESS_AUD": "5bfb32b97057c0116f9bbf402f6793f68404039c38268fb52acbd78046b054d0",
+    "GOOGLE_CLIENT_ID": "<your-google-client-id.apps.googleusercontent.com>",
   },
   "secrets": {
     "required": ["OPENCODE_GO_BASE_URL", "OPENCODE_GO_API_KEY", "UPLOAD_TOKEN_SECRET"],
   },
+  "kv_namespaces": [
+    {
+      "binding": "OPENAUTH_STORAGE",
+      "id": "<your-kv-namespace-id>",
+    },
+  ],
   "observability": {
     "enabled": true,
   },

@@ -1,4 +1,5 @@
-import { setRuntimeEnv, type AppEnv } from "@b3-chat/server";
+import { setRuntimeEnv, type AppEnv, createAuthIssuer } from "@b3-chat/server";
+import { createClient } from "@openauthjs/openauth/client";
 import { handleSession } from "./api/session";
 import { handleModels } from "./api/models";
 import { handleSync } from "./api/sync";
@@ -14,19 +15,34 @@ type Env = AppEnv & {
   ASSETS: { fetch(request: Request): Promise<Response> };
 };
 
+function serializeCookie(
+  name: string,
+  value: string,
+  opts: {
+    maxAge?: number;
+    path?: string;
+    secure?: boolean;
+    httpOnly?: boolean;
+    sameSite?: string;
+  } = {},
+) {
+  let cookie = `${encodeURIComponent(name)}=${encodeURIComponent(value)}`;
+  if (opts.maxAge !== undefined) cookie += `; Max-Age=${opts.maxAge}`;
+  cookie += `; Path=${opts.path ?? "/"}`;
+  if (opts.secure !== false) cookie += `; Secure`;
+  if (opts.httpOnly !== false) cookie += `; HttpOnly`;
+  cookie += `; SameSite=${opts.sameSite ?? "Lax"}`;
+  return cookie;
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     setRuntimeEnv(env);
 
     const withVersionHeader = (response: Response) => {
-      const headers = new Headers(response.headers);
-      headers.set("x-b3-version", BUILD_INFO.version);
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers,
-        webSocket: (response as any).webSocket,
-      });
+      const wrapped = new Response(response.body, response);
+      wrapped.headers.set("x-b3-version", BUILD_INFO.version);
+      return wrapped;
     };
 
     const url = new URL(request.url);
@@ -41,8 +57,73 @@ export default {
     }
 
     try {
+      // OpenAuth expects to be mounted at the issuer root.
+      if (
+        pathname === "/authorize" ||
+        pathname === "/token" ||
+        pathname === "/.well-known/oauth-authorization-server" ||
+        pathname === "/.well-known/jwks.json" ||
+        pathname.startsWith("/google/")
+      ) {
+        const authIssuer = createAuthIssuer(env);
+        return withVersionHeader(await authIssuer.fetch(request, env, ctx));
+      }
+
       // API routing
       if (pathname.startsWith("/api/")) {
+        if (pathname === "/api/auth/login" && method === "GET") {
+          const client = createClient({
+            clientID: "b3-chat",
+            issuer: env.APP_PUBLIC_URL,
+          });
+          const { url: authUrl } = await client.authorize(
+            `${env.APP_PUBLIC_URL}/api/auth/callback`,
+            "code",
+            { provider: "google" },
+          );
+          return withVersionHeader(Response.redirect(authUrl, 302));
+        }
+
+        if (pathname === "/api/auth/callback" && method === "GET") {
+          const code = url.searchParams.get("code");
+          if (!code) {
+            return withVersionHeader(new Response("Missing code", { status: 400 }));
+          }
+          const client = createClient({
+            clientID: "b3-chat",
+            issuer: env.APP_PUBLIC_URL,
+          });
+          const exchanged = await client.exchange(code, `${env.APP_PUBLIC_URL}/api/auth/callback`);
+          if (exchanged.err) {
+            return withVersionHeader(
+              new Response(`Authentication failed: ${exchanged.err}`, { status: 400 }),
+            );
+          }
+          const headers = new Headers();
+          headers.append(
+            "Set-Cookie",
+            serializeCookie("auth_access_token", exchanged.tokens.access, {
+              maxAge: exchanged.tokens.expiresIn,
+            }),
+          );
+          headers.append(
+            "Set-Cookie",
+            serializeCookie("auth_refresh_token", exchanged.tokens.refresh, {
+              maxAge: 60 * 60 * 24 * 365,
+            }),
+          );
+          headers.set("Location", "/");
+          return withVersionHeader(new Response(null, { status: 302, headers }));
+        }
+
+        if (pathname === "/api/auth/logout" && method === "POST") {
+          const headers = new Headers();
+          headers.append("Set-Cookie", serializeCookie("auth_access_token", "", { maxAge: 0 }));
+          headers.append("Set-Cookie", serializeCookie("auth_refresh_token", "", { maxAge: 0 }));
+          headers.set("Location", "/");
+          return withVersionHeader(new Response(null, { status: 302, headers }));
+        }
+
         if (pathname === "/api/session" && method === "GET")
           return withVersionHeader(await handleSession(request));
 

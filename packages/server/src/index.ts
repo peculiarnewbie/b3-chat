@@ -11,7 +11,7 @@ export {
 } from "./chat-completions-adapter.js";
 export { chat } from "@tanstack/ai";
 import { decodeAppEnv, type AppEnv } from "@b3-chat/effect";
-import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
+import { createClient } from "@openauthjs/openauth/client";
 import {
   createId,
   type SyncCommandPayloadMap,
@@ -20,6 +20,8 @@ import {
 } from "@b3-chat/domain";
 
 export type { AppEnv } from "@b3-chat/effect";
+export { subjects } from "./auth/subjects.js";
+export { createAuthIssuer } from "./auth/issuer.js";
 
 declare global {
   // Worker entry sets bindings here per request for getRuntimeEnv().
@@ -86,8 +88,6 @@ export type AccessSession = {
   };
 };
 
-const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
-
 export function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
 }
@@ -113,69 +113,36 @@ function isLocalDevRequest(request: Request) {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "0.0.0.0";
 }
 
-function getAccessToken(request: Request) {
-  const headerToken = request.headers.get("cf-access-jwt-assertion");
-  if (headerToken) return headerToken;
+function getCookie(request: Request, name: string) {
   const cookie = request.headers.get("cookie") ?? "";
-  const match = cookie.match(/(?:^|;\s*)CF_Authorization=([^;]+)/);
+  const match = cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-function normalizeAccessTeamDomain(teamDomain: string) {
-  return teamDomain.replace(/\/+$/, "");
-}
-
-function getAccessJwks(teamDomain: string) {
-  const normalized = normalizeAccessTeamDomain(teamDomain);
-  let jwks = jwksCache.get(normalized);
-  if (!jwks) {
-    jwks = createRemoteJWKSet(new URL(`${normalized}/cdn-cgi/access/certs`));
-    jwksCache.set(normalized, jwks);
-  }
-  return jwks;
-}
-
 export async function getSession(request: Request, env: AppEnv): Promise<AccessSession | null> {
-  const token = getAccessToken(request);
+  const token = getCookie(request, "auth_access_token");
   if (!token) {
     if (env.DEV_AUTH_EMAIL && isLocalDevRequest(request)) {
       return { user: { email: normalizeEmail(env.DEV_AUTH_EMAIL), name: "Local Dev" } };
     }
-    console.warn("[access] no CF_Authorization cookie or cf-access-jwt-assertion header");
     return null;
   }
 
-  const teamDomain = normalizeAccessTeamDomain(env.CLOUDFLARE_ACCESS_TEAM_DOMAIN);
   try {
-    const { payload } = await jwtVerify(token, getAccessJwks(teamDomain), {
-      issuer: teamDomain,
-      audience: env.CLOUDFLARE_ACCESS_AUD,
+    const client = createClient({
+      clientID: "b3-chat",
+      issuer: env.APP_PUBLIC_URL,
     });
-    const email = typeof payload.email === "string" ? normalizeEmail(payload.email) : "";
-    if (!email) {
-      console.warn("[access] JWT verified but no email claim", { sub: payload.sub });
+    const { subjects } = await import("./auth/subjects.js");
+    const verified = await client.verify(subjects, token);
+    if (verified.err) {
+      console.warn("[auth] token verification failed", verified.err);
       return null;
     }
-    const name =
-      typeof payload.name === "string" && payload.name.trim() ? payload.name.trim() : undefined;
-    return { user: { email, ...(name ? { name } : {}) } };
+    const email = verified.subject.properties.email;
+    return { user: { email } };
   } catch (error) {
-    let claims: Record<string, unknown> | null = null;
-    try {
-      claims = decodeJwt(token) as Record<string, unknown>;
-    } catch {
-      // token isn't a decodable JWT
-    }
-    const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-    const expected = `iss=${teamDomain} aud=${env.CLOUDFLARE_ACCESS_AUD}`;
-    const received = claims
-      ? `iss=${JSON.stringify(claims.iss)} aud=${JSON.stringify(claims.aud)} email=${JSON.stringify(
-          claims.email ?? null,
-        )} exp=${JSON.stringify(claims.exp)}`
-      : "<undecodable token>";
-    console.error(
-      `[access] JWT verification failed — ${reason} | expected ${expected} | received ${received}`,
-    );
+    console.error("[auth] verify error", error);
     return null;
   }
 }

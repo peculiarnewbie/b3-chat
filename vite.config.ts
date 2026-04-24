@@ -34,7 +34,7 @@ export default defineConfig({
     "import.meta.env.VITE_GIT_SHA": JSON.stringify(computedCommit),
     "import.meta.env.VITE_BUILD_TIME": JSON.stringify(computedBuildTime),
   },
-  plugins: [solid(), cloudflare()],
+  plugins: [solid(), ...(process.env.VITEST ? [] : [cloudflare()])],
   server: {
     allowedHosts: true,
   },
