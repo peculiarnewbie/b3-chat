@@ -126,12 +126,18 @@ function getCookie(request: Request, name: string) {
 }
 
 export async function getSession(request: Request, env: AppEnv): Promise<AccessSession | null> {
+  const startedAt = Date.now();
   const token = getCookie(request, "auth_access_token");
   const refreshToken = getCookie(request, "auth_refresh_token");
   if (!token) {
     if (env.DEV_AUTH_EMAIL && isLocalDevRequest(request)) {
+      console.info("[auth] local dev session", { durationMs: Date.now() - startedAt });
       return { user: { email: normalizeEmail(env.DEV_AUTH_EMAIL), name: "Local Dev" } };
     }
+    console.info("[auth] missing access token", {
+      hasRefreshToken: Boolean(refreshToken),
+      durationMs: Date.now() - startedAt,
+    });
     return null;
   }
 
@@ -162,13 +168,25 @@ export async function getSession(request: Request, env: AppEnv): Promise<AccessS
       client.verify(subjects, token, refreshToken ? { refresh: refreshToken } : undefined),
     );
     if (verified.err) {
-      console.warn("[auth] token verification failed", verified.err);
+      console.warn("[auth] token verification failed", {
+        error: verified.err,
+        hasRefreshToken: Boolean(refreshToken),
+        durationMs: Date.now() - startedAt,
+      });
       return null;
     }
     const email = verified.subject.properties.email;
+    console.info("[auth] session verified", {
+      refreshed: Boolean(verified.tokens),
+      durationMs: Date.now() - startedAt,
+    });
     return { user: { email }, tokens: verified.tokens };
   } catch (error) {
-    console.error("[auth] verify error", error);
+    console.error("[auth] verify error", {
+      error,
+      hasRefreshToken: Boolean(refreshToken),
+      durationMs: Date.now() - startedAt,
+    });
     return null;
   }
 }
@@ -212,9 +230,13 @@ export async function purgeModelsCatalogCache(cache: Cache) {
 }
 
 export async function fetchModelsCatalog(env: AppEnv, cache: Cache) {
+  const startedAt = Date.now();
   const cacheKey = new Request(MODELS_CATALOG_URL);
   const cached = await cache.match(cacheKey);
-  if (cached) return cached.json();
+  if (cached) {
+    console.info("[models] catalog cache hit", { durationMs: Date.now() - startedAt });
+    return cached.json();
+  }
 
   const response = await fetchWithTimeout(
     MODELS_CATALOG_URL,
@@ -234,6 +256,7 @@ export async function fetchModelsCatalog(env: AppEnv, cache: Cache) {
       },
     }),
   );
+  console.info("[models] catalog fetched", { durationMs: Date.now() - startedAt });
   return json;
 }
 

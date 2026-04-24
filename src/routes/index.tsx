@@ -89,7 +89,6 @@ type SessionPayload = {
 
 type BootstrapPayload = {
   session: SessionPayload | null;
-  models: ModelsPayload | null;
 };
 
 type ModelsPayload = {
@@ -414,6 +413,16 @@ const fetchBootstrap = async () => {
   return (await response.json()) as BootstrapPayload;
 };
 
+const fetchModels = async (hasSession: boolean) => {
+  if (!hasSession) return null;
+  const response = await fetch("/api/models");
+  if (!response.ok) {
+    const message = await response.text().catch(() => response.statusText);
+    throw new Error(message || "Failed to load models");
+  }
+  return (await response.json()) as ModelsPayload;
+};
+
 function MarkdownFallback(props: { text: string }) {
   return (
     <div class="md-content">
@@ -433,7 +442,8 @@ function LazyMarkdownBlock(props: { text: string; streaming?: boolean; citations
 export default function Home() {
   const [bootstrap] = createResource(fetchBootstrap);
   const session = createMemo(() => bootstrap()?.session ?? null);
-  const models = createMemo(() => bootstrap()?.models ?? null);
+  const [modelsResource] = createResource(() => Boolean(session()), fetchModels);
+  const models = createMemo(() => modelsResource() ?? null);
 
   // Initialize sync layer
   onMount(async () => {

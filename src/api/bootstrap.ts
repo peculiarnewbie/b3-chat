@@ -1,9 +1,4 @@
-import {
-  fetchModelsCatalog,
-  filterModelsCatalog,
-  getRuntimeEnv,
-  getSession,
-} from "@b3-chat/server";
+import { getRuntimeEnv, getSession } from "@b3-chat/server";
 import { runApiTrace } from "../server/api-tracing";
 
 function serializeCookie(
@@ -41,9 +36,7 @@ export async function handleBootstrap(request: Request): Promise<Response> {
       const session = await getSession(request, env);
       const headers = new Headers({ "content-type": "application/json" });
 
-      if (!session) {
-        return new Response(JSON.stringify({ session: null, models: null }), { headers });
-      }
+      if (!session) return new Response(JSON.stringify({ session: null }), { headers });
 
       if (session.tokens) {
         headers.append(
@@ -60,13 +53,9 @@ export async function handleBootstrap(request: Request): Promise<Response> {
         );
       }
 
-      const cache = (globalThis.caches as CacheStorage & { default: Cache }).default;
-      const raw = await fetchModelsCatalog(env, cache);
-
       return new Response(
         JSON.stringify({
           session: { user: session.user },
-          models: filterModelsCatalog(raw, env),
         }),
         { headers },
       );

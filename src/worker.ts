@@ -73,6 +73,7 @@ export default {
       // API routing
       if (pathname.startsWith("/api/")) {
         if (pathname === "/api/auth/login" && method === "GET") {
+          const startedAt = Date.now();
           const client = createClient({
             clientID: "b3-chat",
             issuer: env.APP_PUBLIC_URL,
@@ -82,10 +83,12 @@ export default {
             "code",
             { provider: "google" },
           );
+          console.info("[auth] login redirect created", { durationMs: Date.now() - startedAt });
           return withVersionHeader(Response.redirect(authUrl, 302));
         }
 
         if (pathname === "/api/auth/callback" && method === "GET") {
+          const startedAt = Date.now();
           const code = url.searchParams.get("code");
           if (!code) {
             return withVersionHeader(new Response("Missing code", { status: 400 }));
@@ -107,6 +110,10 @@ export default {
           );
           if (!tokenResponse.ok) {
             const errorText = await tokenResponse.text();
+            console.warn("[auth] callback token exchange failed", {
+              status: tokenResponse.status,
+              durationMs: Date.now() - startedAt,
+            });
             return withVersionHeader(
               new Response(`Authentication failed: ${errorText}`, { status: tokenResponse.status }),
             );
@@ -130,6 +137,7 @@ export default {
             }),
           );
           headers.set("Location", "/");
+          console.info("[auth] callback completed", { durationMs: Date.now() - startedAt });
           return withVersionHeader(new Response(null, { status: 302, headers }));
         }
 
