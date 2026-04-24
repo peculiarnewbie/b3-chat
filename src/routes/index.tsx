@@ -2881,6 +2881,10 @@ export default function Home() {
             <a
               class="btn btn-primary"
               href="/api/auth/login"
+              onClick={(event) => {
+                event.preventDefault();
+                window.location.assign("/api/auth/login");
+              }}
               style="text-align:center;text-decoration:none"
             >
               Sign in with Google

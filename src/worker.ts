@@ -89,26 +89,42 @@ export default {
           if (!code) {
             return withVersionHeader(new Response("Missing code", { status: 400 }));
           }
-          const client = createClient({
-            clientID: "b3-chat",
-            issuer: env.APP_PUBLIC_URL,
-          });
-          const exchanged = await client.exchange(code, `${env.APP_PUBLIC_URL}/api/auth/callback`);
-          if (exchanged.err) {
+          const tokenResponse = await createAuthIssuer(env).fetch(
+            new Request(`${env.APP_PUBLIC_URL}/token`, {
+              method: "POST",
+              headers: { "content-type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({
+                code,
+                redirect_uri: `${env.APP_PUBLIC_URL}/api/auth/callback`,
+                grant_type: "authorization_code",
+                client_id: "b3-chat",
+                code_verifier: "",
+              }),
+            }),
+            env,
+            ctx,
+          );
+          if (!tokenResponse.ok) {
+            const errorText = await tokenResponse.text();
             return withVersionHeader(
-              new Response(`Authentication failed: ${exchanged.err}`, { status: 400 }),
+              new Response(`Authentication failed: ${errorText}`, { status: tokenResponse.status }),
             );
           }
+          const tokens = (await tokenResponse.json()) as {
+            access_token: string;
+            refresh_token: string;
+            expires_in: number;
+          };
           const headers = new Headers();
           headers.append(
             "Set-Cookie",
-            serializeCookie("auth_access_token", exchanged.tokens.access, {
-              maxAge: exchanged.tokens.expiresIn,
+            serializeCookie("auth_access_token", tokens.access_token, {
+              maxAge: tokens.expires_in,
             }),
           );
           headers.append(
             "Set-Cookie",
-            serializeCookie("auth_refresh_token", exchanged.tokens.refresh, {
+            serializeCookie("auth_refresh_token", tokens.refresh_token, {
               maxAge: 60 * 60 * 24 * 365,
             }),
           );

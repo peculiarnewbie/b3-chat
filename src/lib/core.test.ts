@@ -635,6 +635,7 @@ describe("server helpers", () => {
     APP_PUBLIC_URL: "https://chat.example.com",
     UPLOAD_TOKEN_SECRET: "test-secret",
     GOOGLE_CLIENT_ID: "test-google-client-id",
+    OWNER_EMAIL: "owner@example.com",
     OPENAUTH_STORAGE: {} as KVNamespace,
     DEV_AUTH_EMAIL: "owner@example.com",
     EXA_API_KEY: "exa-key",

@@ -70,7 +70,7 @@
         "description": "Optional local-only development identity used on localhost when no auth cookie is present."
       },
       "OWNER_EMAIL": {
-        "description": "Optional. If set, only this Google account can log in. Others are redirected to /forbidden."
+        "description": "Required owner Google account email. Only this account can log in; others are redirected to /forbidden."
       }
     }
   }

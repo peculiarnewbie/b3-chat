@@ -16,7 +16,7 @@ export const AppEnvConfig = Schema.Struct({
   APP_PUBLIC_URL: Schema.String,
   UPLOAD_TOKEN_SECRET: Schema.String,
   GOOGLE_CLIENT_ID: Schema.String,
-  OWNER_EMAIL: Schema.optional(Schema.String),
+  OWNER_EMAIL: Schema.String,
   DEV_AUTH_EMAIL: Schema.optional(Schema.String),
   EXA_API_KEY: Schema.optional(Schema.String),
   UPLOADS: Schema.Any,

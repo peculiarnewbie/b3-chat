@@ -28,7 +28,7 @@ export function createAuthIssuer(env: AppEnv) {
         if (!email) {
           return new Response("No email from Google", { status: 400 });
         }
-        if (env.OWNER_EMAIL && normalizeEmail(email) !== normalizeEmail(env.OWNER_EMAIL)) {
+        if (normalizeEmail(email) !== normalizeEmail(env.OWNER_EMAIL)) {
           return Response.redirect(`${env.APP_PUBLIC_URL}/forbidden`, 302);
         }
         return ctx.subject("user", { email });

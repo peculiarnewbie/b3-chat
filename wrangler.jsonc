@@ -20,7 +20,8 @@
   "vars": {
     "APP_PUBLIC_URL": "https://chat.peculiarnewbie.com",
     "DEFAULT_MODEL_ID": "auto",
-    "GOOGLE_CLIENT_ID": "<your-google-client-id.apps.googleusercontent.com>",
+    "GOOGLE_CLIENT_ID": "749978823803-vaa01ckn05jsmuifl7gc6b9ggos07iil.apps.googleusercontent.com",
+    "OWNER_EMAIL": "peculiarnewbie@gmail.com",
   },
   "secrets": {
     "required": ["OPENCODE_GO_BASE_URL", "OPENCODE_GO_API_KEY", "UPLOAD_TOKEN_SECRET"],
@@ -28,7 +29,8 @@
   "kv_namespaces": [
     {
       "binding": "OPENAUTH_STORAGE",
-      "id": "<your-kv-namespace-id>",
+      "id": "1acd6625d3e04096bf33080aedf00d71",
+      "remote": true,
     },
   ],
   "observability": {

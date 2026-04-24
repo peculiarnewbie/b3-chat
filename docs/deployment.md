@@ -35,7 +35,7 @@ Copy the KV namespace ID into `wrangler.jsonc` under `kv_namespaces`.
 
 ## 3. Configure Google OAuth
 
-The app uses OpenAuth with Google OIDC for authentication. You only need a Google OAuth client ID (no client secret required).
+The app uses OpenAuth with Google OIDC for authentication. You only need a Google OAuth client ID; there is no Google client secret for this flow because OpenAuth verifies Google's signed ID token with Google's public keys.
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/) > **APIs & Services** > **Credentials**.
 2. Click **Create Credentials** > **OAuth client ID**.
@@ -43,8 +43,9 @@ The app uses OpenAuth with Google OIDC for authentication. You only need a Googl
 4. Add your deployed origin to **Authorized JavaScript origins**, e.g. `https://chat.example.com`.
 5. Add the callback URL to **Authorized redirect URIs**: `https://chat.example.com/google/callback`.
 6. Copy the **Client ID** and set it as the `GOOGLE_CLIENT_ID` variable in `wrangler.jsonc`.
+7. Set `OWNER_EMAIL` in `wrangler.jsonc` to the exact Google account email that is allowed to use this deployment.
 
-Optionally set `OWNER_EMAIL` to restrict logins to a single Google account. If someone tries to sign in with a different account, they are redirected to `/forbidden`.
+`OWNER_EMAIL` is required. If someone tries to sign in with a different Google account, they are redirected to `/forbidden`.
 
 ## 4. Configure Worker Secrets
 
@@ -64,7 +65,7 @@ OPENCODE_GO_BASE_URL=https://api.opencode.example.com
 OPENCODE_GO_API_KEY=...
 ```
 
-`APP_PUBLIC_URL` and `GOOGLE_CLIENT_ID` are configured as plain Wrangler variables in `wrangler.jsonc` because they are not secrets. Update `APP_PUBLIC_URL` if you deploy to a different hostname.
+`APP_PUBLIC_URL`, `GOOGLE_CLIENT_ID`, and `OWNER_EMAIL` are configured as plain Wrangler variables in `wrangler.jsonc`. Update `APP_PUBLIC_URL` if you deploy to a different hostname.
 
 For local development only, you can set:
 
