@@ -5,11 +5,13 @@ import {
   Show,
   Switch,
   createEffect,
+  lazy,
   createMemo,
   createResource,
   createSignal,
   onCleanup,
   onMount,
+  Suspense,
 } from "solid-js";
 import { createStore } from "solid-js/store";
 import { useLiveQuery } from "@tanstack/solid-db";
@@ -27,9 +29,11 @@ import type {
   TraceSpan,
   Workspace,
 } from "@b3-chat/domain";
-import Markdown, { type Citation } from "../components/Markdown";
+import type { Citation } from "../components/Markdown";
+import type { TraceDrawerTrace } from "../components/TraceDrawerContent";
 import { explainAssistantError } from "../lib/assistant-errors";
 import { BUILD_INFO } from "../lib/build-info";
+import { ensureThemeFont } from "../lib/theme-fonts";
 import { isAllowedFile, isImageMime, uploadFile } from "../lib/upload";
 import {
   workspaces as workspacesCollection,
@@ -83,6 +87,11 @@ type SessionPayload = {
   };
 };
 
+type BootstrapPayload = {
+  session: SessionPayload | null;
+  models: ModelsPayload | null;
+};
+
 type ModelsPayload = {
   models: Array<{
     id: string;
@@ -120,6 +129,18 @@ type ParsedTraceSpan = TraceSpan & {
   events: Record<string, unknown>[];
   children: ParsedTraceSpan[];
 };
+
+type TraceTreeView = {
+  run: TraceRun;
+  spans: ParsedTraceSpan[];
+  attrs: Record<string, unknown>;
+  copyText: string;
+};
+
+const Markdown = lazy(() => import("../components/Markdown"));
+const SettingsPage = lazy(() => import("../components/SettingsPage"));
+const MessageAttachments = lazy(() => import("../components/MessageAttachments"));
+const TraceDrawerContent = lazy(() => import("../components/TraceDrawerContent"));
 
 const REASONING_OPTIONS: Array<{ value: ReasoningLevel; label: string }> = [
   { value: "off", label: "Off" },
@@ -315,53 +336,6 @@ function buildTraceTree(spans: TraceSpan[], parentSpanId: string | null = null):
     }));
 }
 
-function TraceSpanTree(props: { span: ParsedTraceSpan }) {
-  return (
-    <div class="trace-span-node">
-      <div
-        classList={{
-          "trace-span-header": true,
-          "is-failed": props.span.status === "failed",
-          "is-cancelled": props.span.status === "cancelled",
-        }}
-      >
-        <span class="trace-span-name">{props.span.name}</span>
-        <span class="trace-span-meta">
-          <span>{formatTraceStatus(props.span.status)}</span>
-          <Show when={props.span.durationMs != null}>
-            <span>{formatDuration(props.span.durationMs!)}</span>
-          </Show>
-        </span>
-      </div>
-      <Show
-        when={
-          Object.keys(props.span.attrs).length > 0 ||
-          props.span.errorMessage ||
-          props.span.events.length > 0
-        }
-      >
-        <details class="trace-span-details">
-          <summary>Details</summary>
-          <Show when={Object.keys(props.span.attrs).length > 0}>
-            <pre>{JSON.stringify(props.span.attrs, null, 2)}</pre>
-          </Show>
-          <Show when={props.span.errorMessage}>
-            <pre>{props.span.errorMessage}</pre>
-          </Show>
-          <Show when={props.span.events.length > 0}>
-            <pre>{JSON.stringify(props.span.events, null, 2)}</pre>
-          </Show>
-        </details>
-      </Show>
-      <Show when={props.span.children.length > 0}>
-        <div class="trace-span-children">
-          <For each={props.span.children}>{(child) => <TraceSpanTree span={child} />}</For>
-        </div>
-      </Show>
-    </div>
-  );
-}
-
 function spanToCopyShape(span: ParsedTraceSpan): Record<string, unknown> {
   return {
     name: span.name,
@@ -403,28 +377,6 @@ function buildTraceCopyText(trace: {
   );
 }
 
-function TraceCopyButton(props: { text: () => string }) {
-  const [copied, setCopied] = createSignal(false);
-  let resetTimer: ReturnType<typeof setTimeout> | undefined;
-  return (
-    <button
-      type="button"
-      class="trace-copy-btn"
-      aria-label="Copy trace JSON"
-      title="Copy trace JSON"
-      onClick={(event) => {
-        event.stopPropagation();
-        void navigator.clipboard.writeText(props.text());
-        setCopied(true);
-        if (resetTimer) clearTimeout(resetTimer);
-        resetTimer = setTimeout(() => setCopied(false), 1500);
-      }}
-    >
-      {copied() ? "Copied" : "Copy"}
-    </button>
-  );
-}
-
 const THEMES: { id: Theme; label: string }[] = [
   { id: "clean", label: "Clean" },
   { id: "night", label: "Night" },
@@ -453,25 +405,35 @@ function getInitialPreferFreeSearch(): boolean {
   return false;
 }
 
-const fetchSession = async () => {
-  const response = await fetch("/api/session");
-  if (response.status === 401) return null;
+const fetchBootstrap = async () => {
+  const response = await fetch("/api/bootstrap");
   if (!response.ok) {
     const message = await response.text().catch(() => response.statusText);
-    throw new Error(message || "Failed to load session");
+    throw new Error(message || "Failed to load app bootstrap");
   }
-  return (await response.json()) as SessionPayload;
+  return (await response.json()) as BootstrapPayload;
 };
 
-const fetchModels = async () => {
-  const response = await fetch("/api/models");
-  if (!response.ok) throw new Error("Failed to load models");
-  return (await response.json()) as ModelsPayload;
-};
+function MarkdownFallback(props: { text: string }) {
+  return (
+    <div class="md-content">
+      <p style={{ "white-space": "pre-wrap" }}>{props.text}</p>
+    </div>
+  );
+}
+
+function LazyMarkdownBlock(props: { text: string; streaming?: boolean; citations?: Citation[] }) {
+  return (
+    <Suspense fallback={<MarkdownFallback text={props.text} />}>
+      <Markdown text={props.text} streaming={props.streaming} citations={props.citations} />
+    </Suspense>
+  );
+}
 
 export default function Home() {
-  const [session] = createResource(fetchSession);
-  const [models] = createResource(fetchModels);
+  const [bootstrap] = createResource(fetchBootstrap);
+  const session = createMemo(() => bootstrap()?.session ?? null);
+  const models = createMemo(() => bootstrap()?.models ?? null);
 
   // Initialize sync layer
   onMount(async () => {
@@ -786,6 +748,7 @@ export default function Home() {
   createEffect(() => {
     document.documentElement.setAttribute("data-theme", theme());
     localStorage.setItem("b3-theme", theme());
+    ensureThemeFont(theme());
   });
 
   createEffect(() => {
@@ -894,6 +857,7 @@ export default function Home() {
     undefined,
     { equals: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]) },
   );
+  const selectedMessageIdSet = createMemo(() => new Set(messageIds()));
   const messagesById = createMemo(() => {
     const byId = new Map<string, Message>();
     for (const message of allMessages() as Message[]) {
@@ -952,8 +916,17 @@ export default function Home() {
     },
   );
   const searchRunsMemo = createMemo(() => {
+    const selectedMessageIds = selectedMessageIdSet();
     const resultsByRun = new Map<string, SearchResult[]>();
+    const selectedRunIds = new Set<string>();
+
+    for (const row of allSearchRuns() as SearchRun[]) {
+      if (!selectedMessageIds.has(row.messageId)) continue;
+      selectedRunIds.add(row.id);
+    }
+
     for (const row of allSearchResults() as SearchResult[]) {
+      if (!selectedRunIds.has(row.searchRunId)) continue;
       const list = resultsByRun.get(row.searchRunId) ?? [];
       list.push(row);
       resultsByRun.set(row.searchRunId, list);
@@ -961,6 +934,7 @@ export default function Home() {
 
     const byMessage = new Map<string, Array<SearchRun & { results: SearchResult[] }>>();
     for (const row of allSearchRuns() as SearchRun[]) {
+      if (!selectedMessageIds.has(row.messageId)) continue;
       const list = byMessage.get(row.messageId) ?? [];
       list.push({
         ...row,
@@ -980,8 +954,10 @@ export default function Home() {
    * chars)" states, and to expose final char counts after streaming.
    */
   const extractRunsMemo = createMemo(() => {
+    const selectedMessageIds = selectedMessageIdSet();
     const byMessage = new Map<string, ExtractRun[]>();
     for (const row of allExtractRuns() as ExtractRun[]) {
+      if (!selectedMessageIds.has(row.messageId)) continue;
       const list = byMessage.get(row.messageId) ?? [];
       list.push(row);
       byMessage.set(row.messageId, list);
@@ -1005,8 +981,10 @@ export default function Home() {
     );
   };
   const thinkingTokensByMessage = createMemo(() => {
+    const selectedMessageIds = selectedMessageIdSet();
     const byMessage = new Map<string, { seq: number; tokens: number }>();
     for (const row of allMessageParts() as MessagePart[]) {
+      if (!selectedMessageIds.has(row.messageId)) continue;
       const tokens = parseThinkingTokens(row);
       if (tokens == null) continue;
       const current = byMessage.get(row.messageId);
@@ -1019,8 +997,10 @@ export default function Home() {
     );
   });
   const assistantActivities = createMemo(() => {
+    const selectedMessageIds = selectedMessageIdSet();
     const byMessage = new Map<string, Array<AssistantActivity & { seq: number }>>();
     for (const row of allMessageParts() as MessagePart[]) {
+      if (!selectedMessageIds.has(row.messageId)) continue;
       const activity = parseAssistantActivity(row);
       if (!activity) continue;
       const list = byMessage.get(row.messageId) ?? [];
@@ -1038,8 +1018,10 @@ export default function Home() {
   });
   /** All message parts (any kind) grouped by messageId, sorted by seq. */
   const messagePartsByMessage = createMemo(() => {
+    const selectedMessageIds = selectedMessageIdSet();
     const byMessage = new Map<string, MessagePart[]>();
     for (const row of allMessageParts() as MessagePart[]) {
+      if (!selectedMessageIds.has(row.messageId)) continue;
       const list = byMessage.get(row.messageId) ?? [];
       list.push(row);
       byMessage.set(row.messageId, list);
@@ -1377,9 +1359,10 @@ export default function Home() {
   });
 
   const traceRunsByMessage = createMemo(() => {
+    const selectedMessageIds = selectedMessageIdSet();
     const byMessage = new Map<string, TraceRun[]>();
     for (const row of allTraceRuns() as TraceRun[]) {
-      if (!row.messageId) continue;
+      if (!row.messageId || !selectedMessageIds.has(row.messageId)) continue;
       const list = byMessage.get(row.messageId) ?? [];
       list.push(row);
       byMessage.set(row.messageId, list);
@@ -1388,19 +1371,6 @@ export default function Home() {
       list.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
     }
     return byMessage;
-  });
-  const traceSpansByRun = createMemo(() => {
-    const byRun = new Map<string, TraceSpan[]>();
-    for (const row of allTraceSpans() as TraceSpan[]) {
-      if (!row.traceRunId) continue;
-      const list = byRun.get(row.traceRunId) ?? [];
-      list.push(row);
-      byRun.set(row.traceRunId, list);
-    }
-    for (const list of byRun.values()) {
-      list.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-    }
-    return byRun;
   });
 
   const thinkingTokens = (messageId: string) => thinkingTokensByMessage().get(messageId) ?? null;
@@ -1489,26 +1459,76 @@ export default function Home() {
   const toggleTraceDrawer = (messageId: string) =>
     setCollapsedTraceByMessage(messageId, !isTraceCollapsed(messageId));
   const traceRunsForMessage = (messageId: string) => traceRunsByMessage().get(messageId) ?? [];
-  type TraceTree = {
-    run: TraceRun;
-    spans: ParsedTraceSpan[];
-    attrs: Record<string, unknown>;
-  };
+  const openTraceMessageIdSet = createMemo(() => {
+    const openIds = new Set<string>();
+    for (const messageId of messageIds()) {
+      if (!isTraceCollapsed(messageId) && traceRunsForMessage(messageId).length > 0) {
+        openIds.add(messageId);
+      }
+    }
+    return openIds;
+  });
+  const traceSpansByRun = createMemo(() => {
+    const openMessageIds = openTraceMessageIdSet();
+    if (openMessageIds.size === 0) return new Map<string, TraceSpan[]>();
+
+    const openRunIds = new Set<string>();
+    for (const messageId of openMessageIds) {
+      for (const run of traceRunsForMessage(messageId)) {
+        openRunIds.add(run.id);
+      }
+    }
+
+    const byRun = new Map<string, TraceSpan[]>();
+    for (const row of allTraceSpans() as TraceSpan[]) {
+      if (!row.traceRunId || !openRunIds.has(row.traceRunId)) continue;
+      const list = byRun.get(row.traceRunId) ?? [];
+      list.push(row);
+      byRun.set(row.traceRunId, list);
+    }
+    for (const list of byRun.values()) {
+      list.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
+    }
+    return byRun;
+  });
   const traceTreesByMessage = createMemo(() => {
-    const trees = new Map<string, TraceTree[]>();
-    for (const [messageId, runs] of traceRunsByMessage()) {
+    const trees = new Map<string, TraceTreeView[]>();
+    for (const messageId of openTraceMessageIdSet()) {
+      const runs = traceRunsByMessage().get(messageId) ?? [];
       trees.set(
         messageId,
-        runs.map((run) => ({
-          run,
-          spans: buildTraceTree(traceSpansByRun().get(run.id) ?? []),
-          attrs: parseTraceJson(run.attrsJson),
-        })),
+        runs.map((run) => {
+          const spans = buildTraceTree(traceSpansByRun().get(run.id) ?? []);
+          const attrs = parseTraceJson(run.attrsJson);
+          return {
+            run,
+            spans,
+            attrs,
+            copyText: buildTraceCopyText({ run, spans, attrs }),
+          };
+        }),
       );
     }
     return trees;
   });
   const traceTreesForMessage = (messageId: string) => traceTreesByMessage().get(messageId) ?? [];
+  const traceSummaryForMessage = (messageId: string) => {
+    const firstRun = traceRunsForMessage(messageId)[0];
+    return firstRun
+      ? `${formatTraceStatus(firstRun.status)} • ${shortTraceId(firstRun.traceId)}`
+      : "Developer trace";
+  };
+  const traceDrawerDataForMessage = (messageId: string): TraceDrawerTrace[] =>
+    traceTreesForMessage(messageId).map((trace) => ({
+      traceId: trace.run.traceId,
+      status: trace.run.status,
+      modelId: trace.run.modelId,
+      durationMs: trace.run.durationMs ?? null,
+      errorMessage: trace.run.errorMessage,
+      attrs: trace.attrs,
+      spans: trace.spans,
+      copyText: trace.copyText,
+    }));
 
   // Auto-collapse assistant prelude once text arrives.
   // Fingerprint isolates the trigger so the effect doesn't re-run
@@ -1550,9 +1570,12 @@ export default function Home() {
 
   // Pre-index attachments by messageId so filtering is O(1) per message
   const attachmentsByMessage = createMemo(() => {
+    const selectedMessageIds = selectedMessageIdSet();
     const byMessage = new Map<string, Attachment[]>();
     for (const att of allAttachments() as Attachment[]) {
-      if (att.status === "failed" || !att.messageId) continue;
+      if (att.status === "failed" || !att.messageId || !selectedMessageIds.has(att.messageId)) {
+        continue;
+      }
       const list = byMessage.get(att.messageId) ?? [];
       list.push(att);
       byMessage.set(att.messageId, list);
@@ -1642,25 +1665,12 @@ export default function Home() {
                       </div>
                       <div class="msg-user-stack">
                         <Show when={userImageAttachments(message().id).length > 0}>
-                          <div class="msg-attachment-gallery">
-                            <For each={userImageAttachments(message().id)}>
-                              {(att: any) => (
-                                <a
-                                  class="msg-attachment-card"
-                                  href={`/api/uploads/blob/${att.objectKey}`}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                >
-                                  <img
-                                    class="msg-attachment-img"
-                                    src={`/api/uploads/blob/${att.objectKey}`}
-                                    alt={att.fileName}
-                                    loading="lazy"
-                                  />
-                                </a>
-                              )}
-                            </For>
-                          </div>
+                          <Suspense fallback={null}>
+                            <MessageAttachments
+                              images={userImageAttachments(message().id)}
+                              files={[]}
+                            />
+                          </Suspense>
                         </Show>
                         <Show
                           when={editingUserMessageId() === message().id}
@@ -1703,13 +1713,12 @@ export default function Home() {
                           </div>
                         </Show>
                         <Show when={userFileAttachments(message().id).length > 0}>
-                          <div class="msg-attachments msg-attachments-files">
-                            <For each={userFileAttachments(message().id)}>
-                              {(att: any) => (
-                                <span class="msg-attachment-file">{att.fileName}</span>
-                              )}
-                            </For>
-                          </div>
+                          <Suspense fallback={null}>
+                            <MessageAttachments
+                              images={[]}
+                              files={userFileAttachments(message().id)}
+                            />
+                          </Suspense>
                         </Show>
                       </div>
                     </div>
@@ -1746,10 +1755,13 @@ export default function Home() {
                                       <Show
                                         when={data().streaming}
                                         fallback={
-                                          <Markdown text={data().text} citations={cites()} />
+                                          <LazyMarkdownBlock
+                                            text={data().text}
+                                            citations={cites()}
+                                          />
                                         }
                                       >
-                                        <Markdown
+                                        <LazyMarkdownBlock
                                           text={data().text}
                                           streaming
                                           citations={cites()}
@@ -2218,9 +2230,7 @@ export default function Home() {
                             <span class="trace-toggle-copy">
                               <span class="trace-toggle-label">Trace</span>
                               <span class="trace-toggle-meta">
-                                {traceTreesForMessage(message().id)[0]?.run
-                                  ? `${formatTraceStatus(traceTreesForMessage(message().id)[0]!.run.status)} • ${shortTraceId(traceTreesForMessage(message().id)[0]!.run.traceId)}`
-                                  : "Developer trace"}
+                                {traceSummaryForMessage(message().id)}
                               </span>
                             </span>
                             <span
@@ -2235,42 +2245,14 @@ export default function Home() {
                           </button>
                           <Show when={!isTraceCollapsed(message().id)}>
                             <div class="trace-drawer" id={`trace-drawer-${message().id}`}>
-                              <For each={traceTreesForMessage(message().id)}>
-                                {(trace) => (
-                                  <div class="trace-run-card">
-                                    <div class="trace-run-header">
-                                      <span class="trace-run-id">
-                                        trace {shortTraceId(trace.run.traceId)}
-                                      </span>
-                                      <div class="trace-run-actions">
-                                        <span class="trace-run-badges">
-                                          <span>{formatTraceStatus(trace.run.status)}</span>
-                                          <Show when={trace.run.modelId}>
-                                            <span>{trace.run.modelId}</span>
-                                          </Show>
-                                          <Show when={trace.attrs.searchEnabled === true}>
-                                            <span>search</span>
-                                          </Show>
-                                          <Show when={trace.run.durationMs != null}>
-                                            <span>{formatDuration(trace.run.durationMs!)}</span>
-                                          </Show>
-                                        </span>
-                                        <TraceCopyButton text={() => buildTraceCopyText(trace)} />
-                                      </div>
-                                    </div>
-                                    <Show when={trace.run.errorMessage}>
-                                      <div class="trace-run-error">{trace.run.errorMessage}</div>
-                                    </Show>
-                                    <Show when={trace.spans.length > 0}>
-                                      <div class="trace-tree">
-                                        <For each={trace.spans}>
-                                          {(span) => <TraceSpanTree span={span} />}
-                                        </For>
-                                      </div>
-                                    </Show>
-                                  </div>
-                                )}
-                              </For>
+                              <Suspense fallback={null}>
+                                <TraceDrawerContent
+                                  traces={traceDrawerDataForMessage(message().id)}
+                                  formatDuration={formatDuration}
+                                  formatTraceStatus={formatTraceStatus}
+                                  shortTraceId={shortTraceId}
+                                />
+                              </Suspense>
                             </div>
                           </Show>
                         </div>
@@ -2420,9 +2402,7 @@ export default function Home() {
                                 <span class="trace-toggle-copy">
                                   <span class="trace-toggle-label">Trace</span>
                                   <span class="trace-toggle-meta">
-                                    {traceTreesForMessage(message().id)[0]?.run
-                                      ? `${formatTraceStatus(traceTreesForMessage(message().id)[0]!.run.status)} • ${shortTraceId(traceTreesForMessage(message().id)[0]!.run.traceId)}`
-                                      : "Developer trace"}
+                                    {traceSummaryForMessage(message().id)}
                                   </span>
                                 </span>
                                 <span
@@ -2437,46 +2417,14 @@ export default function Home() {
                               </button>
                               <Show when={!isTraceCollapsed(message().id)}>
                                 <div class="trace-drawer" id={`trace-drawer-${message().id}`}>
-                                  <For each={traceTreesForMessage(message().id)}>
-                                    {(trace) => (
-                                      <div class="trace-run-card">
-                                        <div class="trace-run-header">
-                                          <span class="trace-run-id">
-                                            trace {shortTraceId(trace.run.traceId)}
-                                          </span>
-                                          <div class="trace-run-actions">
-                                            <span class="trace-run-badges">
-                                              <span>{formatTraceStatus(trace.run.status)}</span>
-                                              <Show when={trace.run.modelId}>
-                                                <span>{trace.run.modelId}</span>
-                                              </Show>
-                                              <Show when={trace.attrs.searchEnabled === true}>
-                                                <span>search</span>
-                                              </Show>
-                                              <Show when={trace.run.durationMs != null}>
-                                                <span>{formatDuration(trace.run.durationMs!)}</span>
-                                              </Show>
-                                            </span>
-                                            <TraceCopyButton
-                                              text={() => buildTraceCopyText(trace)}
-                                            />
-                                          </div>
-                                        </div>
-                                        <Show when={trace.run.errorMessage}>
-                                          <div class="trace-run-error">
-                                            {trace.run.errorMessage}
-                                          </div>
-                                        </Show>
-                                        <Show when={trace.spans.length > 0}>
-                                          <div class="trace-tree">
-                                            <For each={trace.spans}>
-                                              {(span) => <TraceSpanTree span={span} />}
-                                            </For>
-                                          </div>
-                                        </Show>
-                                      </div>
-                                    )}
-                                  </For>
+                                  <Suspense fallback={null}>
+                                    <TraceDrawerContent
+                                      traces={traceDrawerDataForMessage(message().id)}
+                                      formatDuration={formatDuration}
+                                      formatTraceStatus={formatTraceStatus}
+                                      shortTraceId={shortTraceId}
+                                    />
+                                  </Suspense>
                                 </div>
                               </Show>
                             </div>
@@ -2493,9 +2441,15 @@ export default function Home() {
                           return (
                             <Show
                               when={effectiveMessageStatus(message()) === "streaming"}
-                              fallback={<Markdown text={message().text} citations={cites()} />}
+                              fallback={
+                                <LazyMarkdownBlock text={message().text} citations={cites()} />
+                              }
                             >
-                              <Markdown text={message().text} streaming citations={cites()} />
+                              <LazyMarkdownBlock
+                                text={message().text}
+                                streaming
+                                citations={cites()}
+                              />
                             </Show>
                           );
                         })()}
@@ -2872,7 +2826,7 @@ export default function Home() {
       fallback={
         <main class="auth-shell">
           <Show
-            when={!session.loading}
+            when={!bootstrap.loading}
             fallback={
               <section class="auth-card">
                 <p class="eyebrow">Personal deployment</p>
@@ -3103,86 +3057,25 @@ export default function Home() {
           <Show
             when={!settingsOpen()}
             fallback={
-              <div class="settings-page">
-                <header class="settings-header">
-                  <button class="btn" onClick={() => setSettingsOpen(false)}>
-                    ← Back
-                  </button>
-                  <h2>Settings</h2>
-                  <span class="settings-workspace">{activeWorkspace()?.name}</span>
-                </header>
-                <div class="settings-body">
-                  <div class="settings-section">
-                    <label class="settings-label">System Prompt</label>
-                    <p class="settings-hint">
-                      Instructions prepended to every conversation in this workspace.
-                    </p>
-                    <textarea
-                      class="settings-textarea"
-                      value={systemPromptDraft()}
-                      onInput={(e) => setSystemPromptDraft(e.currentTarget.value)}
-                      placeholder="You are a helpful assistant..."
-                      rows={8}
-                    />
-                  </div>
-                  <div class="settings-actions">
-                    <button class="btn" onClick={() => setSettingsOpen(false)}>
-                      Cancel
-                    </button>
-                    <button class="btn btn-primary" onClick={saveSystemPrompt}>
-                      Save
-                    </button>
-                  </div>
-
-                  <div class="settings-section">
-                    <label class="settings-toggle">
-                      <input
-                        type="checkbox"
-                        checked={expandReasoningByDefault()}
-                        onChange={(e) => setExpandReasoningByDefault(e.currentTarget.checked)}
-                      />
-                      <span class="settings-label">Expand reasoning by default</span>
-                    </label>
-                    <p class="settings-hint">
-                      Keep the reasoning chip open after a response finishes, instead of
-                      auto-collapsing it.
-                    </p>
-                  </div>
-
-                  <div class="settings-section">
-                    <label class="settings-toggle">
-                      <input
-                        type="checkbox"
-                        checked={preferFreeSearch()}
-                        onChange={(e) => setPreferFreeSearch(e.currentTarget.checked)}
-                      />
-                      <span class="settings-label">Use free web search</span>
-                    </label>
-                    <p class="settings-hint">
-                      Route web searches through Exa's public MCP endpoint instead of the paid API.
-                      Slower and returns raw text instead of ranked results, but avoids usage on
-                      your Exa API key.
-                    </p>
-                  </div>
-
-                  <div class="settings-section settings-danger">
-                    <label class="settings-label">Danger Zone</label>
-                    <p class="settings-hint">
-                      Wipe all data on server and locally. Start completely fresh.
-                    </p>
-                    <button
-                      class="btn btn-danger"
-                      onClick={() => {
-                        if (confirm("Delete ALL data? This cannot be undone.")) {
-                          resetAllData();
-                        }
-                      }}
-                    >
-                      Reset All Data
-                    </button>
-                  </div>
-                </div>
-              </div>
+              <Suspense fallback={null}>
+                <SettingsPage
+                  workspaceName={activeWorkspace()?.name}
+                  systemPromptDraft={systemPromptDraft()}
+                  onSystemPromptInput={setSystemPromptDraft}
+                  onBack={() => setSettingsOpen(false)}
+                  onCancel={() => setSettingsOpen(false)}
+                  onSave={saveSystemPrompt}
+                  expandReasoningByDefault={expandReasoningByDefault()}
+                  onExpandReasoningChange={setExpandReasoningByDefault}
+                  preferFreeSearch={preferFreeSearch()}
+                  onPreferFreeSearchChange={setPreferFreeSearch}
+                  onResetAllData={() => {
+                    if (confirm("Delete ALL data? This cannot be undone.")) {
+                      resetAllData();
+                    }
+                  }}
+                />
+              </Suspense>
             }
           >
             <Show when={!headerVisible()}>

@@ -4,23 +4,40 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" href="/favicon.svg" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      rel="preload"
-      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Source+Serif+4:wght@400;500;600;700&display=swap"
-      as="style"
-      onload="
-        this.onload = null;
-        this.rel = 'stylesheet';
-      "
-    />
-    <noscript>
-      <link
-        href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Source+Serif+4:wght@400;500;600;700&display=swap"
-        rel="stylesheet"
-      />
-    </noscript>
+    <script>
+      (() => {
+        const theme = localStorage.getItem("b3-theme") || "clean";
+        document.documentElement.setAttribute("data-theme", theme);
+
+        let href = null;
+        if (theme === "night") {
+          href =
+            "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap";
+        } else if (theme === "warm") {
+          href =
+            "https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400;500;600;700&display=swap";
+        }
+
+        if (!href) return;
+
+        const preconnectGoogle = document.createElement("link");
+        preconnectGoogle.rel = "preconnect";
+        preconnectGoogle.href = "https://fonts.googleapis.com";
+        document.head.append(preconnectGoogle);
+
+        const preconnectStatic = document.createElement("link");
+        preconnectStatic.rel = "preconnect";
+        preconnectStatic.href = "https://fonts.gstatic.com";
+        preconnectStatic.crossOrigin = "";
+        document.head.append(preconnectStatic);
+
+        const fontLink = document.createElement("link");
+        fontLink.id = "theme-fonts";
+        fontLink.rel = "stylesheet";
+        fontLink.href = href;
+        document.head.append(fontLink);
+      })();
+    </script>
     <title>b3 chat</title>
   </head>
   <body>

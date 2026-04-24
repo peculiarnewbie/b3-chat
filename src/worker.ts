@@ -1,5 +1,6 @@
 import { setRuntimeEnv, type AppEnv, createAuthIssuer } from "@b3-chat/server";
 import { createClient } from "@openauthjs/openauth/client";
+import { handleBootstrap } from "./api/bootstrap";
 import { handleSession } from "./api/session";
 import { handleModels } from "./api/models";
 import { handleSync } from "./api/sync";
@@ -142,6 +143,9 @@ export default {
 
         if (pathname === "/api/session" && method === "GET")
           return withVersionHeader(await handleSession(request));
+
+        if (pathname === "/api/bootstrap" && method === "GET")
+          return withVersionHeader(await handleBootstrap(request));
 
         if (pathname === "/api/models" && method === "GET")
           return withVersionHeader(await handleModels(request));

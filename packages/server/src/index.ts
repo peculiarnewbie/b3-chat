@@ -43,6 +43,7 @@ const EXA_MCP_REQUEST_TIMEOUT_MS = 60_000;
 /** One quick retry for transient network errors / 5xx. Never retry on 4xx. */
 const EXA_MAX_ATTEMPTS = 2;
 const EXA_RETRY_BACKOFF_MS = 500;
+const AUTH_VERIFY_TIMEOUT_MS = 10_000;
 
 /** Browser Rendering extract timeout. A real Chromium render plus navigation
  *  is slower than a plain REST search (seconds vs hundreds of ms), so the
@@ -141,22 +142,24 @@ export async function getSession(request: Request, env: AppEnv): Promise<AccessS
       fetch: async (input, init) => {
         const requestUrl =
           typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        if (requestUrl.startsWith(env.APP_PUBLIC_URL)) {
-          const { createAuthIssuer } = await import("./auth/issuer.js");
-          return createAuthIssuer(env).fetch(
-            new Request(input, init),
-            env as any,
-            {} as ExecutionContext,
-          );
-        }
-        return fetch(input, init);
+        const authUrl = new URL(requestUrl);
+        const label = `[auth] ${authUrl.pathname}`;
+        return withTimeout(label, AUTH_VERIFY_TIMEOUT_MS, async () => {
+          if (requestUrl.startsWith(env.APP_PUBLIC_URL)) {
+            const { createAuthIssuer } = await import("./auth/issuer.js");
+            return createAuthIssuer(env).fetch(
+              new Request(input, init),
+              env as any,
+              {} as ExecutionContext,
+            );
+          }
+          return fetch(input, init);
+        });
       },
     });
     const { subjects } = await import("./auth/subjects.js");
-    const verified = await client.verify(
-      subjects,
-      token,
-      refreshToken ? { refresh: refreshToken } : undefined,
+    const verified = await withTimeout("[auth] verify", AUTH_VERIFY_TIMEOUT_MS, () =>
+      client.verify(subjects, token, refreshToken ? { refresh: refreshToken } : undefined),
     );
     if (verified.err) {
       console.warn("[auth] token verification failed", verified.err);
@@ -361,6 +364,23 @@ async function fetchWithTimeout(
     if (externalSignal && externalListener) {
       externalSignal.removeEventListener("abort", externalListener);
     }
+  }
+}
+
+async function withTimeout<T>(label: string, timeoutMs: number, run: () => Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      run(),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
