@@ -232,6 +232,7 @@ a {
 }
 
 .nav-item {
+  position: relative;
   display: flex;
   flex-direction: column;
   padding: 6px 8px;
@@ -257,6 +258,12 @@ a {
   gap: 4px;
   min-width: 0;
   width: 100%;
+  transition: padding-right 0.1s;
+}
+
+.nav-item:hover .nav-item-row,
+.nav-item:focus-within .nav-item-row {
+  padding-right: 44px;
 }
 
 .nav-item strong {
@@ -270,17 +277,20 @@ a {
 }
 
 .nav-item-actions {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   gap: 2px;
-  flex-shrink: 0;
-  margin-left: auto;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.1s;
 }
 
-.nav-item:hover .nav-item-actions {
+.nav-item:hover .nav-item-actions,
+.nav-item:focus-within .nav-item-actions {
   opacity: 1;
   pointer-events: auto;
 }

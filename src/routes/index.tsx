@@ -3096,6 +3096,7 @@ export default function Home() {
                     <For each={group.threads}>
                       {(thread) => (
                         <div
+                          title={thread.title}
                           classList={{
                             "nav-item": true,
                             active: !isDraftViewActive() && thread.id === activeThread()?.id,
