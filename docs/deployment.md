@@ -65,7 +65,7 @@ OPENCODE_GO_BASE_URL=https://api.opencode.example.com
 OPENCODE_GO_API_KEY=...
 ```
 
-`APP_PUBLIC_URL`, `GOOGLE_CLIENT_ID`, and `OWNER_EMAIL` are configured as plain Wrangler variables in `wrangler.jsonc`. Update `APP_PUBLIC_URL` if you deploy to a different hostname.
+`APP_PUBLIC_URL`, `DEFAULT_MODEL_ID`, `GOOGLE_CLIENT_ID`, and `OWNER_EMAIL` are configured as plain Wrangler variables in `wrangler.jsonc`. Update `APP_PUBLIC_URL` if you deploy to a different hostname.
 
 For local development only, you can set:
 
@@ -79,10 +79,15 @@ vp exec wrangler secret put DEV_AUTH_EMAIL
 
 The chat model provider is OpenCode Go. The app uses it for the model catalog and assistant requests.
 
-```bash
-vp exec wrangler secret put DEFAULT_MODEL_ID
-vp exec wrangler secret put OPENCODE_GO_MODEL_ALLOWLIST
+Configure `DEFAULT_MODEL_ID` as a plain Wrangler variable in `wrangler.jsonc`. Use `"auto"` to let the app choose automatically, or set a specific model ID from your provider catalog.
+
+```jsonc
+"vars": {
+  "DEFAULT_MODEL_ID": "auto",
+}
 ```
+
+If you want to restrict visible models, configure `OPENCODE_GO_MODEL_ALLOWLIST` as a comma-separated plain Wrangler variable.
 
 Skip `OPENCODE_GO_MODEL_ALLOWLIST` if all models from the provider catalog should be visible.
 

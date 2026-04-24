@@ -19,7 +19,7 @@
   },
   "vars": {
     "APP_PUBLIC_URL": "https://chat.peculiarnewbie.com",
-    "DEFAULT_MODEL_ID": "auto",
+    "DEFAULT_MODEL_ID": "kimi-k2.6",
     "GOOGLE_CLIENT_ID": "749978823803-vaa01ckn05jsmuifl7gc6b9ggos07iil.apps.googleusercontent.com",
     "OWNER_EMAIL": "peculiarnewbie@gmail.com",
   },
