@@ -9,7 +9,6 @@ import {
   createMemo,
   createResource,
   createSignal,
-  onCleanup,
   onMount,
   Suspense,
 } from "solid-js";
@@ -107,7 +106,7 @@ type ModelsPayload = {
   }>;
 };
 
-type Theme = "clean" | "night" | "warm";
+type Theme = "night";
 type AssistantActivity = {
   /**
    * Which tool produced this activity. Missing on older parts (pre-extract
@@ -376,18 +375,14 @@ function buildTraceCopyText(trace: {
   );
 }
 
-const THEMES: { id: Theme; label: string }[] = [
-  { id: "clean", label: "Clean" },
-  { id: "night", label: "Night" },
-  { id: "warm", label: "Warm" },
-];
+const THEMES: { id: Theme; label: string }[] = [{ id: "night", label: "Night" }];
 
 function getInitialTheme(): Theme {
   if (typeof localStorage !== "undefined") {
     const saved = localStorage.getItem("b3-theme") as Theme | null;
     if (saved && THEMES.some((t) => t.id === saved)) return saved;
   }
-  return "clean";
+  return "night";
 }
 
 function getInitialExpandReasoning(): boolean {
@@ -470,7 +465,6 @@ export default function Home() {
     getInitialPreferFreeSearch(),
   );
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
-  const [showComposerMenu, setShowComposerMenu] = createSignal(false);
   const [showTraces, setShowTraces] = createSignal(false);
   const [headerVisible, setHeaderVisible] = createSignal(true);
   const [collapsedProgressByMessage, setCollapsedProgressByMessage] = createStore<
@@ -524,6 +518,8 @@ export default function Home() {
   // biome-ignore lint: assigned via ref attribute
   // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref
   let timelineRef: HTMLElement | undefined;
+  // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref attribute
+  let streamingReasoningTextRef: HTMLDivElement | undefined;
   // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref attribute
   let fileInputRef: HTMLInputElement | undefined;
   // eslint-disable-next-line no-unassigned-vars -- assigned via SolidJS ref attribute
@@ -779,19 +775,6 @@ export default function Home() {
       el.style.height = "auto";
       el.style.height = Math.min(el.scrollHeight, 160) + "px";
     });
-  });
-
-  // Close composer menu on outside click
-  createEffect(() => {
-    if (!showComposerMenu()) return;
-    const handler = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest(".composer-dropdown")) {
-        setShowComposerMenu(false);
-      }
-    };
-    document.addEventListener("click", handler);
-    onCleanup(() => document.removeEventListener("click", handler));
   });
 
   // Sync system prompt draft when settings opens or workspace changes
@@ -1380,11 +1363,14 @@ export default function Home() {
   createEffect(() => {
     scrollFingerprint();
     expandedStreamingReasoningFingerprint();
-    if (timelineRef && isNearBottom()) {
-      requestAnimationFrame(() => {
-        timelineRef!.scrollTop = timelineRef!.scrollHeight;
-      });
-    }
+    requestAnimationFrame(() => {
+      if (streamingReasoningTextRef) {
+        streamingReasoningTextRef.scrollTop = streamingReasoningTextRef.scrollHeight;
+      }
+      if (timelineRef && isNearBottom()) {
+        timelineRef.scrollTop = timelineRef.scrollHeight;
+      }
+    });
   });
 
   const traceRunsByMessage = createMemo(() => {
@@ -2141,7 +2127,14 @@ export default function Home() {
                                           </span>
                                         </button>
                                         <Show when={!collapsed()}>
-                                          <div class="assistant-chip-reasoning-text">
+                                          <div
+                                            class="assistant-chip-reasoning-text"
+                                            ref={
+                                              data().streaming
+                                                ? (el) => (streamingReasoningTextRef = el)
+                                                : undefined
+                                            }
+                                          >
                                             {data().text}
                                             <Show when={data().streaming}>
                                               <span
@@ -2706,6 +2699,10 @@ export default function Home() {
     updateWorkspacePreferences({ defaultReasoningLevel: reasoningLevel });
   };
 
+  const handleReasoningToggle = () => {
+    handleReasoningChange(effectiveComposerReasoningLevel() === "off" ? "low" : "off");
+  };
+
   const isSelectedThreadBusy = createMemo(() => {
     const thread = selectedConversationThread();
     return thread ? busyThreadIds().has(thread.id) : false;
@@ -2854,26 +2851,53 @@ export default function Home() {
   const ComposerOptions = () => (
     <>
       <Show when={selectedModelSupportsReasoning()}>
-        <label>Reasoning</label>
-        <select
-          value={composerReasoningLevel()}
-          title="Reasoning level"
-          aria-label="Reasoning level"
-          onChange={(event) => handleReasoningChange(event.currentTarget.value as ReasoningLevel)}
-        >
-          <For each={REASONING_OPTIONS}>
-            {(option) => <option value={option.value}>{option.label}</option>}
-          </For>
-        </select>
+        <label class="composer-reasoning-select" title="Reasoning level">
+          <button
+            type="button"
+            classList={{
+              "composer-action-btn": true,
+              "is-active": effectiveComposerReasoningLevel() !== "off",
+            }}
+            title={
+              effectiveComposerReasoningLevel() === "off"
+                ? "Turn reasoning on"
+                : "Turn reasoning off"
+            }
+            aria-label={
+              effectiveComposerReasoningLevel() === "off"
+                ? "Turn reasoning on"
+                : "Turn reasoning off"
+            }
+            aria-pressed={effectiveComposerReasoningLevel() !== "off"}
+            onClick={handleReasoningToggle}
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M12 2a4.5 4.5 0 0 0-4.5 4.5c0 .9.27 1.75.73 2.46A4.5 4.5 0 0 0 8 17.5V19a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-1.5a4.5 4.5 0 0 0-.23-8.54A4.5 4.5 0 0 0 16.5 6.5 4.5 4.5 0 0 0 12 2Z" />
+              <path d="M12 2v19" />
+              <path d="M9 7h.01" />
+              <path d="M15 7h.01" />
+            </svg>
+          </button>
+          <select
+            value={composerReasoningLevel()}
+            aria-label="Reasoning level"
+            onChange={(event) => handleReasoningChange(event.currentTarget.value as ReasoningLevel)}
+          >
+            <For each={REASONING_OPTIONS}>
+              {(option) => <option value={option.value}>{option.label}</option>}
+            </For>
+          </select>
+        </label>
       </Show>
-      <label class="composer-menu-row">
-        <input
-          type="checkbox"
-          checked={showTraces()}
-          onChange={(event) => setShowTraces(event.currentTarget.checked)}
-        />
-        <span>Show traces</span>
-      </label>
     </>
   );
 
@@ -3126,6 +3150,8 @@ export default function Home() {
                   onExpandReasoningChange={setExpandReasoningByDefault}
                   preferFreeSearch={preferFreeSearch()}
                   onPreferFreeSearchChange={setPreferFreeSearch}
+                  showTraces={showTraces()}
+                  onShowTracesChange={setShowTraces}
                   onResetAllData={() => {
                     if (confirm("Delete ALL data? This cannot be undone.")) {
                       resetAllData();
@@ -3240,13 +3266,6 @@ export default function Home() {
                 rows={1}
               />
               <div class="composer-row">
-                <button
-                  class="attach-btn"
-                  onClick={() => fileInputRef?.click()}
-                  title="Attach files"
-                >
-                  +
-                </button>
                 <input
                   ref={fileInputRef!}
                   type="file"
@@ -3255,16 +3274,16 @@ export default function Home() {
                   style={{ display: "none" }}
                   onChange={(e) => handleFileSelect(e.currentTarget.files)}
                 />
-                <select
-                  class="composer-model"
-                  value={composerModelId()}
-                  onChange={(event) => handleModelChange(event.currentTarget.value)}
-                >
-                  <For each={models()?.models ?? []}>
-                    {(model) => <option value={model.id}>{model.name}</option>}
-                  </For>
-                </select>
-                <div class="composer-actions">
+                <div class="composer-context-controls">
+                  <select
+                    class="composer-model"
+                    value={composerModelId()}
+                    onChange={(event) => handleModelChange(event.currentTarget.value)}
+                  >
+                    <For each={models()?.models ?? []}>
+                      {(model) => <option value={model.id}>{model.name}</option>}
+                    </For>
+                  </select>
                   <button
                     type="button"
                     class="composer-action-btn"
@@ -3287,40 +3306,16 @@ export default function Home() {
                       <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
                     </svg>
                   </button>
-                  <div class="composer-inline-options">
-                    <ComposerOptions />
-                  </div>
-                  <div class="composer-dropdown">
-                    <button
-                      type="button"
-                      class="composer-action-btn"
-                      title="More options"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setShowComposerMenu((v) => !v);
-                      }}
-                    >
-                      <svg
-                        width="16"
-                        height="16"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                      >
-                        <circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none" />
-                        <circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none" />
-                        <circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none" />
-                      </svg>
-                    </button>
-                    <Show when={showComposerMenu()}>
-                      <div class="composer-dropdown-panel" onClick={(e) => e.stopPropagation()}>
-                        <ComposerOptions />
-                      </div>
-                    </Show>
-                  </div>
+                  <ComposerOptions />
+                </div>
+                <div class="composer-actions">
+                  <button
+                    class="attach-btn"
+                    onClick={() => fileInputRef?.click()}
+                    title="Attach files"
+                  >
+                    +
+                  </button>
                   <Show
                     when={isSelectedThreadBusy() && streamingAssistantMessageId()}
                     fallback={

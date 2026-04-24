@@ -4,9 +4,6 @@ export function getThemeFontHref(theme: string) {
   if (theme === "night") {
     return "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap";
   }
-  if (theme === "warm") {
-    return "https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400;500;600;700&display=swap";
-  }
   return null;
 }
 

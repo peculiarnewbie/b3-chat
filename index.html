@@ -1,21 +1,19 @@
 <!doctype html>
-<html lang="en" data-theme="clean">
+<html lang="en" data-theme="night">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" href="/favicon.svg" />
     <script>
       (() => {
-        const theme = localStorage.getItem("b3-theme") || "clean";
+        const savedTheme = localStorage.getItem("b3-theme");
+        const theme = savedTheme === "night" ? savedTheme : "night";
         document.documentElement.setAttribute("data-theme", theme);
 
         let href = null;
         if (theme === "night") {
           href =
             "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap";
-        } else if (theme === "warm") {
-          href =
-            "https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400;500;600;700&display=swap";
         }
 
         if (!href) return;

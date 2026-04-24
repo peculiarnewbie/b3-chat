@@ -9,6 +9,8 @@ type SettingsPageProps = {
   onExpandReasoningChange: (checked: boolean) => void;
   preferFreeSearch: boolean;
   onPreferFreeSearchChange: (checked: boolean) => void;
+  showTraces: boolean;
+  onShowTracesChange: (checked: boolean) => void;
   onResetAllData: () => void;
 };
 
@@ -73,6 +75,18 @@ export default function SettingsPage(props: SettingsPageProps) {
             Slower and returns raw text instead of ranked results, but avoids usage on your Exa API
             key.
           </p>
+        </div>
+
+        <div class="settings-section">
+          <label class="settings-toggle">
+            <input
+              type="checkbox"
+              checked={props.showTraces}
+              onChange={(e) => props.onShowTracesChange(e.currentTarget.checked)}
+            />
+            <span class="settings-label">Show traces</span>
+          </label>
+          <p class="settings-hint">Show detailed trace drawers under assistant responses.</p>
         </div>
 
         <div class="settings-section settings-danger">
