@@ -11,7 +11,7 @@ export {
 } from "./chat-completions-adapter.js";
 export { chat } from "@tanstack/ai";
 import { decodeAppEnv, type AppEnv } from "@b3-chat/effect";
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
 import {
   createId,
   type SyncCommandPayloadMap,
@@ -141,20 +141,43 @@ export async function getSession(request: Request, env: AppEnv): Promise<AccessS
     if (env.DEV_AUTH_EMAIL && isLocalDevRequest(request)) {
       return { user: { email: normalizeEmail(env.DEV_AUTH_EMAIL), name: "Local Dev" } };
     }
+    console.warn("[access] no CF_Authorization cookie or cf-access-jwt-assertion header");
     return null;
   }
 
   const teamDomain = normalizeAccessTeamDomain(env.CLOUDFLARE_ACCESS_TEAM_DOMAIN);
-  const { payload } = await jwtVerify(token, getAccessJwks(teamDomain), {
-    issuer: teamDomain,
-    audience: env.CLOUDFLARE_ACCESS_AUD,
-  }).catch(() => ({ payload: null }));
-  if (!payload) return null;
-  const email = typeof payload.email === "string" ? normalizeEmail(payload.email) : "";
-  if (!email) return null;
-  const name =
-    typeof payload.name === "string" && payload.name.trim() ? payload.name.trim() : undefined;
-  return { user: { email, ...(name ? { name } : {}) } };
+  try {
+    const { payload } = await jwtVerify(token, getAccessJwks(teamDomain), {
+      issuer: teamDomain,
+      audience: env.CLOUDFLARE_ACCESS_AUD,
+    });
+    const email = typeof payload.email === "string" ? normalizeEmail(payload.email) : "";
+    if (!email) {
+      console.warn("[access] JWT verified but no email claim", { sub: payload.sub });
+      return null;
+    }
+    const name =
+      typeof payload.name === "string" && payload.name.trim() ? payload.name.trim() : undefined;
+    return { user: { email, ...(name ? { name } : {}) } };
+  } catch (error) {
+    let claims: Record<string, unknown> | null = null;
+    try {
+      claims = decodeJwt(token) as Record<string, unknown>;
+    } catch {
+      // token isn't a decodable JWT
+    }
+    const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    const expected = `iss=${teamDomain} aud=${env.CLOUDFLARE_ACCESS_AUD}`;
+    const received = claims
+      ? `iss=${JSON.stringify(claims.iss)} aud=${JSON.stringify(claims.aud)} email=${JSON.stringify(
+          claims.email ?? null,
+        )} exp=${JSON.stringify(claims.exp)}`
+      : "<undecodable token>";
+    console.error(
+      `[access] JWT verification failed — ${reason} | expected ${expected} | received ${received}`,
+    );
+    return null;
+  }
 }
 
 export async function requireSession(request: Request, env: AppEnv) {
