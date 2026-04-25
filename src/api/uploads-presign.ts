@@ -20,7 +20,7 @@ export async function handleUploadPresign(request: Request): Promise<Response> {
       path: new URL(request.url).pathname,
     },
     run: async () => {
-      await requireSession(request, env);
+      await requireSession(request, env, { refresh: false });
       const body = (await request.json()) as {
         sizeBytes?: unknown;
         mimeType?: unknown;

@@ -14,7 +14,7 @@ export async function handleUploadComplete(request: Request): Promise<Response> 
       path: new URL(request.url).pathname,
     },
     run: async () => {
-      await requireSession(request, env);
+      await requireSession(request, env, { refresh: false });
       const body = (await request.json()) as { attachment: unknown };
       const attachment = decodeAttachmentRow(body.attachment);
       const object = await env.UPLOADS.head(attachment.objectKey);

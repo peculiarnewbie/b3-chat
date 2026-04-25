@@ -19,7 +19,7 @@ export async function handleModels(request: Request): Promise<Response> {
       path: new URL(request.url).pathname,
     },
     run: async () => {
-      await requireSession(request, env);
+      await requireSession(request, env, { refresh: false });
       const cache = (globalThis.caches as CacheStorage & { default: Cache }).default;
       const url = new URL(request.url);
       if (url.searchParams.has("purge")) {

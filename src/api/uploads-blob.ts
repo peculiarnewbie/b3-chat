@@ -79,7 +79,7 @@ export async function handleUploadBlobGet(request: Request): Promise<Response> {
           return new Response("Expired token", { status: 401 });
         if (payload.objectKey !== objectKey) return new Response("Key mismatch", { status: 401 });
       } else {
-        await requireSession(request, env);
+        await requireSession(request, env, { refresh: false });
       }
 
       const object = await env.UPLOADS.get(objectKey);

@@ -11,13 +11,21 @@ export {
 } from "./chat-completions-adapter.js";
 export { chat } from "@tanstack/ai";
 import { decodeAppEnv, type AppEnv } from "@b3-chat/effect";
-import { createClient } from "@openauthjs/openauth/client";
+import {
+  createLocalJWKSet,
+  errors as joseErrors,
+  exportJWK,
+  importSPKI,
+  jwtVerify,
+  type JWK,
+} from "jose";
 import {
   createId,
   type SyncCommandPayloadMap,
   type SyncCommandType,
   type SyncSnapshot,
 } from "@b3-chat/domain";
+import { createAuthIssuer } from "./auth/issuer.js";
 
 export type { AppEnv } from "@b3-chat/effect";
 export { subjects } from "./auth/subjects.js";
@@ -43,7 +51,6 @@ const EXA_MCP_REQUEST_TIMEOUT_MS = 60_000;
 /** One quick retry for transient network errors / 5xx. Never retry on 4xx. */
 const EXA_MAX_ATTEMPTS = 2;
 const EXA_RETRY_BACKOFF_MS = 500;
-const AUTH_VERIFY_TIMEOUT_MS = 10_000;
 
 /** Browser Rendering extract timeout. A real Chromium render plus navigation
  *  is slower than a plain REST search (seconds vs hundreds of ms), so the
@@ -125,74 +132,205 @@ function getCookie(request: Request, name: string) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-export async function getSession(request: Request, env: AppEnv): Promise<AccessSession | null> {
+// We are our own OAuth issuer — the access token's signing key lives in
+// our own KV namespace. Verifying a session cookie does not need to round-
+// trip through `/.well-known/jwks.json` over a fake-fetch into our own
+// Hono app; we can read the key set once per isolate and verify JWTs
+// in-process. This is what the read paths (sync upgrade, models, uploads)
+// use. The refresh path (bootstrap, session) still needs to hit the
+// issuer's `/token` endpoint to rotate, but only when the access token is
+// genuinely expired.
+const SIGNING_ALG_DEFAULT = "ES256";
+const LEGACY_SIGNING_ALG = "RS512";
+const STORAGE_KEY_SEPARATOR = String.fromCharCode(31);
+const JWKS_TTL_MS = 60 * 60 * 1000;
+const REFRESH_TIMEOUT_MS = 10_000;
+
+type StoredSigningKey = {
+  id: string;
+  publicKey: string;
+  privateKey: string;
+  alg?: string;
+  created: number;
+  expired?: number;
+};
+
+let jwksPromise: Promise<ReturnType<typeof createLocalJWKSet>> | null = null;
+let jwksLoadedAt = 0;
+
+async function loadJwks(env: AppEnv) {
+  const namespace = env.OPENAUTH_STORAGE as KVNamespace;
+  const keys: JWK[] = [];
+  for (const prefix of ["signing:key", "oauth:key"] as const) {
+    let cursor: string | undefined;
+    while (true) {
+      const list = await namespace.list({
+        prefix: `${prefix}${STORAGE_KEY_SEPARATOR}`,
+        cursor,
+      });
+      for (const item of list.keys) {
+        const stored = await namespace.get<StoredSigningKey>(item.name, "json");
+        if (!stored || stored.expired) continue;
+        const alg =
+          stored.alg ?? (prefix === "oauth:key" ? LEGACY_SIGNING_ALG : SIGNING_ALG_DEFAULT);
+        const publicKey = await importSPKI(stored.publicKey, alg, { extractable: true });
+        const jwk = (await exportJWK(publicKey)) as JWK;
+        jwk.kid = stored.id;
+        jwk.use = "sig";
+        jwk.alg = alg;
+        keys.push(jwk);
+      }
+      if (list.list_complete) break;
+      cursor = list.cursor;
+    }
+  }
+  return createLocalJWKSet({ keys });
+}
+
+function getJwks(env: AppEnv) {
+  const fresh = jwksPromise && Date.now() - jwksLoadedAt < JWKS_TTL_MS;
+  if (!fresh) {
+    jwksLoadedAt = Date.now();
+    jwksPromise = loadJwks(env);
+  }
+  return jwksPromise!;
+}
+
+function invalidateJwks() {
+  jwksPromise = null;
+  jwksLoadedAt = 0;
+}
+
+type LocalVerifyResult = { kind: "ok"; email: string } | { kind: "expired" } | { kind: "invalid" };
+
+async function verifyAccessLocally(token: string, env: AppEnv): Promise<LocalVerifyResult> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const jwks = await getJwks(env);
+      const { payload } = await jwtVerify(token, jwks, { issuer: env.APP_PUBLIC_URL });
+      if (payload.mode !== "access") return { kind: "invalid" };
+      const properties = payload.properties as { email?: unknown } | undefined;
+      const email = properties?.email;
+      if (typeof email !== "string" || !email) return { kind: "invalid" };
+      return { kind: "ok", email };
+    } catch (error) {
+      if (error instanceof joseErrors.JWTExpired) return { kind: "expired" };
+      // Signature verification can fail because keys rotated since we
+      // cached the JWKS. Drop the cache and retry once before giving up.
+      if (error instanceof joseErrors.JWSSignatureVerificationFailed && attempt === 0) {
+        invalidateJwks();
+        continue;
+      }
+      return { kind: "invalid" };
+    }
+  }
+  return { kind: "invalid" };
+}
+
+async function rotateRefreshToken(refreshToken: string, env: AppEnv) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
+  try {
+    const response = await createAuthIssuer(env).fetch(
+      new Request(`${env.APP_PUBLIC_URL}/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+        }),
+        signal: controller.signal,
+      }),
+      env as unknown as Record<string, unknown>,
+      {} as ExecutionContext,
+    );
+    if (!response.ok) return null;
+    const json = (await response.json()) as {
+      access_token?: string;
+      refresh_token?: string;
+      expires_in?: number;
+    };
+    if (!json.access_token || !json.refresh_token || typeof json.expires_in !== "number") {
+      return null;
+    }
+    return {
+      access: json.access_token,
+      refresh: json.refresh_token,
+      expiresIn: json.expires_in,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export type GetSessionOptions = {
+  /**
+   * Whether to attempt a refresh-token rotation when the access token is
+   * expired. Only routes whose response can plumb the new token pair back
+   * to the browser via Set-Cookie (bootstrap, session) should set this
+   * true. Other routes should leave it false so an expired access token
+   * just produces a 401 — the client will reload and bootstrap will
+   * refresh once. Defaults to true for backwards compat.
+   */
+  refresh?: boolean;
+};
+
+export async function getSession(
+  request: Request,
+  env: AppEnv,
+  options: GetSessionOptions = {},
+): Promise<AccessSession | null> {
   const startedAt = Date.now();
   const token = getCookie(request, "auth_access_token");
   const refreshToken = getCookie(request, "auth_refresh_token");
+
   if (!token) {
     if (env.DEV_AUTH_EMAIL && isLocalDevRequest(request)) {
-      console.info("[auth] local dev session", { durationMs: Date.now() - startedAt });
       return { user: { email: normalizeEmail(env.DEV_AUTH_EMAIL), name: "Local Dev" } };
     }
-    console.info("[auth] missing access token", {
-      hasRefreshToken: Boolean(refreshToken),
-      durationMs: Date.now() - startedAt,
-    });
     return null;
   }
 
-  try {
-    const client = createClient({
-      clientID: "b3-chat",
-      issuer: env.APP_PUBLIC_URL,
-      fetch: async (input, init) => {
-        const requestUrl =
-          typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        const authUrl = new URL(requestUrl);
-        const label = `[auth] ${authUrl.pathname}`;
-        return withTimeout(label, AUTH_VERIFY_TIMEOUT_MS, async () => {
-          if (requestUrl.startsWith(env.APP_PUBLIC_URL)) {
-            const { createAuthIssuer } = await import("./auth/issuer.js");
-            return createAuthIssuer(env).fetch(
-              new Request(input, init),
-              env as any,
-              {} as ExecutionContext,
-            );
-          }
-          return fetch(input, init);
-        });
-      },
-    });
-    const { subjects } = await import("./auth/subjects.js");
-    const verified = await withTimeout("[auth] verify", AUTH_VERIFY_TIMEOUT_MS, () =>
-      client.verify(subjects, token, refreshToken ? { refresh: refreshToken } : undefined),
-    );
-    if (verified.err) {
-      console.warn("[auth] token verification failed", {
-        error: verified.err,
-        hasRefreshToken: Boolean(refreshToken),
+  const verified = await verifyAccessLocally(token, env);
+  if (verified.kind === "ok") {
+    return { user: { email: verified.email } };
+  }
+
+  const refresh = options.refresh ?? true;
+  if (verified.kind === "expired" && refresh && refreshToken) {
+    const rotated = await rotateRefreshToken(refreshToken, env);
+    if (!rotated) {
+      console.warn("[auth] refresh failed", { durationMs: Date.now() - startedAt });
+      return null;
+    }
+    const reverified = await verifyAccessLocally(rotated.access, env);
+    if (reverified.kind !== "ok") {
+      console.warn("[auth] rotated access token did not verify", {
+        kind: reverified.kind,
         durationMs: Date.now() - startedAt,
       });
       return null;
     }
-    const email = verified.subject.properties.email;
-    console.info("[auth] session verified", {
-      refreshed: Boolean(verified.tokens),
-      durationMs: Date.now() - startedAt,
-    });
-    return { user: { email }, tokens: verified.tokens };
-  } catch (error) {
-    console.error("[auth] verify error", {
-      error,
-      hasRefreshToken: Boolean(refreshToken),
-      durationMs: Date.now() - startedAt,
-    });
-    return null;
+    console.info("[auth] session refreshed", { durationMs: Date.now() - startedAt });
+    return { user: { email: reverified.email }, tokens: rotated };
   }
+
+  console.info("[auth] session not valid", {
+    kind: verified.kind,
+    refreshAttempted: verified.kind === "expired" && refresh && Boolean(refreshToken),
+    durationMs: Date.now() - startedAt,
+  });
+  return null;
 }
 
-export async function requireSession(request: Request, env: AppEnv) {
-  const session = await getSession(request, env);
+export async function requireSession(
+  request: Request,
+  env: AppEnv,
+  options: GetSessionOptions = {},
+) {
+  const session = await getSession(request, env, options);
   if (!session) throw new Response("Unauthorized", { status: 401 });
   return session;
 }
@@ -387,23 +525,6 @@ async function fetchWithTimeout(
     if (externalSignal && externalListener) {
       externalSignal.removeEventListener("abort", externalListener);
     }
-  }
-}
-
-async function withTimeout<T>(label: string, timeoutMs: number, run: () => Promise<T>): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  try {
-    return await Promise.race([
-      run(),
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
   }
 }
 

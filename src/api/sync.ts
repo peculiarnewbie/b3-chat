@@ -2,7 +2,7 @@ import { getRuntimeEnv, getSyncStub, requireSession } from "@b3-chat/server";
 
 export async function handleSync(request: Request): Promise<Response> {
   const env = getRuntimeEnv();
-  await requireSession(request, env);
+  await requireSession(request, env, { refresh: false });
   const stub = await getSyncStub(env);
   const url = new URL(request.url);
   const suffix = url.pathname.split("/").pop() ?? "";
