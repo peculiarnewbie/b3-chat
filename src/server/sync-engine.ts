@@ -219,7 +219,6 @@ function getProviderModelOptions(
 }
 
 export class SyncEngineDurableObject {
-  private initialized = false;
   private readonly ctx: DurableObjectState;
   private readonly env: AppEnv;
   /**
@@ -236,10 +235,13 @@ export class SyncEngineDurableObject {
   constructor(ctx: DurableObjectState, env: AppEnv) {
     this.ctx = ctx;
     this.env = decodeAppEnv(env);
+
+    void this.ctx.blockConcurrencyWhile(async () => {
+      this.initializeStorage();
+    });
   }
 
   async fetch(request: Request) {
-    await this.ensureInitialized();
     const url = new URL(request.url);
     syncLog("fetch", { path: url.pathname, method: request.method });
 
@@ -278,7 +280,6 @@ export class SyncEngineDurableObject {
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-    await this.ensureInitialized();
     const envelope = parseJson<SyncClientEnvelope>(
       typeof message === "string" ? message : new TextDecoder().decode(message),
     );
@@ -300,9 +301,7 @@ export class SyncEngineDurableObject {
 
   async webSocketClose(_ws: WebSocket) {}
 
-  private async ensureInitialized() {
-    if (this.initialized) return;
-    this.initialized = true;
+  private initializeStorage() {
     syncLog("initialize");
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS events (
