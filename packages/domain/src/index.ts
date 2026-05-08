@@ -50,6 +50,7 @@ export const AccountSettingsRow = Schema.Struct({
   expandReasoningByDefault: Schema.Boolean,
   showTraces: Schema.Boolean,
   titleGenerationModelId: NullableString,
+  titleGenerationModelInterleavedField: NullableString,
   createdAt: Schema.String,
   updatedAt: Schema.String,
   ...OptionalOptimisticRowFields,
@@ -612,6 +613,7 @@ export function createAccountSettings(input: {
   expandReasoningByDefault?: boolean;
   showTraces?: boolean;
   titleGenerationModelId?: string | null;
+  titleGenerationModelInterleavedField?: string | null;
 }) {
   const now = nowIso();
   return decodeAccountSettingsRow({
@@ -619,6 +621,7 @@ export function createAccountSettings(input: {
     expandReasoningByDefault: input.expandReasoningByDefault ?? false,
     showTraces: input.showTraces ?? false,
     titleGenerationModelId: input.titleGenerationModelId ?? null,
+    titleGenerationModelInterleavedField: input.titleGenerationModelInterleavedField ?? null,
     createdAt: now,
     updatedAt: now,
   });

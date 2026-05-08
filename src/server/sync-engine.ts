@@ -107,6 +107,13 @@ function sanitizeGeneratedTitle(value: string) {
   return cleaned.slice(0, 64).trim() || null;
 }
 
+function getTitleGenerationModelOptions(modelInterleavedField?: string | null) {
+  if (modelInterleavedField === "reasoning_content") {
+    return { thinking: { type: "disabled" as const } };
+  }
+  return {};
+}
+
 function looksLikeMissingRealtimeAccess(text: string) {
   return /don'?t have access to real[- ]?time|can'?t tell you the (exact )?current time|don'?t have access to the current date|don'?t have access to current information/i.test(
     text,
@@ -699,6 +706,7 @@ export class SyncEngineDurableObject {
                 threadId: normalizedThread.id,
                 promptText: command.promptText,
                 chatModelId: command.modelId,
+                chatModelInterleavedField: command.modelInterleavedField,
               }),
               this.runAssistantTurn({
                 ...command,
@@ -1553,6 +1561,7 @@ export class SyncEngineDurableObject {
     threadId: string;
     promptText: string;
     chatModelId: string;
+    chatModelInterleavedField?: string | null;
   }) {
     const thread = this.getThread(input.threadId);
     if (!thread || thread.title !== "New Chat") return;
@@ -1560,6 +1569,13 @@ export class SyncEngineDurableObject {
     const modelId =
       settings?.titleGenerationModelId?.trim() || input.chatModelId || getDefaultModelId(this.env);
     let title = summarizeThreadTitle(input.promptText);
+
+    // Disable thinking/reasoning for title generation on reasoning_content
+    // models so the response includes usable message.content.
+    const modelInterleavedField = settings?.titleGenerationModelId?.trim()
+      ? settings.titleGenerationModelInterleavedField
+      : input.chatModelInterleavedField;
+    const modelOptions = getTitleGenerationModelOptions(modelInterleavedField);
 
     try {
       const response = await fetch(
@@ -1573,8 +1589,9 @@ export class SyncEngineDurableObject {
           body: JSON.stringify({
             model: modelId,
             stream: false,
-            max_tokens: 24,
+            max_tokens: 64,
             temperature: 0.2,
+            ...modelOptions,
             messages: [
               {
                 role: "system",
@@ -1593,7 +1610,23 @@ export class SyncEngineDurableObject {
         const generated = data?.choices?.[0]?.message?.content;
         if (typeof generated === "string") {
           title = sanitizeGeneratedTitle(generated) ?? title;
+        } else {
+          syncLog("title_generation_no_content", {
+            threadId: input.threadId,
+            modelId,
+            hasChoices: Array.isArray(data?.choices),
+            hasMessage: data?.choices?.[0]?.message != null,
+            hasReasoningContent: typeof data?.choices?.[0]?.message?.reasoning_content === "string",
+          });
         }
+      } else {
+        const errorBody = await response.text().catch(() => "(read failed)");
+        syncLog("title_generation_http_error", {
+          threadId: input.threadId,
+          modelId,
+          status: response.status,
+          bodyPreview: errorBody.slice(0, 400),
+        });
       }
     } catch (error) {
       syncLog("title_generation_failed", {
@@ -1721,6 +1754,7 @@ export class SyncEngineDurableObject {
       expandReasoningByDefault: row.expandReasoningByDefault ?? false,
       showTraces: row.showTraces ?? false,
       titleGenerationModelId: row.titleGenerationModelId ?? null,
+      titleGenerationModelInterleavedField: row.titleGenerationModelInterleavedField ?? null,
       optimistic: false,
       opId,
       updatedAt: row.updatedAt || nowIso(),

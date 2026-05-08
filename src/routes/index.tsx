@@ -2679,7 +2679,11 @@ export default function Home() {
   };
 
   const handleTitleGenerationModelChange = (modelId: string | null) => {
-    updateAccountSettings({ titleGenerationModelId: modelId });
+    const model = modelId ? (models()?.models ?? []).find((item) => item.id === modelId) : null;
+    updateAccountSettings({
+      titleGenerationModelId: modelId,
+      titleGenerationModelInterleavedField: model?.interleaved?.field?.trim() || null,
+    });
   };
 
   const handleModelChange = (modelId: string) => {
